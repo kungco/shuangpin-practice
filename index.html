@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>双拼练习 · 小鹤双拼</title>
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============ 顶栏 ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">拼</div>
+      <div class="brand-text">
+        <strong>双拼练习</strong>
+        <span id="brandScheme">小鹤双拼</span>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button class="nav-btn is-active" data-view="practice">练习</button>
+      <button class="nav-btn" data-view="keymap">键位图</button>
+      <button class="nav-btn" data-view="stats">统计</button>
+      <button class="nav-btn" data-view="review">错题复习</button>
+      <button class="nav-btn" data-view="settings">设置</button>
+    </nav>
+
+    <div class="topbar-right">
+      <span class="local-badge" title="所有数据仅保存在本机浏览器中">离线 · 本地存储</span>
+    </div>
+  </header>
+
+  <!-- ============ 主区域 ============ -->
+  <main class="main">
+
+    <!-- ---------- 视图：练习 ---------- -->
+    <section class="view is-active" id="view-practice">
+
+      <!-- 模式选择面板 -->
+      <div class="panel setup-panel" id="setupPanel">
+        <h2 class="panel-title">选择练习模式</h2>
+        <p class="panel-sub">由易到难，建议先熟悉键位，再练拆分，最后上速度。</p>
+
+        <div class="mode-grid" id="modeGrid"></div>
+
+        <div class="setup-row">
+          <label class="field">
+            <span>练习时长</span>
+            <select id="selDuration">
+              <option value="0">不限时（做完为止）</option>
+              <option value="60">1 分钟</option>
+              <option value="120">2 分钟</option>
+              <option value="180" selected>3 分钟</option>
+              <option value="300">5 分钟</option>
+              <option value="600">10 分钟</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>题目数量</span>
+            <select id="selCount">
+              <option value="0">不限量</option>
+              <option value="10">10 题</option>
+              <option value="20" selected>20 题</option>
+              <option value="30">30 题</option>
+              <option value="50">50 题</option>
+              <option value="100">100 题</option>
+            </select>
+          </label>
+
+          <label class="field field-check">
+            <span>选项</span>
+            <label class="checkbox">
+              <input type="checkbox" id="chkWeakBoost" />
+              <i></i>侧重易错内容
+            </label>
+          </label>
+        </div>
+
+        <div class="setup-foot">
+          <div class="resume-hint" id="resumeHint" hidden>
+            <span id="resumeText"></span>
+            <button class="btn btn-ghost btn-sm" id="btnResume">继续上次</button>
+            <button class="btn btn-ghost btn-sm" id="btnDropResume">放弃</button>
+          </div>
+          <button class="btn btn-primary btn-lg" id="btnStart">开始练习</button>
+        </div>
+      </div>
+
+      <!-- 练习面板 -->
+      <div class="panel session-panel" id="sessionPanel" hidden>
+
+        <!-- 顶部实时数据 -->
+        <div class="hud">
+          <div class="hud-item">
+            <span class="hud-label">速度</span>
+            <span class="hud-value"><b id="hudSpeed">0</b><i>字/分</i></span>
+          </div>
+          <div class="hud-item">
+            <span class="hud-label">正确率</span>
+            <span class="hud-value"><b id="hudAcc">100</b><i>%</i></span>
+          </div>
+          <div class="hud-item">
+            <span class="hud-label">用时</span>
+            <span class="hud-value"><b id="hudTime">00:00</b></span>
+          </div>
+          <div class="hud-item">
+            <span class="hud-label">进度</span>
+            <span class="hud-value"><b id="hudProgress">0/0</b></span>
+          </div>
+          <div class="hud-item hud-item-wide">
+            <span class="hud-label">本次连击 / 最长</span>
+            <span class="hud-value"><b id="hudCombo">0</b><i>/</i><b id="hudMaxCombo">0</b></span>
+          </div>
+          <div class="hud-actions">
+            <button class="btn btn-ghost btn-sm" id="btnPause">暂停</button>
+            <button class="btn btn-ghost btn-sm" id="btnQuit">结束</button>
+          </div>
+        </div>
+
+        <div class="timebar" id="timebar"><div class="timebar-fill" id="timebarFill"></div></div>
+
+        <!-- 中央题目区 -->
+        <div class="stage" id="stage">
+
+          <div class="stage-head">
+            <span class="stage-mode" id="stageMode">键位熟悉</span>
+            <span class="stage-tip" id="stageTip"></span>
+            <span class="hint-flag" id="hintFlag" hidden>
+              <span class="hint-flag-dot"></span><span id="hintFlagText">提示中</span>
+            </span>
+          </div>
+
+          <!-- 字词行 -->
+          <div class="prompt" id="prompt"></div>
+
+          <!-- 拆分与键位输出 -->
+          <div class="decode" id="decode">
+            <div class="decode-empty" id="decodeEmpty">按下第一个键开始</div>
+          </div>
+
+          <!-- 卡住提示条 -->
+          <div class="hintbar" id="hintBar" hidden>
+            <span class="hintbar-icon">💡</span>
+            <span class="hintbar-text" id="hintBarText"></span>
+            <button class="btn btn-ghost btn-sm" id="btnHintNow">看提示（Tab）</button>
+          </div>
+
+          <!-- 错误提示 -->
+          <div class="feedback" id="feedback" hidden></div>
+        </div>
+
+        <!-- 底部：迷你键位图 -->
+        <div class="mini-keymap-wrap">
+          <div class="mini-keymap-head">
+            <span>键位提示</span>
+            <span class="mini-keymap-note" id="miniKeymapNote"></span>
+            <button class="btn btn-ghost btn-sm" id="btnToggleKeymap">隐藏</button>
+          </div>
+          <div class="mini-keymap" id="miniKeymap"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 视图：键位图 ---------- -->
+    <section class="view" id="view-keymap">
+      <div class="panel">
+        <h2 class="panel-title">小鹤双拼 · 键位图</h2>
+        <p class="panel-sub">
+          点击任意键可查看详细拆分说明。键面左侧为声母、右侧为韵母；<code>零声母</code>音节用首字母 + 韵母键。
+        </p>
+        <div class="full-keymap" id="fullKeymap"></div>
+
+        <div class="keymap-legend">
+          <div><i class="dot dot-sheng"></i>声母</div>
+          <div><i class="dot dot-yun"></i>韵母</div>
+          <div><i class="dot dot-zero"></i>零声母（用首字母）</div>
+        </div>
+
+        <div class="keydetail" id="keyDetail" hidden></div>
+
+        <h3 class="sub-title">全部音节拆分对照</h3>
+        <div class="syllable-tools">
+          <input type="search" id="sylSearch" placeholder="搜索拼音，如 zhang / shuang / an" autocomplete="off" />
+          <div class="chips" id="sylFilterChips">
+            <button class="chip is-active" data-filter="all">全部</button>
+            <button class="chip" data-filter="sheng">有首声母</button>
+            <button class="chip" data-filter="zero">零声母</button>
+          </div>
+        </div>
+        <div class="syl-list" id="sylList"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 视图：统计 ---------- -->
+    <section class="view" id="view-stats">
+      <div class="panel">
+        <h2 class="panel-title">练习统计</h2>
+        <div class="stat-cards" id="statCards"></div>
+
+        <h3 class="sub-title">历史成绩曲线</h3>
+        <div class="chart-tools">
+          <div class="chips" id="chartMetricChips">
+            <button class="chip is-active" data-metric="speed">速度（字/分）</button>
+            <button class="chip" data-metric="acc">正确率（%）</button>
+          </div>
+          <div class="chips" id="chartRangeChips">
+            <button class="chip is-active" data-range="20">最近 20 次</button>
+            <button class="chip" data-range="50">最近 50 次</button>
+            <button class="chip" data-range="all">全部</button>
+          </div>
+        </div>
+        <div class="chart-wrap"><canvas id="historyChart" width="920" height="260"></canvas></div>
+
+        <h3 class="sub-title">每日练习量</h3>
+        <div class="chart-wrap"><canvas id="dailyChart" width="920" height="200"></canvas></div>
+
+        <h3 class="sub-title">错误热力图</h3>
+        <p class="panel-sub" style="margin-top:-6px">
+          颜色越深表示该键被按错（即「想不起来」）的次数越多。数字为累计次数。
+          与「易错字词表」互补：字词表看「哪些字不会」，热力图看「哪些键不熟」。
+        </p>
+        <div class="chart-tools">
+          <div class="chips" id="heatRangeChips">
+            <button class="chip is-active" data-range="all">全部历史</button>
+            <button class="chip" data-range="30">最近 30 次</button>
+            <button class="chip" data-range="10">最近 10 次</button>
+          </div>
+          <span class="heat-summary" id="heatSummary"></span>
+        </div>
+        <div class="heat-wrap" id="heatWrap"></div>
+        <div class="keymap-legend heat-legend">
+          <div><i class="dot heat-dot-0"></i>无错误</div>
+          <div><i class="dot heat-dot-1"></i>偶尔</div>
+          <div><i class="dot heat-dot-2"></i>偏多</div>
+          <div><i class="dot heat-dot-3"></i>较多</div>
+          <div><i class="dot heat-dot-4"></i>最集中</div>
+        </div>
+        <div class="heat-top" id="heatTop"></div>
+
+        <h3 class="sub-title">易错字词 TOP</h3>
+        <div class="weak-table-wrap" id="weakTableWrap"></div>
+
+        <div class="danger-zone">
+          <button class="btn btn-ghost btn-sm" id="btnExport">导出数据</button>
+          <button class="btn btn-danger btn-sm" id="btnClearStats">清空全部记录</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 视图：错题复习 ---------- -->
+    <section class="view" id="view-review">
+      <div class="panel">
+        <h2 class="panel-title">针对性强化复习</h2>
+        <p class="panel-sub" id="reviewSub">根据你的历史错误自动生成。</p>
+
+        <div id="reviewBody"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 视图：设置 ---------- -->
+    <section class="view" id="view-settings">
+      <div class="panel">
+        <h2 class="panel-title">设置</h2>
+
+        <h3 class="sub-title">默认偏好</h3>
+        <div class="settings-grid">
+          <label class="field">
+            <span>双拼方案</span>
+            <select id="selScheme">
+              <option value="xiaohe" selected>小鹤双拼（内置）</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>默认时长</span>
+            <select id="setDuration"></select>
+          </label>
+          <label class="field">
+            <span>默认题量</span>
+            <select id="setCount"></select>
+          </label>
+        </div>
+
+        <div class="settings-toggles">
+          <label class="checkbox"><input type="checkbox" id="setMiniKeymap" checked /><i></i>练习时显示迷你键位图</label>
+          <label class="checkbox"><input type="checkbox" id="setSound" /><i></i>按键音效</label>
+          <label class="checkbox"><input type="checkbox" id="setStrict" checked /><i></i>严格模式（输错必须修正当前键）</label>
+          <label class="checkbox"><input type="checkbox" id="setSkipPunct" checked /><i></i>短文跟打时自动跳过标点</label>
+          <label class="checkbox"><input type="checkbox" id="setHint" checked /><i></i>卡住时自动提示（在键位图上闪烁该键）</label>
+        </div>
+
+        <h3 class="sub-title">提示节奏</h3>
+        <p class="panel-sub" style="margin-top:-6px">
+          练速度时可以把两级都关掉；练记忆时建议保留。
+          <strong>依赖提示打出的字不计入「独立正确率」</strong>，所以不用担心被提示刷高分数。
+        </p>
+        <div class="settings-grid">
+          <label class="field">
+            <span>停留多久开始闪键位</span>
+            <select id="setHintDelay">
+              <option value="1500">1.5 秒</option>
+              <option value="2500">2.5 秒</option>
+              <option value="3000" selected>3 秒（默认）</option>
+              <option value="5000">5 秒</option>
+              <option value="0">不闪键位</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>停留多久直接给答案</span>
+            <select id="setRevealDelay">
+              <option value="0">不自动给答案</option>
+              <option value="6000" selected>6 秒（默认）</option>
+              <option value="8000">8 秒</option>
+              <option value="12000">12 秒</option>
+            </select>
+          </label>
+        </div>
+        <p class="footnote" style="margin-top:2px">
+          练习中随时可按 <code>Tab</code> 立刻查看当前键的答案，按 <code>Backspace</code> 可跳过这个字。
+        </p>
+
+        <h3 class="sub-title">数据管理</h3>
+        <div class="danger-zone">
+          <button class="btn btn-ghost btn-sm" id="btnExport2">导出数据</button>
+          <label class="btn btn-ghost btn-sm">
+            导入数据<input type="file" id="fileImport" accept=".json,application/json" hidden />
+          </label>
+          <button class="btn btn-danger btn-sm" id="btnResetSettings">恢复默认设置</button>
+        </div>
+
+        <p class="footnote">
+          所有数据保存在浏览器 localStorage 中，不会上传到任何服务器。清除浏览器数据会导致记录丢失，建议定期导出备份。
+        </p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ============ 结果弹窗 ============ -->
+  <div class="overlay" id="overlay" hidden>
+    <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <!-- ============ 全局提示 ============ -->
+  <div class="toast-wrap" id="toastWrap"></div>
+
+  <!-- 隐藏输入：用于移动端唤起键盘 / 统一按键来源 -->
+  <input id="hiddenInput" class="hidden-input" autocomplete="off" autocorrect="off"
+         autocapitalize="off" spellcheck="false" aria-label="打字输入" />
+
+</div>
+
+  <!-- 应用主模块。必须在 <body> 末尾以 module 方式加载。 -->
+  <script type="module" src="src/main.js"></script>
+
+  <noscript>
+    <p style="padding:24px;font-family:sans-serif">本应用需要启用 JavaScript 才能运行。</p>
+  </noscript>
+
+  <!-- 离线打开（file:// 协议）时的提示：浏览器会因 CORS 策略拦截 ES 模块 -->
+
+  <script>
+    /* 检测是否以 file:// 打开。此时浏览器会阻止 ES 模块加载（CORS），
+       页面会停在骨架状态。这里提前给出可操作的提示，而不是让用户面对白屏。 */
+    (function () {
+      try {
+        if (location.protocol !== 'file:') return;
+        // 页面已正常渲染则说明模块其实加载成功了（某些浏览器放宽了限制）
+        setTimeout(function () {
+          var nav = document.getElementById('nav');
+          if (nav && nav.children.length > 0) return;
+          var tip = document.createElement('div');
+          tip.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;' +
+            'justify-content:center;background:#f5f7fb;font-family:system-ui,"Microsoft YaHei",sans-serif;padding:24px';
+          tip.innerHTML =
+            '<div style="max-width:520px;background:#fff;border:1px solid #e3e8f0;border-radius:14px;' +
+            'padding:26px 28px;line-height:1.75;color:#1f2733;box-shadow:0 8px 30px rgba(20,30,60,.08)">' +
+            '<div style="font-size:19px;font-weight:700;margin-bottom:10px">需要通过本地服务器打开</div>' +
+            '<div style="color:#5b6675;font-size:14px">浏览器出于安全策略，禁止在 <code>file://</code> 协议下' +
+            '加载 ES 模块，因此本应用无法直接双击打开。</div>' +
+            '<div style="margin:18px 0 10px;font-weight:600;font-size:14px">任选一种方式：</div>' +
+            '<div style="color:#5b6675;font-size:14px">' +
+            '① 双击桌面的「双拼练习」快捷方式（已配置为自动启动本地服务）<br>' +
+            '② 在本目录执行 <code>python -m http.server 8781</code>，再访问 ' +
+            '<code>http://127.0.0.1:8781/</code><br>' +
+            '③ 使用 VS Code 的 Live Server 插件打开本文件' +
+            '</div></div>';
+          document.body.appendChild(tip);
+        }, 700);
+      } catch (e) { /* 忽略 */ }
+    })();
+  </script>
+</body>
+</html>
