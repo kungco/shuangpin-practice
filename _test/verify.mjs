@@ -4,7 +4,9 @@
  */
 import { splitSyllable, getKeymapData, ALL_KEYS, isKeyCorrect, buildSyllables } from '../src/core/scheme.js';
 import { ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS } from '../src/data/pinyin.js';
-import { generateQuestions, generateReviewQuestions, isPunct } from '../src/core/questions.js';
+import { generateQuestions, generateReviewQuestions, isPunct,
+         LEVELS, LEVEL_MAP, defaultCountFor } from '../src/core/questions.js';
+import { scoreExam, gradeOf, SCORE_CONFIG } from '../src/core/score.js';
 
 let fail = 0;
 const ok = (cond, msg) => {
@@ -162,8 +164,8 @@ ok(isKeyCorrect(syl, 1, 'x') === false, 'zhang 第 2 键 x 应判错');
 ok(isKeyCorrect(syl, 0, 'V') === true, '大写 V 应被接受');
 console.log(`  zhang 两键 V/H 校验通过`);
 
-console.log('【7】七级题目生成');
-for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passage']) {
+console.log('【7】全部模式题目生成');
+for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passage', 'exam']) {
   const qs = generateQuestions({ mode, count: mode === 'passage' ? 2 : 10 });
   ok(qs.length > 0, `${mode} 生成 0 题`);
   qs.forEach(q => {
@@ -227,6 +229,189 @@ ok(empty.length === 20, `count=0 应回退到 20 题，实际 ${empty.length}`);
 const neg = generateQuestions({ mode: 'char', count: -5 });
 ok(neg.length === 20, `负数 count 应回退，实际 ${neg.length}`);
 console.log(`  空值 / 非法输入 / 异常参数均被安全处理`);
+
+/* ============================================================
+   测验模式（exam）：出题与评分
+   ============================================================ */
+console.log('【11】能力测验出题');
+
+{
+  const LEVEL_EXAM = LEVELS.find(l => l.id === 'exam');
+  ok(!!LEVEL_EXAM, 'LEVELS 中定义了 exam 模式');
+  ok(LEVEL_MAP.exam && LEVEL_MAP.exam.name === '能力测验', 'LEVEL_MAP.exam 名称正确');
+  ok(defaultCountFor('exam') === 50, `exam 默认题量应为 50，实际 ${defaultCountFor('exam')}`);
+
+  // 混合比例：3:4:3，且在任何题量下都稳定
+  for (const n of [10, 20, 50, 100]) {
+    const qs = generateQuestions({ mode: 'exam', count: n });
+    ok(qs.length === n, `exam count=${n} 应生成 ${n} 题，实际 ${qs.length}`);
+
+    const tally = { split: 0, char: 0, phrase: 0 };
+    for (const q of qs) {
+      const part = q.meta && q.meta.examPart;
+      ok(!!part, `exam 每题都应带 meta.examPart（题 ${q.id} 缺失）`);
+      if (part in tally) tally[part] += 1;
+    }
+    // 三类都必须出现（题量 ≥10 时）
+    ok(tally.split > 0 && tally.char > 0 && tally.phrase > 0,
+      `count=${n} 三类题型齐全（拆分 ${tally.split} / 单字 ${tally.char} / 词组 ${tally.phrase}）`);
+    // 单字占比应最高（权重 4）
+    ok(tally.char >= tally.split && tally.char >= tally.phrase,
+      `count=${n} 单字题占比最高（${tally.char}）`);
+  }
+
+  // 测验的每道题都必须可作答（没有无法拆分的字符）
+  const examQs = generateQuestions({ mode: 'exam', count: 60 });
+  let unsplittable = 0;
+  let noChars = 0;
+  for (const q of examQs) {
+    if (!Array.isArray(q.chars) || !q.chars.length) { noChars += 1; continue; }
+    for (const c of q.chars) {
+      if (c.punct) continue;
+      if (!c.syl) unsplittable += 1;
+    }
+  }
+  ok(noChars === 0, `exam 无空题（实际 ${noChars} 题无字符）`);
+  ok(unsplittable === 0, `exam 全部字符可拆分（实际 ${unsplittable} 个不可拆分）`);
+
+  // 单字题只能来自高频 / 常用档（保证「会打，只是看速度」）
+  const charParts = examQs.filter(q => q.meta && q.meta.examPart === 'char');
+  const badTier = charParts.filter(q => {
+    const n = q.meta && q.meta.tierName;
+    return n && n !== '高频字' && n !== '常用字';
+  });
+  ok(badTier.length === 0,
+    `exam 单字题只取高频/常用档（越档 ${badTier.length} 题：${badTier.slice(0, 3).map(q => q.meta.tierName).join('/')}）`);
+
+  console.log(`  混合比例稳定在 3:4:3（拆分/单字/词组），60 题中单字 ${charParts.length} 题`);
+}
+
+console.log('【12】测验评分算法');
+
+{
+  // 满分场景：全对、够快、打完、样本充足
+  const perfect = scoreExam({
+    independentAccuracy: 100, accuracy: 100, speed: 150,
+    correctChars: 120, wrongChars: 0, totalChars: 120, hintedChars: 0,
+    doneQuestions: 50, questionCount: 50, completed: true, durationSec: 60
+  });
+  ok(perfect.score >= 99, `全对且超速应接近满分，实际 ${perfect.score}`);
+  ok(perfect.grade === '卓越', `全对应评「卓越」，实际「${perfect.grade}」`);
+  ok(perfect.valid === true, '无提示时分数应标记为有效');
+
+  // 及格线场景：正确率 80、速度达标、打完
+  const decent = scoreExam({
+    independentAccuracy: 80, accuracy: 80, speed: 80,
+    correctChars: 96, wrongChars: 24, totalChars: 120, hintedChars: 0,
+    doneQuestions: 50, questionCount: 50, completed: true, durationSec: 90
+  });
+  ok(decent.score > 55 && decent.score < 95,
+    `中等表现应落在及格到良好之间，实际 ${decent.score}`);
+
+  // 全错：分数必须以正确率为主，跌到很低
+  const allWrong = scoreExam({
+    independentAccuracy: 0, accuracy: 0, speed: 200,
+    correctChars: 0, wrongChars: 50, totalChars: 50, hintedChars: 0,
+    doneQuestions: 50, questionCount: 50, completed: true, durationSec: 30
+  });
+  ok(allWrong.score < 20, `全错即使超快也应低分，实际 ${allWrong.score}`);
+
+  /* 关键不变式：打得快不能弥补打错。
+     同样正确率下，速度更快分应更高；但「正确率 0 + 超快」必须低于
+     「正确率 100 + 很慢」。否则用户会狂按乱打刷分。 */
+  const slowPerfect = scoreExam({
+    independentAccuracy: 100, accuracy: 100, speed: 30,
+    correctChars: 50, wrongChars: 0, totalChars: 50, hintedChars: 0,
+    doneQuestions: 50, questionCount: 50, completed: true, durationSec: 100
+  });
+  ok(slowPerfect.score > allWrong.score,
+    `准确优先：慢而全对（${slowPerfect.score}）必须高于快而全错（${allWrong.score}）`);
+
+  // 提示介入 → 分数标记无效，并给出警告
+  const hinted = scoreExam({
+    independentAccuracy: 100, accuracy: 100, speed: 100,
+    correctChars: 50, wrongChars: 0, totalChars: 50, hintedChars: 5,
+    doneQuestions: 50, questionCount: 50, completed: true, durationSec: 40
+  });
+  ok(hinted.valid === false, '有提示介入时分数应标记为无效');
+  ok(hinted.warnings.some(w => /提示/.test(w)), '有提示时应给出警告文案');
+
+  // 样本量不足 → 向及格基准回退，且给出警告
+  const tiny = scoreExam({
+    independentAccuracy: 100, accuracy: 100, speed: 120,
+    correctChars: 3, wrongChars: 0, totalChars: 3, hintedChars: 0,
+    doneQuestions: 3, questionCount: 50, completed: false, durationSec: 5
+  });
+  ok(tiny.score < 95, `只打 3 个字不该拿高分，实际 ${tiny.score}`);
+  ok(tiny.warnings.some(w => /样本/.test(w)), '样本不足时应给出警告');
+
+  // 未完成按完成度扣分：同样的正确率与速度，打完 > 打一半
+  const base = {
+    independentAccuracy: 95, accuracy: 95, speed: 90,
+    correctChars: 100, wrongChars: 5, totalChars: 105, hintedChars: 0,
+    durationSec: 80, completed: true
+  };
+  const full = scoreExam(Object.assign({}, base, { doneQuestions: 50, questionCount: 50 }));
+  const half = scoreExam(Object.assign({}, base, { doneQuestions: 25, questionCount: 50, completed: false }));
+  ok(full.score > half.score,
+    `完成度应影响分数：打完（${full.score}）> 一半（${half.score}）`);
+
+  // 不限题量（questionCount=0）不应被判为未完成
+  const noLimit = scoreExam({
+    independentAccuracy: 100, accuracy: 100, speed: 120,
+    correctChars: 40, wrongChars: 0, totalChars: 40, hintedChars: 0,
+    doneQuestions: 20, questionCount: 0, completed: false, durationSec: 30
+  });
+  ok(noLimit.parts.completion === 100,
+    `questionCount=0（不限量）完成度应为 100%，实际 ${noLimit.parts.completion}%`);
+
+  // 健壮性：空参数 / null / 垃圾值都不能抛
+  let threw = false;
+  try {
+    const r1 = scoreExam(null);
+    const r2 = scoreExam({});
+    const r3 = scoreExam({ independentAccuracy: NaN, speed: 'abc', totalChars: undefined });
+    ok(r1.score >= 0 && r1.score <= 100, 'scoreExam(null) 返回合法分数');
+    ok(r2.score >= 0 && r2.score <= 100, 'scoreExam({}) 返回合法分数');
+    ok(r3.score >= 0 && r3.score <= 100, 'scoreExam(垃圾值) 返回合法分数');
+  } catch (e) {
+    threw = true;
+  }
+  ok(!threw, 'scoreExam 对异常输入不应抛错');
+
+  // 分数恒在 0–100
+  const samples = [];
+  for (let acc = 0; acc <= 100; acc += 10) {
+    for (let spd = 0; spd <= 200; spd += 40) {
+      samples.push(scoreExam({
+        independentAccuracy: acc, accuracy: acc, speed: spd,
+        correctChars: 100, wrongChars: 20, totalChars: 120, hintedChars: 0,
+        doneQuestions: 50, questionCount: 50, completed: true, durationSec: 90
+      }).score);
+    }
+  }
+  ok(samples.every(s => s >= 0 && s <= 100),
+    `所有组合的分数都在 0–100（${samples.length} 组）`);
+
+  // 单调性：正确率越高分越高
+  const accScores = [40, 60, 80, 95, 100].map(acc => scoreExam({
+    independentAccuracy: acc, accuracy: acc, speed: 80,
+    correctChars: 100, wrongChars: 10, totalChars: 110, hintedChars: 0,
+    doneQuestions: 50, questionCount: 50, completed: true, durationSec: 80
+  }).score);
+  let monotone = true;
+  for (let i = 1; i < accScores.length; i++) if (accScores[i] < accScores[i - 1]) monotone = false;
+  ok(monotone, `分数随正确率单调递增（${accScores.join(' → ')}）`);
+
+  // 等级映射
+  ok(gradeOf(100).badge === 'S', '100 分应为 S 级');
+  ok(gradeOf(85).badge === 'A', '85 分应为 A 级');
+  ok(gradeOf(70).badge === 'B', '70 分应为 B 级');
+  ok(gradeOf(55).badge === 'C', '55 分应为 C 级');
+  ok(gradeOf(0).badge === 'E', '0 分应为 E 级');
+
+  console.log(`  满分 ${perfect.score}(${perfect.grade}) / 中等 ${decent.score}(${decent.grade}) / 全错 ${allWrong.score}(${allWrong.grade})`);
+}
 
 console.log('\n' + (fail === 0
   ? '✅ 全部自检通过'

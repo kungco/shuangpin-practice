@@ -4,6 +4,11 @@
 # 测试依赖（linkedom 等，属于开发期工具，体积大且可重装）
 _test/node_modules/
 
+# 视觉验证时 headless Chrome 的临时配置目录
+_test/.chrome-profile/
+_test/shot-*.png
+_test/inj-*.js
+
 # 系统与编辑器
 .DS_Store
 Thumbs.db

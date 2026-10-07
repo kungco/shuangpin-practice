@@ -295,13 +295,14 @@ const qa = (s) => Array.from(document.querySelectorAll(s));
 ok(!!q('#nav'), '导航栏存在');
 ok(qa('#nav .nav-btn').length === 6, `导航按钮 6 个（实际 ${qa('#nav .nav-btn').length}）`);
 
-ok(qa('#modeGrid .mode-card').length === 7, `模式卡片 7 个（实际 ${qa('#modeGrid .mode-card').length}）`);
+ok(qa('#modeGrid .mode-card').length === 8, `模式卡片 8 个（实际 ${qa('#modeGrid .mode-card').length}）`);
 
 // 新增的拆分成分练习模式必须出现在选择面板上
 {
   const ids = qa('#modeGrid .mode-card').map(c => c.getAttribute('data-mode'));
   ok(ids.includes('sheng'), '模式列表含「只听声母」(sheng)');
   ok(ids.includes('yun'), '模式列表含「只听韵母」(yun)');
+  ok(ids.includes('exam'), '模式列表含「能力测验」(exam)');
   // 老模式的 L2 tip 里「zh/ch/sh 需按 3 个键」是错误说法，必须已修正
   const splitCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'split');
   ok(!!splitCard, '拆分模式卡片存在');
@@ -620,6 +621,115 @@ for (const v of ['why', 'keymap', 'stats', 'review', 'settings', 'practice']) {
   }
 }
 
+/* ---------- 能力测验（无提示 + 评分）端到端 ----------
+   测验模式的「无提示」是在引擎层硬关的，UI 上还额外藏掉迷你键位图、
+   提示条与提示标记。这里从**用户路径**出发验证这条链路真的接通了：
+   点卡片 → 引擎 examMode 为真 → 提示设施被隐藏 → 交卷出分数卡。
+   单元测试只能证明引擎不开提示，证明不了「面板没藏起来」，
+   所以这一节是必要的。 */
+console.log('\n【10e】能力测验：无提示 + 评分');
+{
+  // 复位到设置面板
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  if (!q('#overlay').hidden) {
+    const b = qa('#modal [data-act]')[0];
+    if (b) fire(b, 'click');
+  }
+  q('#sessionPanel').hidden = true;
+  q('#setupPanel').hidden = false;
+
+  // 点「能力测验」卡片
+  const examCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'exam');
+  ok(!!examCard, '存在「能力测验」卡片');
+  fire(examCard, 'click');
+  await new Promise(r => setTimeout(r, 20));
+  ok(app.sessionMode === 'exam', `模式切到 exam（实际 ${app.sessionMode}）`);
+
+  // 卡片被选中即应弹出说明条
+  const note = q('#examNote');
+  ok(!!note, '存在测验说明条 #examNote');
+  ok(note && note.hidden === false, '选中测验模式后说明条可见');
+
+  // 默认题量应被建议为 50
+  ok(q('#selCount').value === '50', `测验默认题量建议 50（实际 ${q('#selCount').value}）`);
+
+  // 开跑
+  fire(q('#btnStart'), 'click');
+  await new Promise(r => setTimeout(r, 40));
+  const eng = app.engine;
+  ok(!!eng, '测验引擎已创建');
+  ok(eng.examMode === true, '引擎进入考试模式');
+  ok(eng.hintEnabled === false, '考试模式下 hintEnabled 已被强制关闭');
+  ok(eng.hintDelayMs === 0 && eng.revealDelayMs === 0, '考试模式提示延时被归零');
+  ok(eng.state === 'running', '测验运行中');
+
+  const examPanel = q('#sessionPanel');
+  ok(examPanel.classList.contains('is-exam'), '练习面板带 is-exam 类（用于隐藏提示设施）');
+
+  // 顶部应有「测验中 · 无提示」标记
+  ok(!!q('#examFlag'), '顶部渲染了测验标记 #examFlag');
+  ok(/无提示/.test(q('#examFlag') ? q('#examFlag').textContent : ''), '测验标记文案点明「无提示」');
+
+  // 手动求助必须被拒（并且不改变提示态）
+  ok(eng.requestHint('reveal') === false, '测验模式手动求助被拒绝');
+  ok(eng.hintLevel() === '', '测验模式求助后仍无提示态');
+
+  // 迷你键位图不应可见（main.js 用 hidden 属性隐藏整个外层容器）
+  const miniWrap = q('.mini-keymap-wrap');
+  const miniVisible = !!(miniWrap && !miniWrap.hasAttribute('hidden') && miniWrap.hidden !== true);
+  ok(!miniVisible, '测验模式隐藏迷你键位图');
+
+  // 停一会，确认不会自己冒提示出来
+  const hintEvents = [];
+  eng.on('hint', x => hintEvents.push(x));
+  eng.on('reveal', x => hintEvents.push(x));
+  await new Promise(r => setTimeout(r, 260));
+  ok(hintEvents.length === 0, `测验模式停留不产生任何提示（${hintEvents.length} 次）`);
+
+  // 打完这一卷（全部打对）
+  let g = 0;
+  while (app.engine && app.engine.state === 'running' && g < 40000) {
+    g++;
+    const t = app.engine.currentTarget();
+    if (!t) break;
+    if (t.kind === 'skip' || t.kind === 'punct') { app.engine.pressKey('a'); continue; }
+    const k = (t.keys || [])[t.pos];
+    if (!k) break;
+    app.engine.pressKey(k.toLowerCase());
+    await new Promise(r => setTimeout(r, 2));
+  }
+  const sm = app.engine ? app.engine.summary() : null;
+  ok(sm && sm.state === 'finished', `测验完成（${sm ? sm.totalChars : 0} 题，${sm ? sm.accuracy : 0}%）`);
+  ok(sm && sm.hintedChars === 0, `测验全程 0 次提示（实际 ${sm && sm.hintedChars}）`);
+  ok(sm && sm.independentAccuracy === sm.accuracy,
+    `测验无提示时独立正确率 = 表面正确率（${sm && sm.independentAccuracy} / ${sm && sm.accuracy}）`);
+  // 评分对象由 main.js 在落库时算出（挂在 app.lastResult 上），
+  // 而不是引擎 summary() 自带 —— summary() 保持纯函数语义。
+  const lr = app.lastResult;
+  ok(!!lr && !!lr.score && typeof lr.score.score === 'number', '落库时算出评分对象');
+  if (lr && lr.score) {
+    ok(lr.score.score >= 0 && lr.score.score <= 100, `综合分落在 0–100（${lr.score.score}）`);
+    ok(typeof lr.score.grade === 'string' && lr.score.grade.length > 0,
+      `评分带等级（${lr.score.grade}）`);
+    ok(/^[SABCDE]$/.test(String(lr.score.badge)), `评分带等级徽章（${lr.score.badge}）`);
+    ok(lr.summary.mode === 'exam' || lr.summary.examMode === true, '评分对象对应测验模式');
+  }
+  // 结果弹窗应渲染分数卡
+  ok(!q('#overlay').hidden, '交卷后结果弹窗打开');
+  const modalHtml = q('#modal').innerHTML;
+  ok(modalHtml.includes('score-card'), '结果弹窗含分数卡 .score-card');
+  ok(/综合分|得分/.test(modalHtml), '结果弹窗标注了综合分');
+  ok(/独立正确率/.test(modalHtml), '测验结果口径为「独立正确率」');
+
+  // 落库历史应带分数
+  const h = sMod.loadHistory();
+  const lastRec = h[h.length - 1];
+  ok(!!lastRec && typeof lastRec.score === 'number', `历史记录带测验分数（${lastRec && lastRec.score}）`);
+  ok(!!lastRec && !!lastRec.grade, `历史记录带等级（${lastRec && lastRec.grade}）`);
+
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+}
+
 // 统计页关键元素
 const statCards = qa('#statCards .stat-card');
 ok(statCards.length === 6, `统计卡片 6 个（实际 ${statCards.length}）`);
@@ -825,8 +935,8 @@ for (const mode of ['sheng', 'yun']) {
 }
 
 /* ---------- 压力测试：各模式全流程 ---------- */
-console.log('\n【11】七种模式全流程（各跑一遍）');
-for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passage']) {
+console.log('\n【11】八种模式全流程（各跑一遍）');
+for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passage', 'exam']) {
   try {
     if (app.engine) { app.engine.destroy(); app.engine = null; }
     if (!q('#overlay').hidden) {
@@ -841,6 +951,11 @@ for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passag
     // 短文模式题量调小
     if (mode === 'passage') {
       q('#selCount').value = '1';
+      fire(q('#selCount'), 'change');
+    }
+    // 测验模式题量调小（默认 50 题，全跑太慢）
+    if (mode === 'exam') {
+      q('#selCount').value = '10';
       fire(q('#selCount'), 'change');
     }
     fire(q('#btnStart'), 'click');
@@ -858,7 +973,14 @@ for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passag
       await new Promise(r => setTimeout(r, 3));
     }
     const s = app.engine ? app.engine.summary() : null;
-    ok(s && s.state === 'finished', `${mode}: 完成（${s ? s.totalChars : 0} 字，${s ? s.accuracy : 0}%）`);
+    // 测验模式额外确认无提示且出分（分数挂在 app.lastResult 上）
+    if (mode === 'exam' && s) {
+      const sc = app.lastResult && app.lastResult.score;
+      ok(s.hintedChars === 0 && sc && sc.score >= 0,
+        `${mode}: 完成（${s.totalChars} 题，${s.accuracy}%，${sc ? sc.score : '-'} 分）`);
+    } else {
+      ok(s && s.state === 'finished', `${mode}: 完成（${s ? s.totalChars : 0} 字，${s ? s.accuracy : 0}%）`);
+    }
   } catch (e) {
     ok(false, `${mode} 流程异常：${e.message}`);
   }

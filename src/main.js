@@ -20,6 +20,7 @@ import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import * as S from './core/storage.js';
 import { summarize, historySeries, dailySeries, weakRanking, groupWeakItems,
          reviewAdvice, formatDuration, formatClock, keyHeatmap } from './core/stats.js';
+import { scoreExam, gradeTier, SCORE_CONFIG } from './core/score.js';
 import {
   getKeymapData, splitSyllable, primarySplit, highlightForSplit,
   acceptableKeys, SCHEME_META
@@ -198,12 +199,26 @@ function selectMode(mode, silent) {
     const cur = Number(selCount.value);
     if (m === 'passage' && cur > 10) selCount.value = '3';
     if (m !== 'passage' && cur > 0 && cur < 10 && cur === 3) selCount.value = '20';
+    // 测验需要足够的样本量分数才可信（见 score.js 的可信度因子），
+    // 题量过小时给一个下限建议，但不强制——用户仍可自行调小。
+    if (m === 'exam' && (cur === 0 || cur < 30)) selCount.value = '50';
     app.settings.count = Number(selCount.value) || 0;
   }
   const tip = LEVEL_MAP[m] ? LEVEL_MAP[m].tip : '';
   const stageTip = $('#stageTip');
   if (stageTip) stageTip.textContent = tip;
+  toggleExamNote(m);
   if (!silent) saveSettingsDebounced();
+}
+
+/**
+ * 测验模式的提示条：选中「能力测验」时在设置面板上给出醒目提醒
+ * （全程无提示、会给分数），避免用户以为是普通练习。
+ */
+function toggleExamNote(mode) {
+  const note = $('#examNote');
+  if (!note) return;
+  note.hidden = mode !== 'exam';
 }
 
 function updateModeCounts() {
@@ -217,6 +232,8 @@ function updateModeCounts() {
     } else if (mode === 'sheng' || mode === 'yun') {
       // 单键题，一轮可以用更少的题量就覆盖全部键位
       el.textContent = count > 0 ? `${count} 题` : '30 题';
+    } else if (mode === 'exam') {
+      el.textContent = count > 0 ? `${count} 题` : '50 题';
     } else {
       el.textContent = count > 0 ? `${count} 题` : '20 题';
     }
@@ -282,6 +299,11 @@ function startSession(questionsOverride, modeOverride) {
     // 清理旧引擎
     if (app.engine) { app.engine.destroy(); app.engine = null; }
 
+    /* 测验模式：强制无提示。
+       注意这里**不是**沿用 app.settings.hint —— 测验语义是「脱离辅助」，
+       用户即使把设置里的提示开着，测验也必须关掉（引擎侧还有 examMode 硬闸门）。 */
+    const isExam = mode === 'exam';
+
     app.engine = new PracticeEngine({
       questions,
       mode,
@@ -289,9 +311,10 @@ function startSession(questionsOverride, modeOverride) {
       durationSec,
       strict: app.settings.strict,
       skipPunct: app.settings.skipPunct,
-      hintEnabled: app.settings.hint,
-      hintDelayMs: app.settings.hintDelay,
-      revealDelayMs: app.settings.revealDelay
+      examMode: isExam,
+      hintEnabled: isExam ? false : app.settings.hint,
+      hintDelayMs: isExam ? 0 : app.settings.hintDelay,
+      revealDelayMs: isExam ? 0 : app.settings.revealDelay
     });
 
     bindEngineEvents();
@@ -384,6 +407,15 @@ function showSessionUI(show) {
   const session = $('#sessionPanel');
   if (setup) setup.hidden = !!show;
   if (session) session.hidden = !show;
+
+  /* 测验模式：隐藏一切「辅助」元素，避免暗示答案。
+     - 迷你键位图会高亮当前该按的键 → 必须隐藏
+     - 「看提示」按钮 → 隐藏
+     用 class 统一控制，样式见 .session-panel.is-exam */
+  const isExam = !!(app.engine && app.engine.examMode);
+  if (session) session.classList.toggle('is-exam', !!show && isExam);
+  // 迷你键位图同样按模式收敛（属性式隐藏，便于断言）
+  applyMiniKeymapVisibility();
 }
 
 function quitSession() {
@@ -392,13 +424,16 @@ function quitSession() {
   if (eng.state === STATE.FINISHED) { showSessionUI(false); return; }
   if (eng.state === STATE.RUNNING) eng.pause();
 
+  const isExam = !!eng.examMode;
   openModal(`
-    <h2>结束本次练习？</h2>
-    <p class="modal-sub">已完成的成绩会被记录，当前进度也可以留到下次继续。</p>
+    <h2>${isExam ? '结束本次测验？' : '结束本次练习？'}</h2>
+    <p class="modal-sub">${isExam
+      ? '测验可以不限时慢慢打，但中途结束会按「已完成部分」计算分数，未答部分会拉低完成度。'
+      : '已完成的成绩会被记录，当前进度也可以留到下次继续。'}</p>
     <div class="modal-actions">
-      <button class="btn btn-ghost" data-act="cancel">继续练习</button>
-      <button class="btn btn-ghost" data-act="save">保存进度并结束</button>
-      <button class="btn btn-primary" data-act="end">结束并查看成绩</button>
+      <button class="btn btn-ghost" data-act="cancel">${isExam ? '继续测验' : '继续练习'}</button>
+      ${isExam ? '' : '<button class="btn btn-ghost" data-act="save">保存进度并结束</button>'}
+      <button class="btn btn-primary" data-act="end">${isExam ? '交卷并查看分数' : '结束并查看成绩'}</button>
     </div>
   `, (act, close) => {
     if (act === 'cancel') {
@@ -456,6 +491,15 @@ function persistRecord(summary) {
     const s = summary || (app.engine ? app.engine.summary() : null);
     if (!s) { showSessionUI(false); showResumeHint(); return; }
 
+    /* 测验成绩：先算分，再决定是否落库。
+       分数只对 exam 模式有意义，其它模式不做评分（避免「练习也被打分」
+       造成的压力 —— 练习与考核要分开）。 */
+    const examIsMode = s.mode === 'exam' || s.examMode === true;
+    const examResult = examIsMode ? scoreExam(s) : null;
+    if (examResult) s.score = examResult;
+    // 供结果弹窗与测试读取（summary() 本身是纯函数，不携带分数）
+    app.lastResult = { summary: s, score: examResult };
+
     // 太短的练习不记录（避免无意义数据污染曲线）
     // 提示：无需等待满 3 秒才能落库。真实用户练习时计时器每 250ms 推进一次，
     // 而引擎结束时把「最后一次 tick 之后的零头」补回来，因此提前结束也能拿到
@@ -480,6 +524,12 @@ function persistRecord(summary) {
         completed: s.completed,
         questionCount: s.questionCount
       });
+      // 分数写进记录里（仅测验模式有值），这样统计页才能画「历史分数曲线」
+      if (examResult) {
+        rec.score = examResult.score;
+        rec.grade = examResult.grade;
+        rec.scoreValid = examResult.valid;
+      }
       S.appendRecord(rec);
 
       // 记录易错字词
@@ -507,19 +557,28 @@ function persistRecord(summary) {
 }
 
 function showResultModal(s, recorded) {
+  const sc = s.score || null;
+
+  // 测验模式用「分数 + 等级」做标题，练习模式沿用「正确率」评语
   const acc = s.accuracy;
-  const grade = acc >= 98 && s.speed >= 60 ? '优秀'
+  const practiceGrade = acc >= 98 && s.speed >= 60 ? '优秀'
     : acc >= 95 ? '很好'
     : acc >= 85 ? '不错'
     : acc >= 70 ? '继续加油' : '仍需熟悉键位';
 
+  const title = s.reason === 'timeup' ? '时间到' : '练习完成';
+  const headRight = sc ? `${sc.grade}` : practiceGrade;
+
   const noteParts = [];
+  if (sc && sc.warnings && sc.warnings.length) {
+    noteParts.push(...sc.warnings);
+  }
   if (!recorded) {
     noteParts.push('本次练习时间过短，未计入历史记录。');
   }
   if (s.wrongChars > 0) {
     noteParts.push(`有 ${s.wrongChars} 个字出过错，已加入易错练习，可在「错题复习」中专项突破。`);
-  } else if (recorded) {
+  } else if (recorded && !sc) {
     noteParts.push('全程没有出错的字，键位掌握得很扎实。');
   }
   if (s.maxCombo >= 30) {
@@ -529,9 +588,46 @@ function showResultModal(s, recorded) {
     noteParts.push('本次为主动结束，已完成部分已计入统计。');
   }
 
+  /* ---------- 测验：分数区块 ---------- */
+  const scoreBlock = sc ? `
+    <div class="score-card ${sc.valid ? '' : 'is-invalid'}">
+      <div class="score-main">
+        <div class="score-num">${sc.score}<i>分</i></div>
+        <div class="score-grade">
+          <span class="score-badge score-tier-${gradeTier(sc.score)}">${escapeHtml(sc.badge)}</span>
+          <span class="score-grade-name">${escapeHtml(sc.grade)}</span>
+        </div>
+      </div>
+      <p class="score-desc">${escapeHtml(sc.gradeDesc)}</p>
+      <div class="score-parts">
+        <div class="score-part">
+          <span class="score-part-label">正确率得分</span>
+          <span class="score-part-value">${sc.parts.accuracy}<i>/${SCORE_CONFIG.accuracyWeight}</i></span>
+          <span class="score-part-bar"><i style="width:${Math.round(sc.parts.accuracy / SCORE_CONFIG.accuracyWeight * 100)}%"></i></span>
+        </div>
+        <div class="score-part">
+          <span class="score-part-label">速度得分</span>
+          <span class="score-part-value">${sc.parts.speed}<i>/${SCORE_CONFIG.speedWeight}</i></span>
+          <span class="score-part-bar"><i style="width:${Math.round(sc.parts.speed / SCORE_CONFIG.speedWeight * 100)}%"></i></span>
+        </div>
+        <div class="score-part is-plain">
+          <span class="score-part-label">完成度</span>
+          <span class="score-part-value">${sc.parts.completion}<i>%</i></span>
+        </div>
+      </div>
+      <p class="score-foot">
+        计分口径：正确率 ${SCORE_CONFIG.accuracyWeight} 分（用<strong>独立正确率</strong>，提示无效）
+        + 速度 ${SCORE_CONFIG.speedWeight} 分（${SCORE_CONFIG.speedBaseline}–${SCORE_CONFIG.speedFull} 字/分线性计分）
+        → 按完成度加权。${sc.valid ? '本次测验<strong>全程无提示</strong>，分数有效。' : '本次测验<strong>有提示介入</strong>，分数仅供参考。'}
+      </p>
+    </div>
+  ` : '';
+
   openModal(`
-    <h2>${s.reason === 'timeup' ? '时间到' : '练习完成'} · ${escapeHtml(grade)}</h2>
+    <h2>${title} · ${escapeHtml(headRight)}</h2>
     <p class="modal-sub">${escapeHtml(s.modeName || '')} · 用时 ${formatClock(s.durationSec)}</p>
+
+    ${scoreBlock}
 
     <div class="result-grid">
       <div class="result-cell is-hl">
@@ -539,8 +635,8 @@ function showResultModal(s, recorded) {
         <div class="result-cell-value">${s.speed}<i>字/分</i></div>
       </div>
       <div class="result-cell is-hl">
-        <div class="result-cell-label">正确率</div>
-        <div class="result-cell-value">${s.accuracy}<i>%</i></div>
+        <div class="result-cell-label">${sc ? '独立正确率' : '正确率'}</div>
+        <div class="result-cell-value">${sc ? s.independentAccuracy : s.accuracy}<i>%</i></div>
       </div>
       <div class="result-cell">
         <div class="result-cell-label">完成字数</div>
@@ -565,7 +661,7 @@ function showResultModal(s, recorded) {
     <div class="modal-actions">
       <button class="btn btn-ghost" data-act="stats">查看统计</button>
       <button class="btn btn-ghost" data-act="review">错题复习</button>
-      <button class="btn btn-primary" data-act="again">再来一次</button>
+      <button class="btn btn-primary" data-act="again">${sc ? '再测一次' : '再来一次'}</button>
     </div>
   `, (act, close) => {
     close();
@@ -573,7 +669,6 @@ function showResultModal(s, recorded) {
     else if (act === 'review') switchView('review');
     else if (act === 'again') {
       showSessionUI(false);
-      const q = s.questions;
       startSession();
     }
   }, () => {
@@ -635,6 +730,24 @@ function renderSession() {
 
   if (stageMode) stageMode.textContent = q.label || (LEVEL_MAP[eng.mode] ? LEVEL_MAP[eng.mode].name : '练习');
   if (stageTip) stageTip.textContent = LEVEL_MAP[eng.mode] ? LEVEL_MAP[eng.mode].tip : '';
+
+  /* 测验模式：在舞台顶部挂一个「无提示」标记。
+     用户随时能看见自己处在测验中（而不是以为应用坏了），
+     这也是诚实计分的一部分。 */
+  let examFlag = $('#examFlag');
+  if (eng.examMode) {
+    if (!examFlag) {
+      examFlag = document.createElement('span');
+      examFlag.id = 'examFlag';
+      examFlag.className = 'exam-flag';
+      examFlag.textContent = '测验中 · 无提示';
+      const head = $('#stage .stage-head');
+      if (head) head.appendChild(examFlag);
+    }
+    examFlag.hidden = false;
+  } else if (examFlag) {
+    examFlag.hidden = true;
+  }
 
   // 暂停遮罩
   if (eng.state === STATE.PAUSED) {
@@ -958,6 +1071,11 @@ function clearHint() {
 /** 用户主动求助（Tab / 点按钮） */
 function requestHintNow() {
   if (!app.engine) return;
+  if (app.engine.examMode) {
+    // 测验中不提供任何求助。给出明确说明，避免用户以为是功能坏了。
+    toast('测验模式不提供提示', 'err');
+    return;
+  }
   if (!app.engine.requestHint || !app.engine.requestHint('reveal')) {
     toast('当前没有可提示的内容', 'err');
   }
@@ -970,18 +1088,39 @@ function ensureMiniKeymap() {
   if (!wrap || app.keymap) return;
   try {
     app.keymap = renderKeymap(wrap, {});
-    wrap.style.display = app.settings.showMiniKeymap ? '' : 'none';
-    const btn = $('#btnToggleKeymap');
-    if (btn) btn.textContent = app.settings.showMiniKeymap ? '隐藏' : '显示';
+    applyMiniKeymapVisibility();
   } catch (err) {
     console.error('[keymap] 迷你键位图渲染失败', err);
     wrap.innerHTML = '';
   }
 }
 
+/**
+ * 迷你键位图的显示/隐藏。
+ * 平时由用户设置（showMiniKeymap）控制；测验模式下**一律隐藏**，
+ * 因为它会把当前该按的键直接画出来，等于变相给答案。
+ *
+ * 这里对**外层容器**（.mini-keymap-wrap，含「键位提示」标题与显示/隐藏按钮）
+ * 统一使用 `hidden` 属性，而不是只改内层 style.display ——
+ * 属性式隐藏语义更清晰，也便于测试直接断言（CSS 的 display:none
+ * 在 jsdom/linkedom 里读不出来）。CSS 里的 .is-exam 规则作为兜底保留。
+ */
+function applyMiniKeymapVisibility() {
+  const isExam = !!(app.engine && app.engine.examMode);
+  const visible = !isExam && app.settings.showMiniKeymap;
+  const wrap = $('#miniKeymap');
+  const outer = wrap && wrap.closest ? wrap.closest('.mini-keymap-wrap') : null;
+  if (outer) outer.hidden = !visible;
+  if (wrap) wrap.hidden = !visible;
+  const btn = $('#btnToggleKeymap');
+  if (btn) btn.textContent = visible ? '隐藏' : '显示';
+}
+
 function highlightMiniKeymap() {
   if (!app.keymap || !app.engine) return;
   try {
+    // 测验模式下绝不把答案画到键位图上
+    if (app.engine.examMode) { app.keymap.clear(); return; }
     if (app.engine.state === STATE.PAUSED || app.engine.state === STATE.FINISHED) {
       app.keymap.clear();
       return;
@@ -1750,11 +1889,8 @@ function initSettingsView() {
     });
   };
 
-  bindToggle(setMini, 'showMiniKeymap', (v) => {
-    const wrap = $('#miniKeymap');
-    if (wrap) wrap.style.display = v ? '' : 'none';
-    const btn = $('#btnToggleKeymap');
-    if (btn) btn.textContent = v ? '隐藏' : '显示';
+  bindToggle(setMini, 'showMiniKeymap', () => {
+    applyMiniKeymapVisibility();
   });
   bindToggle(setSound, 'sound');
   bindToggle(setStrict, 'strict');
@@ -1892,8 +2028,7 @@ function syncSettingsUI() {
     if (el) el.checked = !!app.settings[key];
   });
   selectMode(app.settings.mode, true);
-  const wrap = $('#miniKeymap');
-  if (wrap) wrap.style.display = app.settings.showMiniKeymap ? '' : 'none';
+  applyMiniKeymapVisibility();
   updateModeCounts();
 }
 

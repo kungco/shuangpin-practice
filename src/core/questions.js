@@ -9,6 +9,13 @@
  *   L3  单字练习     — 高频单字 → 双拼编码（沿 CHAR_TIERS 由易到难铺开）
  *   L4  词组练习     — 常用词组（2–4 字）
  *   L5  短文跟打     — 成段文字含标点
+ *   TEST 能力测验    — 无提示综合测验：拆分 / 单字 / 词组混合，完成后给分数
+ *
+ * 关于 TEST（能力测验）：
+ *   它不是「第 8 个难度」，而是一种**考核**形态 —— 强制关闭提示与求助，
+ *   用混合题型一次性检验真实掌握程度，由 score.js 折算成 0–100 分。
+ *   题目按「拆分 → 单字 → 词组」的固定比例铺开，避免纯考某一类，
+ *   也避免单字占比过高导致分数被字频命中率左右。
  *
  * 为什么要拆出 L2a / L2b：
  *   直接练完整音节时，一次按错只能告诉你「这个编码错了」，
@@ -99,6 +106,14 @@ export const LEVELS = [
     badge: 'L5',
     desc: '成段文字跟打，标点会自动跳过。',
     tip: '最接近真实输入'
+  },
+  {
+    id: 'exam',
+    level: 7,
+    name: '能力测验',
+    badge: 'TEST',
+    desc: '全程无提示、无求助，独立完成。测完给 0–100 的综合分。',
+    tip: '50 题 · 拆分 / 单字 / 词组混合'
   }
 ];
 
@@ -416,6 +431,54 @@ function makePassageQuestion(diff, usedSet) {
 }
 
 /**
+ * TEST：能力测验 —— 非难度档，而是考核形态
+ *
+ * 出题策略：按「声韵拆分 : 单字 : 词组 = 3 : 4 : 3」的比例铺开，
+ *   ① 只考高频 / 常用字（档 1–2），避免生僻字把分数拉成运气；
+ *   ② 词组题让相邻两个字组成常见词，检验真实连贯输入；
+ *   ③ 拆分词与词组题在整卷里交错，防止连续同类型造成节奏惯性。
+ *
+ * 之所以不用「按 index 线性决定题型」，是因为那样在题量变化时
+ * （用户可自选题数）比例会漂移。这里改成按比例算「配额」，
+ * 再让三类轮流取，题量无论多少都保持同样的混合度。
+ */
+export const EXAM_MIX = { split: 3, char: 4, phrase: 3 };
+
+function pickExamKind(i, target) {
+  const keys = Object.keys(EXAM_MIX);
+  const totalW = keys.reduce((s, k) => s + EXAM_MIX[k], 0);
+  // 用「累积配额」判断第 i 题该出哪一类：等价于按比例轮流取，且对 target 不敏感
+  const acc = [];
+  let run = 0;
+  for (const k of keys) { run += EXAM_MIX[k]; acc.push({ k, at: (run / totalW) * target }); }
+  const pos = i + 0.5;
+  for (const a of acc) if (pos <= a.at) return a.k;
+  return keys[keys.length - 1];
+}
+
+function makeExamQuestion(i, target, ctx) {
+  const kind = pickExamKind(i, target);
+
+  if (kind === 'split') {
+    const q = makeSplitQuestion(ctx.usedPinyin);
+    if (q) { q.label = '拆分'; q.meta = Object.assign({}, q.meta, { examPart: 'split' }); }
+    return q;
+  }
+
+  if (kind === 'phrase') {
+    const q = makePhraseQuestion(ctx.usedPhrase);
+    if (q) { q.meta = Object.assign({}, q.meta, { examPart: 'phrase' }); }
+    return q;
+  }
+
+  // 单字：只用档 1–2（高频 / 常用），保证「都会但看快不快」
+  const tier = i % 2 === 0 ? 1 : 2;
+  const q = makeCharQuestion(tier, ctx.usedChar);
+  if (q) { q.meta = Object.assign({}, q.meta, { examPart: 'char' }); }
+  return q;
+}
+
+/**
  * 为短文逐字标注：标点 / 拼音 / 音节拆分
  * 未收录拼音的字标记为 unknown，练习时会被自动跳过而不会导致卡死。
  */
@@ -475,6 +538,9 @@ export function generateQuestions(opts = {}) {
   const usedPinyin = new Set();
   const out = [];
 
+  // 测验模式的「去重集合」按题型分开，否则三类题会互相挤占候选
+  const examCtx = { usedChar: used, usedPhrase: new Set(), usedPinyin };
+
   try {
     for (let i = 0; i < target; i++) {
       let q = null;
@@ -509,6 +575,9 @@ export function generateQuestions(opts = {}) {
           q = makePassageQuestion(diff, used);
           break;
         }
+        case 'exam':
+          q = makeExamQuestion(i, target, examCtx);
+          break;
         default:
           q = makeCharQuestion(1, used);
       }
@@ -529,6 +598,7 @@ export function generateQuestions(opts = {}) {
 export function defaultCountFor(mode) {
   if (mode === 'passage') return 3;
   if (mode === 'keymap') return 40;
+  if (mode === 'exam') return 50;      // 测验：题量固定偏大，样本才够可信
   return 20;
 }
 

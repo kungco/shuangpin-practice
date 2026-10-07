@@ -6,20 +6,21 @@
 
 | 脚本 | 覆盖范围 | 依赖 |
 |---|---|---|
-| `verify.mjs` | 双拼方案正确性、题库可拆分性、键位表完整性、边界输入 | 无 |
-| `engine.mjs` | 练习引擎逻辑：逐键校验、推进、统计、暂停、限时、异常输入 | 无 |
-| `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程 | `linkedom` |
+| `verify.mjs` | 双拼方案正确性、题库可拆分性、键位表完整性、边界输入、**测验出题配比**、**评分算法** | 无 |
+| `engine.mjs` | 练习引擎逻辑：逐键校验、推进、统计、暂停、限时、异常输入、**考试模式无提示硬约束** | 无 |
+| `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**） | `linkedom` |
 
-另有两个**题库体检 / 维护**脚本（属于工具，非测试）：
+另有三个**开发辅助**脚本（属于工具，非测试）：
 
-- `_audit_bank.mjs` —— 题库体检报告：规模统计、拼音映射质量、韵母键覆盖率、
-  词组/短文的字覆盖闭合性、拼音重复度。**改动题库后建议跑一次**，
-  它会直接指出「哪些字只在词组里出现却练不到」这类不一致。
-- `dedupe_chars.mjs` —— 生成期去重工具。
-- `gen_expand.mjs` —— 早期批量扩充题库的生成器（已用过，保留备查）。
-
-另外有一个开发辅助脚本（**不属于测试**）：
-
+- `serve.mjs` —— 零依赖静态服务器，给 headless Chrome / 人工预览用。**别用
+  `python -m http.server` 后台跑** —— 那个进程会随父 shell 一起被回收，
+  截图时可能已经死掉（表现为 `ERR_CONNECTION_REFUSED`）。
+  用法：`node _test/serve.mjs [port]`（默认 8791）。
+- `shot.mjs` —— headless Chrome + CDP 截图工具，用于视觉验证。
+  用法：`node _test/shot.mjs <url> <out.png> [width] [height] [script-file]`，
+  可选 `script-file` 会在截图前注入执行（切视图 / 模拟按键）。
+  注意两点：环境里有代理，必须带 `--no-proxy-server`；用
+  `--force-device-scale-factor=2` 才能看清细节。
 - `make_lnk.py` —— 手写 Shell Link（MS-SHLLINK）二进制格式生成 Windows 快捷方式。
   之所以不用 `WScript.Shell.CreateShortcut()`，是因为当前环境的安全策略禁止 COM 实例化。
   用法：
@@ -27,6 +28,14 @@
   ```bash
   python _test/make_lnk.py <目标.lnk> <目标程序> [参数] [工作目录] [描述] [图标]
   ```
+
+下面三个是**题库体检 / 维护**脚本（同样属于工具）：
+
+- `_audit_bank.mjs` —— 题库体检报告：规模统计、拼音映射质量、韵母键覆盖率、
+  词组/短文的字覆盖闭合性、拼音重复度。**改动题库后建议跑一次**，
+  它会直接指出「哪些字只在词组里出现却练不到」这类不一致。
+- `dedupe_chars.mjs` —— 生成期去重工具。
+- `gen_expand.mjs` —— 早期批量扩充题库的生成器（已用过，保留备查）。
 
 ## 运行
 

@@ -1031,6 +1031,129 @@ table.weak-table .bar-cell { min-width: 110px; }
   font-size: 11.5px; color: var(--text-3);
 }
 
+/* ---------------- 能力测验（exam） ---------------- */
+
+/* 设置面板上的测验说明块 */
+.exam-note {
+  border: 1px solid #e2d3f5;
+  border-left: 3px solid #7c4ddb;
+  background: #f6f1fd;
+  border-radius: var(--radius-sm);
+  padding: 14px 17px;
+  margin: 4px 0 22px;
+}
+.exam-note-head {
+  display: flex; align-items: center; gap: 9px;
+  margin-bottom: 9px;
+  font-size: 14px; color: #4b2c8a;
+}
+.exam-note-badge {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .6px;
+  background: #7c4ddb; color: #fff;
+  padding: 2px 7px; border-radius: 4px;
+}
+.exam-note-list { margin: 0; padding-left: 19px; }
+.exam-note-list li {
+  font-size: 12.5px; color: var(--text-2); line-height: 1.75;
+  margin-bottom: 5px;
+}
+.exam-note-list li:last-child { margin-bottom: 0; }
+.exam-note-list strong { color: #4b2c8a; font-weight: 650; }
+
+/* 练习中的「测验中」标记 */
+.exam-flag {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; font-weight: 650;
+  color: #4b2c8a;
+  background: #f6f1fd;
+  border: 1px solid #e2d3f5;
+  border-radius: 999px;
+  padding: 2px 11px;
+  margin-left: auto;
+}
+.exam-flag::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: #7c4ddb;
+}
+
+/* 测验中隐藏一切辅助元素（键位图 / 提示按钮） */
+.session-panel.is-exam .mini-keymap-wrap { display: none !important; }
+.session-panel.is-exam .hintbar { display: none !important; }
+.session-panel.is-exam .hint-flag { display: none !important; }
+
+/* ---------------- 分数卡片（结算弹窗） ---------------- */
+
+.score-card {
+  border: 1px solid #e2d3f5;
+  background: linear-gradient(180deg, #fbf8ff 0%, #ffffff 100%);
+  border-radius: var(--radius);
+  padding: 20px 22px 18px;
+  margin-bottom: 20px;
+}
+.score-card.is-invalid { border-color: #f0dcc4; background: #fffcf7; }
+
+.score-main {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.score-num {
+  font-family: var(--mono);
+  font-size: 44px; font-weight: 700; line-height: 1;
+  letter-spacing: -1.5px;
+  color: #5b32b5;
+}
+.score-num i {
+  font-size: 14px; font-weight: 400; font-style: normal;
+  color: var(--text-3); margin-left: 5px; letter-spacing: 0;
+}
+.score-grade { display: flex; align-items: center; gap: 9px; }
+.score-badge {
+  width: 34px; height: 34px; border-radius: 9px;
+  display: grid; place-items: center;
+  font-family: var(--mono); font-size: 17px; font-weight: 700;
+  color: #fff;
+}
+.score-tier-1 { background: #5b32b5; }
+.score-tier-2 { background: #2f6df6; }
+.score-tier-3 { background: #16a37b; }
+.score-tier-4 { background: #d98324; }
+.score-grade-name { font-size: 16px; font-weight: 650; color: var(--text); }
+
+.score-desc { margin: 0 0 15px; font-size: 13px; color: var(--text-2); line-height: 1.7; }
+
+.score-parts { display: flex; flex-direction: column; gap: 9px; }
+.score-part {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  grid-template-areas: 'label value' 'bar bar';
+  align-items: center; gap: 4px 10px;
+}
+.score-part.is-plain { grid-template-areas: 'label value'; }
+.score-part-label { grid-area: label; font-size: 12px; color: var(--text-3); }
+.score-part-value {
+  grid-area: value; justify-self: end;
+  font-family: var(--mono); font-size: 14px; font-weight: 650; color: var(--text);
+}
+.score-part-value i { font-size: 11px; font-weight: 400; font-style: normal; color: var(--text-3); }
+.score-part-bar {
+  grid-area: bar;
+  display: block; height: 6px; border-radius: 99px;
+  background: var(--bg-soft); overflow: hidden;
+}
+.score-part-bar > i {
+  display: block; height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, #8b5cf6, #5b32b5);
+  transition: width .3s ease;
+}
+
+.score-foot {
+  margin: 14px 0 0; padding-top: 12px;
+  border-top: 1px solid #eae2f8;
+  font-size: 11.5px; color: var(--text-3); line-height: 1.75;
+}
+.score-foot strong { color: #4b2c8a; font-weight: 650; }
+
 /* ---------------- 设置 ---------------- */
 
 .settings-grid {

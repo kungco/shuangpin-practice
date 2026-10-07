@@ -25,6 +25,11 @@
  *     - PAUSED / FINISHED / IDLE 状态一律不计时，暂停发呆不会刷出提示；
  *     - 【统计口径】提示过的字符计入 stats.hintedChars，summary() 另给
  *       independentAccuracy（独立正确率）—— 其分子**不含提示过的字符**。
+ *
+ * 3. 【考试模式】cfg.examMode = true（能力测验）时：
+ *    提示被**硬关闭**（examMode 是独立于 hintEnabled 的闸门，
+ *    即使外部把 hintEnabled 改成 true 也不生效），且 requestHint /
+ *    自动提示都会直接返回 false。测验结束后由 score.js 折算 0–100 分。
  *       否则用户可以「等提示再按」把正确率刷满，指标就失去意义。
  *
  * 所有对外方法都做了空值与越界保护 —— 引擎不应因脏输入而抛异常。
@@ -108,6 +113,23 @@ export class PracticeEngine {
     this.hintEnabled = cfg.hintEnabled !== false;
     this.hintDelayMs = normalizeMs(cfg.hintDelayMs, HINT_DEFAULTS.hintDelayMs);
     this.revealDelayMs = normalizeMs(cfg.revealDelayMs, HINT_DEFAULTS.revealDelayMs);
+
+    /* ---- 考试模式（能力测验）----
+       测验要测的是「脱离辅助后的真实水平」，所以提示必须彻底关闭。
+       这里不只是把 hintEnabled 置 false，而是设一个**独立标志**：
+       ① hintEnabled 是用户设置项，测验时会被临时覆盖，重叠语义容易出错；
+       ② 有了 examMode，UI 层可以据此隐藏迷你键位图 / 帮助按钮，
+          不必到处判断 mode === 'exam'；
+       ③ 更重要的是**防篡改**：如果后续有人往设置里加「测试时也允许提示」，
+          examMode 这层硬闸门能保证测验语义不被改坏。 */
+    this.examMode = cfg.examMode === true;
+    if (this.examMode) {
+      // 硬约束：考试模式下一律无提示，且不再允许被外部打开
+      this.hintEnabled = false;
+      this.hintDelayMs = 0;
+      this.revealDelayMs = 0;
+    }
+
     // 两级时间线必须单调；否则「先闪键、后给答案」的语义会颠倒
     if (this.revealDelayMs > 0 && this.revealDelayMs < this.hintDelayMs) {
       this.revealDelayMs = this.hintDelayMs;
@@ -314,6 +336,7 @@ export class PracticeEngine {
 
   /** 定时器回调：判断是否该亮一级提示（同一级只广播一次） */
   _checkHint() {
+    if (this.examMode) return;            // 测验中不闪键、不给答案
     if (!this.hintEnabled) return;
     if (this.state !== STATE.RUNNING) return;
     if (!this._idleSince) return;
@@ -386,6 +409,7 @@ export class PracticeEngine {
    * 与自动提示共用同一套事件，但立刻触发到 'reveal' 级。
    */
   requestHint(level) {
+    if (this.examMode) return false;      // 测验中不提供任何求助
     if (!this.hintEnabled) return false;
     if (this.state !== STATE.RUNNING) return false;
     const target = this.currentTarget();
@@ -1068,6 +1092,7 @@ export class PracticeEngine {
       perCharErrors: Object.assign({}, this.stats.perCharErrors),
       keyErrors: Object.assign({}, this.stats.keyErrors || {}),
       completed: this.index >= this.questions.length,
+      examMode: this.examMode,
       unfinishedQuestion: q ? { index: this.index, charIndex: this.charIndex } : null
     };
   }
@@ -1100,6 +1125,7 @@ export class PracticeEngine {
         durationSec: this.durationSec,
         strict: this.strict,
         skipPunct: this.skipPunct,
+        examMode: this.examMode,
         hintEnabled: this.hintEnabled,
         hintDelayMs: this.hintDelayMs,
         revealDelayMs: this.revealDelayMs
@@ -1118,6 +1144,8 @@ export class PracticeEngine {
         durationSec: saved.settings ? saved.settings.durationSec : 0,
         strict: saved.settings ? saved.settings.strict !== false : true,
         skipPunct: saved.settings ? saved.settings.skipPunct !== false : true,
+        // 测验中断后续练时，必须仍然是测验（否则提示会「复活」，分数失去意义）
+        examMode: saved.settings ? saved.settings.examMode === true : false,
         hintEnabled: saved.settings ? saved.settings.hintEnabled !== false : true,
         hintDelayMs: saved.settings ? saved.settings.hintDelayMs : undefined,
         revealDelayMs: saved.settings ? saved.settings.revealDelayMs : undefined
