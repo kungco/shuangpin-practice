@@ -2,7 +2,8 @@
  * 自检脚本：验证双拼引擎与题库的正确性 / 完整性
  * 运行：node _test/verify.mjs
  */
-import { splitSyllable, getKeymapData, ALL_KEYS, isKeyCorrect, buildSyllables } from '../src/core/scheme.js';
+import { splitSyllable, getKeymapData, ALL_KEYS, isKeyCorrect, buildSyllables,
+         SHENGMU_TO_KEYS } from '../src/core/scheme.js';
 import { ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS } from '../src/data/pinyin.js';
 import { generateQuestions, generateReviewQuestions, isPunct,
          LEVELS, LEVEL_MAP, defaultCountFor } from '../src/core/questions.js';
@@ -148,6 +149,96 @@ for (const [sm, py, code] of [['zh', 'zhang', 'VH'], ['ch', 'chun', 'IY'], ['sh'
   });
   ok(bad.length === 0, `存在非 2 键音节 ${bad.length} 个: ${bad.slice(0, 8).join(' ')}`);
   console.log(`  全量题库音节均为 2 键（zh/ch/sh 也只占一键）`);
+}
+
+console.log('【4b】L1 声母专项题：zh/ch/sh 必须是单键');
+{
+  /* 回归：曾把 zh/ch/sh 的 L1 答案写成 VH / IH / UH（多一个 H），
+     理由是误以为「zh 要按 z 和 h 两下」。实际上小鹤里 zh/ch/sh 各占一键，
+     H 是韵母 ang 的键，和声母无关。这个 bug 会逼用户多按一个键。
+
+     makeKeymapQuestion 未导出且带随机性，因此通过公开接口 generateQuestions
+     大批量出题，再对**每一道声母题**断言「答案恒为单键」。抽 2000 题足以
+     覆盖全部 23 个声母（含 zh/ch/sh），漏测概率可忽略。 */
+  const EXPECT_SHENGMU_KEY = { zh: 'V', ch: 'I', sh: 'U' };
+  const seen = new Set();
+  const bad = [];
+  let shengmuCount = 0;
+
+  for (let i = 0; i < 2000; i++) {
+    const qs = generateQuestions({ mode: 'keymap', count: 5 });
+    for (const q of qs) {
+      if (q.role !== 'sheng') continue;
+      shengmuCount++;
+      seen.add(q.promptText);
+      if (!Array.isArray(q.answerKeys) || q.answerKeys.length !== 1) {
+        bad.push(`${q.promptText} → ${JSON.stringify(q.answerKeys)}`);
+        continue;
+      }
+      // 答案必须等于方案表给出的键
+      const want = SHENGMU_TO_KEYS[q.promptText];
+      if (want && q.answerKeys[0] !== String(want[0]).toUpperCase()) {
+        bad.push(`${q.promptText} 期望 ${want[0]} 实际 ${q.answerKeys[0]}`);
+      }
+      // 文案里不许再出现「需要按 2 个键」这种误导说法
+      if (/2\s*个键|两个键|两键/.test(String(q.promptSub) + String(q.explain))) {
+        bad.push(`${q.promptText} 文案仍称需按两键：${q.promptSub}`);
+      }
+    }
+  }
+
+  ok(shengmuCount > 0, `抽样中出现了声母题（${shengmuCount} 道）`);
+  ok(bad.length === 0, `声母题恒为单键且与方案表一致（异常 ${bad.length}：${bad.slice(0, 5).join('；')}）`);
+
+  // zh / ch / sh 三个特例必须被覆盖到，且分别是 V / I / U
+  for (const [sm, key] of Object.entries(EXPECT_SHENGMU_KEY)) {
+    ok(seen.has(sm), `抽样覆盖了声母 ${sm}`);
+  }
+  // 直接用方案表复核（不依赖抽样）
+  for (const [sm, key] of Object.entries(EXPECT_SHENGMU_KEY)) {
+    const keys = SHENGMU_TO_KEYS[sm] || [];
+    ok(keys.length === 1 && keys[0] === key,
+      `方案表中 ${sm} 恰为单键 ${key}（实际 ${JSON.stringify(keys)}）`);
+  }
+  console.log(`  抽样 ${shengmuCount} 道声母题，答案全为单键且与方案表一致`);
+}
+
+console.log('【4c】零声母：数据结构统一 + 恒为 2 键');
+{
+  /* ① 数据结构一致性：buildSyllables 产出的音节对象顶层 zero 字段
+        必须与 split.zero 完全一致（曾经顶层根本没这个字段，
+        导致 engine 里读 syl.zero 的分支成了永远走不到的死代码）。
+     ② 行为一致性：零声母**也是 2 键**（首字母 + 韵母键），
+        与 README 的 an → AJ / a → AA / ang → AH 完全对齐。 */
+  const ZERO_SAMPLES = ['an', 'a', 'ang', 'en', 'ei', 'er', 'ou', 'ai', 'ao', 'e', 'o'];
+  const mismatched = [];
+  const notTwoKeys = [];
+
+  for (const py of ZERO_SAMPLES) {
+    const s = buildSyllables([py])[0];
+    if (s.zero !== s.split.zero) mismatched.push(`${py}: 顶层 ${s.zero} ≠ split ${s.split.zero}`);
+    if (s.split.keys.length !== 2) notTwoKeys.push(`${py} → ${s.split.code}(${s.split.keys.length}键)`);
+  }
+  ok(mismatched.length === 0, `零声母样本顶层 zero 与 split.zero 一致（不一致 ${mismatched.length}：${mismatched.join('；')}）`);
+  ok(notTwoKeys.length === 0, `零声母样本恒为 2 键（异常 ${notTwoKeys.length}：${notTwoKeys.join('；')}）`);
+
+  // 全量题库：凡是零声母音节，必须都是 2 键
+  const badAll = [];
+  for (const [ch, py] of Object.entries(ALL_CHARS)) {
+    const s = buildSyllables([py])[0];
+    if (!s || !s.split) continue;
+    if (s.split.zero && s.split.keys.length !== 2) badAll.push(`${ch}:${py}→${s.split.code}`);
+    if (s.zero !== s.split.zero) badAll.push(`${ch}:${py} zero 字段不一致`);
+  }
+  ok(badAll.length === 0, `全量题库零声母音节均为 2 键且字段一致（异常 ${badAll.length}：${badAll.slice(0, 5).join(' ')}）`);
+
+  // 几个点名核对（与 README 对照表一致）
+  const README_CASES = { an: 'AJ', a: 'AA', ang: 'AH' };
+  for (const [py, code] of Object.entries(README_CASES)) {
+    const s = buildSyllables([py])[0];
+    ok(s.split.code === code, `${py} → ${code}（实际 ${s.split.code}）`);
+  }
+  console.log(`  零声母样本 ${ZERO_SAMPLES.length} 个全部 2 键，全量题库字段与键数一致`);
 }
 
 console.log('【5】多候选拆分容错（xian: 声母方案 + 零声母方案）');

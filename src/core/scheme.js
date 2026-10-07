@@ -287,16 +287,28 @@ export function primarySplit(pinyin) {
 /**
  * 文本 → 音节序列
  * @param {Array<string>} pinyins 拼音数组（与汉字一一对应）
- * @returns {Array<{pinyin, hanzi, candidates, split, ok}>}
+ * @returns {Array<{pinyin, hanzi, candidates, split, zero, ok}>}
+ *
+ * 关于 zero（零声母）：
+ *   音节对象顶层**带** zero 字段，取值来自主拆分（split.zero）。
+ *   历史上这里漏了该字段，导致 engine 里读 syl.zero 的分支永远是 undefined
+ *   （死代码），既掩盖了真实行为，又埋了「一旦被赋值就把 an 截成单键」的雷。
+ *   现在顶层字段与 split 保持一致，读 syl.zero 与读 syl.split.zero 结果相同。
+ *
+ *   注意：零声母**不代表只需按一键**。小鹤里零声母音节同样恒为 2 键 ——
+ *   编码是「首字母 + 韵母键」，例如 an → AJ、a → AA、ang → AH。
+ *   首字母起到声母的位置作用（因为零声母没有声母键）。
  */
 export function buildSyllables(pinyins, hanziList = []) {
   return pinyins.map((py, i) => {
     const candidates = splitSyllable(py);
+    const split = candidates[0] || null;
     return {
       pinyin: py,
       hanzi: hanziList[i] || '',
       candidates,
-      split: candidates[0] || null,
+      split,
+      zero: !!(split && split.zero),
       ok: candidates.length > 0
     };
   });

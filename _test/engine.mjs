@@ -191,25 +191,60 @@ console.log('\n【9】速度与正确率计算（含 finish 补时）');
   eng.destroy();
 }
 
-console.log('\n【9b】零声母音节只需一键（an → J）');
+console.log('\n【9b】零声母音节恒为 2 键（an → AJ，与 README 一致）');
 {
-  // 构造一个纯零声母音节题：an（韵母 a 在 A 键；零声母由声母键位区承载）
-  const qs = [{ id: 'z1', level: 3, kind: 'char', chars: [
-    { ch: '安', pinyin: 'an', syl: null, punct: false, unknown: false }
-  ] }];
-  const { splitPinyin } = await import('../src/core/scheme.js').catch(() => ({}));
-  const schMod = await import('../src/core/scheme.js');
-  const split = schMod.primarySplit('an');
-  qs[0].chars[0].syl = { candidates: schMod.splitSyllable('an'), split, zero: true };
-  const eng = new PracticeEngine({ questions: qs, mode: 'char' });
-  eng.start();
-  const t = eng.currentTarget();
-  ok(t && t.keys.length === 1, `零声母音节只要求 1 键（实际 ${t && t.keys.length}）`);
-  ok(t && t.split.code === split.code, `编码正确 ${t && t.split.code}`);
-  const r = eng.pressKey(t.keys[0].toLowerCase());
-  ok(r.correct === true, '按下一键即通过');
-  ok(eng.stats.correctChars === 1, `计入 1 个正确字符（实际 ${eng.stats.correctChars}）`);
-  eng.destroy();
+  /* 回归要点
+     ---------
+     ① 本题**不再手工往 syl 上补 zero: true**。老写法是给测试数据打补丁，
+        验的是「我自己造出来的结构」而非真实出题流程，一旦真实数据缺字段
+        就完全测不出问题（事实上当时 syl 确实没有 zero 字段，
+        引擎里那个 syl.zero 分支是死代码，测试却「通过」了）。
+        现在改用 buildSyllables —— 与出题 / 引擎用的是同一条构造路径。
+     ② 断言的是 **2 键**（AJ），不是 1 键。小鹤里零声母同样恒为 2 键：
+        首字母占声母位 + 韵母键。README 与方案表都是这么写的。 */
+  const CASES = [
+    { ch: '安', py: 'an', code: 'AJ' },
+    { ch: '啊', py: 'a', code: 'AA' },
+    { ch: '昂', py: 'ang', code: 'AH' }
+  ];
+
+  for (const c of CASES) {
+    const syl = buildSyllables([c.py])[0];
+    // 结构化断言：顶层 zero 与 split.zero 必须一致（这次统一了数据结构）
+    ok(syl.zero === true, `${c.py} 的 syl.zero 为 true（实际 ${syl.zero}）`);
+    ok(syl.zero === syl.split.zero, `${c.py} 顶层 zero 与 split.zero 一致`);
+    ok(syl.split.code === c.code, `${c.py} 编码为 ${c.code}（实际 ${syl.split.code}）`);
+
+    const q = {
+      id: 'z-' + c.py, level: 3, kind: 'char', label: '单字打字',
+      chars: [{ ch: c.ch, pinyin: c.py, syl, punct: false, unknown: false }]
+    };
+    const eng = new PracticeEngine({ questions: [q], mode: 'char' });
+    eng.start();
+    const t = eng.currentTarget();
+    ok(t && t.keys.length === 2, `${c.py} 要求 2 键（实际 ${t && t.keys.length}）`);
+    ok(t && t.keys.join('') === c.code, `${c.py} 目标序列为 ${c.code}（实际 ${t && t.keys.join('')}）`);
+
+    // 逐键按下，两键都能被接受，且要在第 2 键之后才算完成
+    const r1 = eng.pressKey(t.keys[0].toLowerCase());
+    ok(r1.correct === true, `${c.py} 第 1 键（首字母）正确`);
+    const r2 = eng.pressKey(t.keys[1].toLowerCase());
+    ok(r2.correct === true, `${c.py} 第 2 键（韵母）正确`);
+    ok(eng.stats.correctChars === 1, `${c.py} 完整 2 键后计入 1 个正确字符（实际 ${eng.stats.correctChars}）`);
+    eng.destroy();
+  }
+
+  // 反向断言：零声母**不能**被截成单键
+  const sylAn = buildSyllables(['an'])[0];
+  const qAn = {
+    id: 'z-len', level: 3, kind: 'char',
+    chars: [{ ch: '安', pinyin: 'an', syl: sylAn, punct: false, unknown: false }]
+  };
+  const engAn = new PracticeEngine({ questions: [qAn], mode: 'char' });
+  engAn.start();
+  const tAn = engAn.currentTarget();
+  ok(tAn.len === 2, `an 的 len 为 2（不是被截断的 1，实际 ${tAn.len}）`);
+  engAn.destroy();
 }
 
 console.log('\n【10】边界与异常输入');

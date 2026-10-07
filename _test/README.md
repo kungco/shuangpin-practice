@@ -39,6 +39,16 @@
 
 ## 运行
 
+**推荐（一次装依赖，之后跑全部三套）：**
+
+```bash
+cd _test
+npm ci            # 按 package-lock.json 精确还原依赖（首次或换环境时执行）
+npm test          # 依次跑 verify → engine → integration
+```
+
+也可以单独跑：
+
 ```bash
 node _test/verify.mjs
 node _test/engine.mjs
@@ -48,16 +58,38 @@ node _test/integration.mjs
 > Windows 下若 `node` 不在 PATH，可用 WorkBuddy 内置运行时：
 > `"C:/Users/ASUS/.workbuddy/binaries/node/versions/22.22.2-6/node.exe" _test/verify.mjs`
 
+### 依赖可复现性（为什么要用 `npm ci`）
+
+`integration.mjs` 需要 `linkedom` 来模拟 DOM，`verify.mjs` 与 `engine.mjs` 则**零依赖**。
+为了「换个环境/换个人跑结果都一样」，`_test/` 下提交了两个文件：
+
+| 文件 | 作用 |
+|---|---|
+| `package.json` | 声明依赖，**`linkedom` 写死为精确版本 `0.18.13`**（不是 `^0.18.13`） |
+| `package-lock.json` | 锁定全部 20 个包的**确切版本 + 完整性哈希**（lockfileVersion 3） |
+
+请用 **`npm ci`** 而不是 `npm install` —— 前者严格按锁文件还原、发现不一致会直接报错，
+后者可能悄悄升级出不同的依赖树。只在确实要升级依赖时才用 `npm install`（并重新提交锁文件）。
+
+仓库里**不包含** `node_modules`（见 `.gitignore`），clone 下来先 `npm ci` 即可。
+
+### CI
+
+`.github/workflows/tests.yml` 会在 push / PR 时用 **Node 18 / 20 / 22** 三个版本
+各跑一遍三套测试：
+`actions/checkout` → `setup-node` → `cd _test && npm ci` → 依次执行三个脚本。
+这样「检出目录没有 linkedom、集成测试跑不起来」的情况不会再出现 ——
+依赖由锁文件保证，runner 每次都是干净且一致的。
+
 ## 关于 `node_modules`
 
-`_test/node_modules/` 里只装了 `linkedom`（含其依赖）供 `integration.mjs` 使用。
-如果不想保留这 5.4 MB，可以直接删掉整个目录 —— 前两个套件仍然可以运行，
-`integration.mjs` 则会因缺少 `linkedom` 而无法启动。
+`_test/node_modules/` 里只装了 `linkedom`（含 19 个传递依赖）供 `integration.mjs` 使用，
+**不进仓库**。前两个套件零依赖，删掉整个目录也照样跑；只有 `integration.mjs` 需要它。
 
-重建方式：
+重建方式（务必用 `ci`，版本以锁文件为准）：
 
 ```bash
-cd _test && npm i linkedom --no-save
+cd _test && npm ci
 ```
 
 ## 测试环境的两处「降级垫片」（不是应用 bug）

@@ -1,0 +1,20 @@
+{
+  "name": "shuangpin-practice-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "开发期自检脚本的依赖清单。应用本体零依赖，这里只是为了集成测试能在模拟 DOM 中运行。",
+  "type": "module",
+  "scripts": {
+    "test": "node verify.mjs && node engine.mjs && node integration.mjs",
+    "test:verify": "node verify.mjs",
+    "test:engine": "node engine.mjs",
+    "test:integration": "node integration.mjs",
+    "serve": "node serve.mjs"
+  },
+  "dependencies": {
+    "linkedom": "0.18.13"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

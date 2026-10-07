@@ -526,31 +526,14 @@ export class PracticeEngine {
     if (!syl || !syl.candidates || !syl.candidates.length) {
       return { kind: 'invalid', char: ch.ch, len: 0, pos: 0, keys: [] };
     }
-    // 零声母音节：首字母本身就是 e 键的韵母（e / en / ei / er），
-    // 按一次 e 即完成，不应再要求补一个 K。
-    if (syl.zero) {
-      const zsplit = syl.split || syl.candidates[0];
-      const zkeys = (zsplit.keys || []).slice(0, 1);
-      if (!zkeys.length) {
-        return { kind: 'invalid', char: ch.ch, len: 0, pos: 0, keys: [] };
-      }
-      const zpos = Math.min(this.keyIndex, zkeys.length - 1);
-      const zstep = (zsplit.steps || [])[zpos] || {};
-      return {
-        kind: 'syllable',
-        char: ch.ch,
-        pinyin: ch.pinyin,
-        syl,
-        split: zsplit,
-        pos: zpos,
-        keys: zkeys,
-        len: zkeys.length,
-        role: zstep.role || 'yun',
-        label: zstep.label || '韵母',
-        part: zstep.part || zsplit.yun || ''
-      };
-    }
 
+    /* 零声母音节（an / a / ang / en…）在这里**不做特殊处理**。
+       曾有一个 `if (syl.zero) { ...slice(0,1) }` 分支，把零声母截成「只按一键」。
+       那是错的：小鹤里零声母同样恒为 2 键，编码 = 首字母（占声母位）+ 韵母键，
+       例如 an → AJ、a → AA、ang → AH（README「关于键位」一节写得很明确）。
+       该分支当时是死代码（syl 上没有 zero 字段），但一旦有人补上该字段，
+       就会开始逼用户少按一键 —— 属于埋雷，故直接删除。
+       零声母与有声母共用下面同一套两键推进逻辑。 */
     const split = syl.split || syl.candidates[0];
     const pos = Math.min(this.keyIndex, split.keys.length - 1);
     return {

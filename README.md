@@ -136,7 +136,9 @@ src/core/stats.js         历史汇总 / 曲线数据 / 易错排序 / 错误热
 src/data/pinyin.js        题库：1107 字 / 299 词 / 45 篇短文
 src/ui/keymap.js          SVG 键盘渲染（含热力图层、提示闪烁）
 src/ui/chart.js           Canvas 手绘曲线（无图表库）
-_test/                    开发期自检脚本（可删）
+_test/                    开发期自检脚本（可删；集成测试需 cd _test && npm ci）
+.github/workflows/        CI：Node 18/20/22 三版本各跑一遍三套自检
+docs/                     设计文档与对标分析
 ```
 
 ## 数据说明

@@ -42,7 +42,7 @@ import {
 } from '../data/pinyin.js';
 import {
   buildSyllables, splitSyllable, primarySplit, ALL_KEYS, USED_KEYS,
-  KEY_TO_SHENGMU, KEY_TO_YUNMU
+  KEY_TO_SHENGMU, KEY_TO_YUNMU, SHENGMU_TO_KEYS
 } from './scheme.js';
 import { tokenizeWithPinyin, hasPinyin } from './tokenizer.js';
 
@@ -192,20 +192,23 @@ function makeKeymapQuestion() {
     const key = smKeys[Math.floor(rng() * smKeys.length)];
     const sms = KEY_TO_SHENGMU[key];
     const sm = sms[Math.floor(rng() * sms.length)];
-    // zh/ch/sh 需要按两个键
-    const seq = (sm === 'zh') ? ['V', 'H'] : (sm === 'ch' ? ['I', 'H'] : (sm === 'sh' ? ['U', 'H'] : [key]));
+    /* 答案直接取自方案表 SHENGMU_TO_KEYS，**不要**在这里硬编码。
+       历史 bug：这里曾把 zh/ch/sh 写成 ['V','H'] / ['I','H'] / ['U','H']，
+       理由是想当然地以为「zh 要按 z 和 h 两下」。但小鹤双拼里 zh/ch/sh
+       各自只占一个键（V / I / U），只影响音节第一键，第二键是韵母。
+       硬编码的第二个 H 会逼用户多按一个键，且与 README、键位图自相矛盾。
+       现在一律以方案表为准，方案表怎么定就怎么出题。 */
+    const seq = (SHENGMU_TO_KEYS[sm] || [key]).map(k => String(k).toUpperCase());
     return {
       id: nextId(),
       level: 1,
       kind: 'key',
       label: '声母键',
       promptText: sm,
-      promptSub: seq.length > 1 ? '该声母需要按 2 个键' : '按出该声母所在的键',
+      promptSub: '按出该声母所在的键',
       answerKeys: seq,
       role: 'sheng',
-      explain: seq.length > 1
-        ? `声母 ${sm} 需要按下 ${seq[0]} 与 ${seq[1]} 两个键`
-        : `声母 ${sm} 位于 ${key} 键`,
+      explain: `声母 ${sm} 位于 ${seq.join('')} 键`,
       keyDetail: { key, shengmu: sm, yunmu: null }
     };
   }
