@@ -22,6 +22,7 @@
 
     <nav class="nav" id="nav">
       <button class="nav-btn is-active" data-view="practice">练习</button>
+      <button class="nav-btn" data-view="why">为什么用双拼</button>
       <button class="nav-btn" data-view="keymap">键位图</button>
       <button class="nav-btn" data-view="stats">统计</button>
       <button class="nav-btn" data-view="review">错题复习</button>
@@ -162,6 +163,222 @@
           </div>
           <div class="mini-keymap" id="miniKeymap"></div>
         </div>
+      </div>
+    </section>
+
+    <!-- ---------- 视图：为什么用双拼 ---------- -->
+    <section class="view" id="view-why">
+      <div class="panel">
+        <h2 class="panel-title">为什么用双拼</h2>
+        <p class="panel-sub">
+          一句话：<strong>把「每个字要按几下」从平均 3 下压到固定 2 下</strong>，
+          而手指不需要离开主键区去翻页找字。
+        </p>
+
+        <!-- ===== 1. 双拼是什么 ===== -->
+        <h3 class="sub-title">一、双拼是什么</h3>
+        <p class="why-p">
+          全拼（就是我们平时用的拼音输入）打「双」要按
+          <code>s</code> <code>h</code> <code>u</code> <code>a</code> <code>n</code> <code>g</code>
+          六下，打「状」要按 <code>z</code> <code>h</code> <code>u</code> <code>a</code>
+          <code>n</code> <code>g</code> 也是六下——<strong>越是难打的字，按得越多</strong>。
+        </p>
+        <p class="why-p">
+          双拼的思路很直接：把一个音节拆成
+          <strong class="why-hl-sheng">声母</strong> 和
+          <strong class="why-hl-yun">韵母</strong> 两部分，
+          <strong>每一部分各占一个键</strong>，于是一个音节永远是
+          <strong>两键</strong>。
+        </p>
+
+        <div class="why-compare">
+          <div class="why-compare-col">
+            <div class="why-compare-head">全拼</div>
+            <div class="why-compare-row">
+              <span class="why-compare-word">双</span>
+              <span class="why-compare-keys">s h u a n g</span>
+              <span class="why-compare-count">6 键</span>
+            </div>
+            <div class="why-compare-row">
+              <span class="why-compare-word">状</span>
+              <span class="why-compare-keys">z h u a n g</span>
+              <span class="why-compare-count">6 键</span>
+            </div>
+            <div class="why-compare-row">
+              <span class="why-compare-word">长</span>
+              <span class="why-compare-keys">c h a n g</span>
+              <span class="why-compare-count">5 键</span>
+            </div>
+            <div class="why-compare-foot">长短不一，长音节最费手</div>
+          </div>
+
+          <div class="why-compare-arrow" aria-hidden="true">→</div>
+
+          <div class="why-compare-col is-why">
+            <div class="why-compare-head">小鹤双拼</div>
+            <div class="why-compare-row">
+              <span class="why-compare-word">双</span>
+              <span class="why-compare-keys"><b>U</b><b>L</b></span>
+              <span class="why-compare-count">2 键</span>
+            </div>
+            <div class="why-compare-row">
+              <span class="why-compare-word">状</span>
+              <span class="why-compare-keys"><b>V</b><b>L</b></span>
+              <span class="why-compare-count">2 键</span>
+            </div>
+            <div class="why-compare-row">
+              <span class="why-compare-word">长</span>
+              <span class="why-compare-keys"><b>I</b><b>H</b></span>
+              <span class="why-compare-count">2 键</span>
+            </div>
+            <div class="why-compare-foot">恒为 2 键，与音节长短无关</div>
+          </div>
+        </div>
+
+        <p class="why-p why-note">
+          注意：双拼只是<strong>改变了「怎么敲」</strong>，
+          候选词、词库、云联想、自动纠错这些你熟悉的东西<strong>一个没少</strong>。
+          你还是打拼音，只是编码变短了。
+        </p>
+
+        <p class="why-p">
+          难点只有一个，而且是一次性的：<strong>要背键位</strong>。
+          26 个韵母键 + 3 个特殊声母（<code>zh</code> <code>ch</code> <code>sh</code>），
+          背完就永久归你。本应用的全部模式，就是围绕「怎么把这个表背熟」设计的。
+        </p>
+
+        <!-- ===== 2. 有什么好处 ===== -->
+        <h3 class="sub-title">二、好处</h3>
+        <div class="why-benefits">
+          <div class="why-benefit">
+            <div class="why-benefit-icon">⌨️</div>
+            <div class="why-benefit-title">按键数少了将近一半</div>
+            <div class="why-benefit-body">
+              中文音节平均 3 个字母，双拼固定 2 个。
+              同一段话的击键量大概降到 <strong>六成左右</strong>，
+              长音节词（双、状、长、亮、娘）收益最大。
+            </div>
+          </div>
+
+          <div class="why-benefit">
+            <div class="why-benefit-icon">🎯</div>
+            <div class="why-benefit-title">重码少了，选字更省心</div>
+            <div class="why-benefit-body">
+              全拼里 <code>shi</code> 这类音节有几十个同音字，
+              双拼把声调和韵母区分得更细，<strong>落到目标字的候选位置更靠前</strong>，
+              需要按数字键挑字的次数明显变少。
+            </div>
+          </div>
+
+          <div class="why-benefit">
+            <div class="why-benefit-icon">🧠</div>
+            <div class="why-benefit-title">从「拼字母」变成「肌肉记忆」</div>
+            <div class="why-benefit-body">
+              全拼要在线拼出 <code>zh-u-a-n-g</code> 并在候选里找；
+              双拼是「状 = V+L」这样一个<strong>固定动作</strong>。
+              练熟之后不过脑，手指自己就落下去了。
+            </div>
+          </div>
+
+          <div class="why-benefit">
+            <div class="why-benefit-icon">💪</div>
+            <div class="why-benefit-title">手部负担更小</div>
+            <div class="why-benefit-body">
+              击键次数减少、且绝大多数动作集中在主键区，
+              对<strong>长时间码字、手腕容易累</strong>的人尤其有感觉。
+            </div>
+          </div>
+
+          <div class="why-benefit">
+            <div class="why-benefit-icon">🖐️</div>
+            <div class="why-benefit-title">双手更均衡</div>
+            <div class="why-benefit-body">
+              小鹤方案的韵母键<strong>左右手分配比较平均</strong>，
+              不像全拼那样大量集中在右手食指与中指区域。
+            </div>
+          </div>
+
+          <div class="why-benefit">
+            <div class="why-benefit-icon">🔁</div>
+            <div class="why-benefit-title">任何平台都能用</div>
+            <div class="why-benefit-body">
+              搜狗、微信、微软拼音、Rime、macOS、手机输入法……
+              主流输入法<strong>都内置小鹤方案</strong>，手机上也能开双拼。
+              学一次，处处可用。
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== 3. 该不该学 ===== -->
+        <h3 class="sub-title">三、我该不该学？</h3>
+        <p class="why-p">
+          <strong>适合学：</strong>每天要打不少字（写作、编程注释、聊天、办公），
+          对打字速度有要求，并且<strong>能接受两三周的不适应期</strong>。
+        </p>
+        <p class="why-p">
+          <strong>可以再想想：</strong>打字量本来就很小，
+          或者处在需要用别人电脑、临时换机器的场景较多。
+          双拼的<strong>学习成本是真实存在</strong>的，不该被宣传语吞掉。
+        </p>
+
+        <div class="why-caveat">
+          <div class="why-caveat-title">诚实说三个代价</div>
+          <ul class="why-caveat-list">
+            <li>
+              <strong>前三周一定会变慢。</strong>
+              肌肉记忆没建立起来时，双拼比全拼慢很多，很多人在这段时间放弃。
+              撑过去就回不去了——这是唯一真正难的地方。
+            </li>
+            <li>
+              <strong>换到没配双拼的电脑上会不顺手。</strong>
+              解决办法是在各平台都装上（主流输入法都支持），
+              或者临时切回全拼——切换成本比想象中小。
+            </li>
+            <li>
+              <strong>键位需要记住，不是「用着用着就会」。</strong>
+              全拼不用学，双拼必须学。这不是缺陷，是它省下按键数的代价。
+            </li>
+          </ul>
+        </div>
+
+        <h3 class="sub-title">四、大概要练多久</h3>
+        <div class="why-timeline">
+          <div class="why-stage">
+            <div class="why-stage-when">第 1–3 天</div>
+            <div class="why-stage-body">
+              看着键位图能打，速度比全拼慢。<br>
+              <span class="why-stage-hint">建议：只练「键位熟悉」和「声韵拆分」</span>
+            </div>
+          </div>
+          <div class="why-stage">
+            <div class="why-stage-when">第 1 周</div>
+            <div class="why-stage-body">
+              常见韵母开始不用看图，速度回到全拼的七八成。<br>
+              <span class="why-stage-hint">建议：开始练「单字」，用错误热力图找薄弱键</span>
+            </div>
+          </div>
+          <div class="why-stage">
+            <div class="why-stage-when">第 2–3 周</div>
+            <div class="why-stage-body">
+              基本不用看图，速度追平并超过原来的全拼。<br>
+              <span class="why-stage-hint">建议：练「词组」，把常用词变成整块动作</span>
+            </div>
+          </div>
+          <div class="why-stage">
+            <div class="why-stage-when">1 个月后</div>
+            <div class="why-stage-body">
+              进入「不过脑」阶段，打字速度再上一个台阶。<br>
+              <span class="why-stage-hint">建议：练「短文跟打」，稳速度与正确率</span>
+            </div>
+          </div>
+        </div>
+
+        <p class="footnote">
+          时间因人而异，取决于每天练多久与原来的全拼速度。
+          上面说的是「每天练 15–20 分钟」的节奏。
+          想看具体键位规则，去 <strong>键位图</strong> 页；想现在就开始，去
+          <strong>练习</strong> 页选一个模式。
+        </p>
       </div>
     </section>
 

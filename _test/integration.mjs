@@ -293,7 +293,8 @@ const q = (s) => document.querySelector(s);
 const qa = (s) => Array.from(document.querySelectorAll(s));
 
 ok(!!q('#nav'), '导航栏存在');
-ok(qa('#nav .nav-btn').length === 5, `导航按钮 5 个（实际 ${qa('#nav .nav-btn').length}）`);
+ok(qa('#nav .nav-btn').length === 6, `导航按钮 6 个（实际 ${qa('#nav .nav-btn').length}）`);
+
 ok(qa('#modeGrid .mode-card').length === 7, `模式卡片 7 个（实际 ${qa('#modeGrid .mode-card').length}）`);
 
 // 新增的拆分成分练习模式必须出现在选择面板上
@@ -544,7 +545,7 @@ eng3.destroy();
 
 /* ---------- 各视图渲染 ---------- */
 console.log('\n【8】各视图渲染');
-for (const v of ['keymap', 'stats', 'review', 'settings', 'practice']) {
+for (const v of ['why', 'keymap', 'stats', 'review', 'settings', 'practice']) {
   const btn = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === v);
   if (!btn) { ok(false, `找不到 ${v} 导航按钮`); continue; }
   const errBefore = errors.length;
@@ -553,6 +554,70 @@ for (const v of ['keymap', 'stats', 'review', 'settings', 'practice']) {
   const viewEl = q('#view-' + v);
   ok(viewEl && viewEl.classList.contains('is-active'), `${v} 视图已激活`);
   ok(errors.length === errBefore, `${v} 视图渲染无 error${errors.length > errBefore ? '：' + errors.slice(errBefore).join(' | ') : ''}`);
+}
+
+/* ---------- 「为什么用双拼」页 ----------
+   这是一页纯静态介绍内容（不参与状态机），但仍要守住两条：
+   ① 它必须真的挂在路由上（view-why 与导航按钮对应），点了能切过去；
+   ② 页面里给出的**示例编码必须是真实正确的** —— 介绍页最容易写成
+      「看起来对」的编码，而它恰恰是新用户对双拼的第一印象。
+   所以这里不查「有没有字」，而是拿引擎把示例编码重新算一遍做比对。 */
+{
+  const whyView = q('#view-why');
+  ok(!!whyView, '存在「为什么用双拼」视图 view-why');
+
+  const whyBtn = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'why');
+  ok(!!whyBtn, '导航栏含「为什么用双拼」按钮');
+  ok(/双拼/.test(whyBtn ? whyBtn.textContent : ''), '导航按钮文案含「双拼」');
+
+  if (whyView) {
+    const text = whyView.textContent.replace(/\s+/g, ' ');
+
+    // 三块核心内容都要在：是什么 / 好处 / 代价
+    ok(/双拼是什么/.test(text), '含「双拼是什么」小节');
+    ok(/好处/.test(text), '含「好处」小节');
+    ok(/该不该学/.test(text), '含「该不该学 / 代价」小节');
+
+    // 必须诚实说明学习成本，不能只讲优点
+    ok(/变慢|学习成本|不适应/.test(text), '如实提示了学习成本（不是只讲好处）');
+
+    // 好处卡片至少 6 张
+    ok(qa('#view-why .why-benefit').length >= 6,
+      `好处卡片 ≥6 张（实际 ${qa('#view-why .why-benefit').length}）`);
+
+    // 代价列表非空
+    ok(qa('#view-why .why-caveat-list li').length >= 3,
+      `代价列表 ≥3 条（实际 ${qa('#view-why .why-caveat-list li').length}）`);
+
+    /* 正文里的示例编码必须是真编码。
+       作者写的是「双 = U+L」「状 = V+L」「长 = I+H」，这里逐个用 scheme
+       重新拆分，任何一处写错都会被抓住。 */
+    const examples = qa('#view-why .why-compare-row').map(row => {
+      const word = row.querySelector('.why-compare-word');
+      const keys = Array.from(row.querySelectorAll('.why-compare-keys b'))
+        .map(b => b.textContent.trim());
+      return { word: word ? word.textContent.trim() : '', keys };
+    }).filter(e => e.word && e.keys.length);
+
+    ok(examples.length >= 3, `对比表含 ≥3 个编码示例（实际 ${examples.length}）`);
+
+    const CHAR_PY = { 双: 'shuang', 状: 'zhuang', 长: 'chang' };
+    let checked = 0;
+    for (const ex of examples) {
+      const py = CHAR_PY[ex.word];
+      if (!py) continue;                       // 只校验在本测试里登记过的字
+      // splitSyllable 返回「候选数组」（如 xian 有 x+ian / xi+an 两种拆法），
+      // 示例编码命中其中任意一个候选都算正确。
+      const candidates = schMod.splitSyllable(py);
+      const shown = ex.keys.map(k => k.toUpperCase()).join('+');
+      const hit = candidates.some(c =>
+        c.steps.map(st => String(st.key).toUpperCase()).join('+') === shown);
+      const all = candidates.map(c => c.steps.map(st => String(st.key).toUpperCase()).join('+'));
+      ok(hit, `「${ex.word}」示例编码 ${shown} 命中引擎候选之一（${all.join(' / ')}）`);
+      checked++;
+    }
+    ok(checked >= 3, `已核对 ${checked} 个示例字的编码`);
+  }
 }
 
 // 统计页关键元素

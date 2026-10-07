@@ -852,6 +852,185 @@ table.weak-table .bar-cell { min-width: 110px; }
   border-top: 1px solid var(--border);
 }
 
+/* ---------------- 为什么用双拼 ---------------- */
+
+.why-p { margin: 0 0 14px; font-size: 13.5px; color: var(--text-2); line-height: 1.85; }
+.why-p strong { color: var(--text); font-weight: 650; }
+.why-p code { font-size: .92em; }
+
+/* 「双拼」两个字单独上色，和下面对比表里的声母/韵母呼应 */
+.why-hl-sheng { color: var(--sheng); }
+.why-hl-yun   { color: var(--yun); }
+
+.why-note {
+  border-left: 3px solid var(--primary);
+  background: var(--primary-soft);
+  border-radius: var(--radius-sm);
+  padding: 11px 15px;
+  margin: 18px 0 16px;
+  color: var(--text-2);
+}
+
+/* ---- 全拼 / 双拼 对比 ---- */
+
+.why-compare {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 14px;
+  align-items: stretch;
+  margin: 20px 0 18px;
+}
+
+.why-compare-col {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 14px 16px;
+}
+.why-compare-col.is-why {
+  border-color: #bcd2fb;
+  background: var(--primary-soft);
+}
+
+.why-compare-head {
+  font-size: 12px; font-weight: 700; letter-spacing: .4px;
+  color: var(--text-3); margin-bottom: 11px;
+}
+.why-compare-col.is-why .why-compare-head { color: var(--primary-dark); }
+
+.why-compare-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.why-compare-row:last-of-type { border-bottom: none; }
+
+.why-compare-word {
+  font-size: 15px; font-weight: 650; color: var(--text);
+  min-width: 24px;
+}
+.why-compare-keys {
+  font-family: var(--mono); font-size: 14.5px; color: var(--text-2);
+  letter-spacing: 3px; flex: 1;
+}
+.why-compare-keys b {
+  display: inline-block;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 1px 7px;
+  margin-right: 3px;
+  font-weight: 700;
+  color: var(--primary-dark);
+  letter-spacing: 0;
+  min-width: 26px;
+  text-align: center;
+}
+.why-compare-col.is-why .why-compare-keys b { border-color: #bcd2fb; }
+
+.why-compare-count {
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--text-3); white-space: nowrap;
+}
+.why-compare-col.is-why .why-compare-count { color: var(--primary-dark); font-weight: 700; }
+
+.why-compare-foot {
+  margin-top: 11px; padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-3);
+}
+.why-compare-col.is-why .why-compare-foot { color: var(--primary-dark); }
+
+.why-compare-arrow {
+  align-self: center;
+  font-size: 22px; color: var(--text-3);
+  user-select: none;
+}
+
+/* ---- 好处卡片 ---- */
+
+.why-benefits {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 12px;
+  margin: 4px 0 6px;
+}
+
+.why-benefit {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 14px 15px;
+  transition: border-color .16s, box-shadow .16s;
+}
+.why-benefit:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.why-benefit-icon { font-size: 19px; line-height: 1; margin-bottom: 8px; }
+.why-benefit-title {
+  font-size: 14px; font-weight: 650; color: var(--text);
+  margin-bottom: 6px; line-height: 1.4;
+}
+.why-benefit-body { font-size: 12.5px; color: var(--text-2); line-height: 1.7; }
+.why-benefit-body strong { color: var(--text); font-weight: 650; }
+.why-benefit-body code { font-size: .92em; }
+
+/* ---- 代价提示 ---- */
+
+.why-caveat {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--yun);
+  background: var(--yun-soft);
+  border-radius: var(--radius-sm);
+  padding: 15px 18px;
+  margin: 6px 0 4px;
+}
+.why-caveat-title {
+  font-size: 13.5px; font-weight: 700; color: #a9622a;
+  margin-bottom: 10px;
+}
+.why-caveat-list { margin: 0; padding-left: 20px; }
+.why-caveat-list li {
+  font-size: 13px; color: var(--text-2); line-height: 1.8;
+  margin-bottom: 8px;
+}
+.why-caveat-list li:last-child { margin-bottom: 0; }
+.why-caveat-list strong { color: var(--text); font-weight: 650; }
+
+/* ---- 学习节奏时间线 ---- */
+
+.why-timeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
+  gap: 12px;
+  margin: 4px 0 6px;
+}
+
+.why-stage {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 13px 15px;
+  position: relative;
+}
+.why-stage-when {
+  font-size: 12px; font-weight: 700; letter-spacing: .3px;
+  color: var(--primary-dark);
+  background: var(--primary-soft);
+  display: inline-block;
+  padding: 2px 9px; border-radius: 999px;
+  margin-bottom: 9px;
+}
+.why-stage-body { font-size: 12.5px; color: var(--text-2); line-height: 1.7; }
+.why-stage-hint {
+  display: inline-block;
+  margin-top: 7px;
+  font-size: 11.5px; color: var(--text-3);
+}
+
 /* ---------------- 设置 ---------------- */
 
 .settings-grid {
@@ -951,6 +1130,12 @@ table.weak-table .bar-cell { min-width: 110px; }
   .prompt.is-passage { font-size: 20px; }
 }
 
+@media (max-width: 700px) {
+  /* 对比表在窄屏改为上下堆叠，箭头转成竖向 */
+  .why-compare { grid-template-columns: 1fr; }
+  .why-compare-arrow { transform: rotate(90deg); padding: 2px 0; }
+}
+
 @media (max-width: 560px) {
   .brand-text span { display: none; }
   .hud-value { font-size: 17px; }
@@ -959,6 +1144,7 @@ table.weak-table .bar-cell { min-width: 110px; }
   .result-grid { grid-template-columns: 1fr; }
   .prompt { font-size: 27px; letter-spacing: 3px; }
   .prompt.is-passage { font-size: 17px; letter-spacing: 1px; }
+  .why-benefits { grid-template-columns: 1fr; }
 }
 
 @media print {
