@@ -10,6 +10,9 @@ _test/node_modules/
 _test/.chrome-profile/
 _test/shot-*.png
 _test/inj-*.js
+# 根目录下做截图注入用的临时脚本（shot.mjs 的 script-file 参数）
+.shot-*.js
+shot-*.png
 
 # 系统与编辑器
 .DS_Store

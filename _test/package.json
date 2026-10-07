@@ -5,9 +5,10 @@
   "description": "开发期自检脚本的依赖清单。应用本体零依赖，这里只是为了集成测试能在模拟 DOM 中运行。",
   "type": "module",
   "scripts": {
-    "test": "node verify.mjs && node engine.mjs && node integration.mjs",
+    "test": "node verify.mjs && node engine.mjs && node storage.mjs && node integration.mjs",
     "test:verify": "node verify.mjs",
     "test:engine": "node engine.mjs",
+    "test:storage": "node storage.mjs",
     "test:integration": "node integration.mjs",
     "serve": "node serve.mjs"
   },

@@ -763,6 +763,75 @@ if (sel) {
   ok(loaded.duration === 300, `时长设置已持久化（实际 ${loaded.duration}）`);
 }
 
+/* ---------- 存储降级：写失败后马上读 ---------- */
+console.log('\n【9b】存储配额满后的降级（写失败 → 立即读）');
+const errCountBefore9b = errors.length;
+{
+  /* 这里的 localStorage 就是页面用的那个（storageMap 支撑）。
+     思路：把 setItem 改成「除探测键外一律抛配额错」，模拟空间写满，
+     然后通过应用真实的存储 API 写一条、马上读一条 ——
+     旧实现会把数据只塞进内存而读路径仍走 localStorage，于是读到 null。 */
+  const realSet = localStorage.setItem;
+  const realGet = localStorage.getItem;
+  let quotaMode = false;
+  localStorage.setItem = function (k, v) {
+    if (quotaMode && !String(k).includes('__probe')) {
+      const e = new Error('quota exceeded'); e.name = 'QuotaExceededError'; e.code = 22;
+      throw e;
+    }
+    return realSet.call(this, k, v);
+  };
+  localStorage.getItem = function (k) { return realGet.call(this, k); };
+
+  // 先确认正常态可写可读
+  ok(sMod.writeJSON('it.quota.probe', { a: 1 }) === true, '配额未满时写入成功');
+
+  quotaMode = true;
+  // 降级路径本身会打 console.error（"清理后仍写入失败"）—— 那是预期日志，
+  // 不是缺陷。这里临时把它挡掉，避免污染后面「全程无未捕获 error」的检查。
+  const mutedError = console.error;
+  console.error = () => {};
+  const wrote = sMod.writeJSON('it.quota.held', { mark: 'need-me' });
+  console.error = mutedError;
+  ok(wrote === false, '配额满时写入返回 false（调用方据此提示用户）');
+
+  // ★ 核心：写失败之后「马上读」，内存里的数据必须还在
+  const back = sMod.readJSON('it.quota.held', null);
+  ok(back && back.mark === 'need-me',
+    `★ 写入失败后立即读取仍能拿到数据（实际 ${back === null ? 'null —— 数据丢了' : JSON.stringify(back)}）`);
+
+  ok(sMod.isDegradedToMemory() === true, 'isDegradedToMemory() 已置位');
+  ok(sMod.isStorageAvailable() === false, 'isStorageAvailable() 反映当前写不进去');
+
+  // 降级期间还能继续保存成绩记录（不抛异常、不丢数据）
+  let appendOk = true;
+  try {
+    sMod.appendRecord(sMod.makeRecord({
+      mode: 'char', totalChars: 20, durationSec: 30, speed: 40, accuracy: 90
+    }));
+  } catch (e) { appendOk = false; }
+  ok(appendOk, '降级期间 appendRecord 不抛异常');
+  const h = sMod.loadHistory();
+  ok(h.length >= 1 && h[h.length - 1].date, '降级期间成绩记录仍可读写');
+
+  // 空间释放 → 自动恢复落盘，且不丢数据
+  quotaMode = false;
+  ok(sMod.isStorageAvailable() === true, '空间释放后探测恢复可用（降级不是单向的）');
+  const back2 = sMod.readJSON('it.quota.held', null);
+  ok(back2 && back2.mark === 'need-me', '★ 恢复过程中内存数据没有丢');
+  ok(sMod.readJSON('it.quota.probe', null).a === 1, '恢复后旧数据仍可读');
+  localStorage.setItem = realSet;
+  localStorage.getItem = realGet;
+}
+// 本段只允许出现「预期内的降级日志」，不允许别的 error 混进来
+{
+  const unexpected = errors.slice(errCountBefore9b).filter(m => !/转为内存存储|写入失败/.test(m));
+  ok(unexpected.length === 0,
+    `降级测试只产生预期日志${unexpected.length ? '，意外：' + unexpected.join(' | ') : ''}`);
+  // 把预期的降级日志从总账里剔除，交给最终检查时只看真正的异常
+  errors.length = errCountBefore9b;
+}
+
 /* ---------- 键位图交互 ---------- */
 console.log('\n【10】键位图交互');
 const navKeymap = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'keymap');

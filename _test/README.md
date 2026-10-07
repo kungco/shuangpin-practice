@@ -1,6 +1,6 @@
 # 自检脚本
 
-三个互相独立的测试套件，**只用于开发期自检，不影响应用运行**。
+四个互相独立的测试套件，**只用于开发期自检，不影响应用运行**。
 （应用本身零依赖，但**不能直接双击 `index.html`** —— 浏览器禁止在 `file://`
 协议下加载 ES 模块，必须经由本地 HTTP 服务打开。见文末说明。）
 
@@ -8,7 +8,11 @@
 |---|---|---|
 | `verify.mjs` | 双拼方案正确性、题库可拆分性、键位表完整性、边界输入、**测验出题配比**、**评分算法** | 无 |
 | `engine.mjs` | 练习引擎逻辑：逐键校验、推进、统计、暂停、限时、异常输入、**考试模式无提示硬约束** | 无 |
+| `storage.mjs` | **存储降级**（配额满 → 内存 → 恢复落盘）、**导入合并**、**日报与历史一致性** | 无 |
 | `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**） | `linkedom` |
+
+> `storage.mjs` 是唯一「零依赖 + 毫秒级」的套件，且不引入 linkedom ——
+> 因为 `storage.js` 本身不碰 DOM。适合改存储相关代码时高频单跑。
 
 另有三个**开发辅助**脚本（属于工具，非测试）：
 
@@ -39,12 +43,12 @@
 
 ## 运行
 
-**推荐（一次装依赖，之后跑全部三套）：**
+**推荐（一次装依赖，之后跑全部四套）：**
 
 ```bash
 cd _test
 npm ci            # 按 package-lock.json 精确还原依赖（首次或换环境时执行）
-npm test          # 依次跑 verify → engine → integration
+npm test          # 依次跑 verify → engine → storage → integration
 ```
 
 也可以单独跑：
@@ -52,6 +56,7 @@ npm test          # 依次跑 verify → engine → integration
 ```bash
 node _test/verify.mjs
 node _test/engine.mjs
+node _test/storage.mjs
 node _test/integration.mjs
 ```
 
@@ -60,7 +65,7 @@ node _test/integration.mjs
 
 ### 依赖可复现性（为什么要用 `npm ci`）
 
-`integration.mjs` 需要 `linkedom` 来模拟 DOM，`verify.mjs` 与 `engine.mjs` 则**零依赖**。
+`integration.mjs` 需要 `linkedom` 来模拟 DOM，其余三套（`verify` / `engine` / `storage`）**零依赖**。
 为了「换个环境/换个人跑结果都一样」，`_test/` 下提交了两个文件：
 
 | 文件 | 作用 |
@@ -76,21 +81,44 @@ node _test/integration.mjs
 ### CI
 
 `.github/workflows/tests.yml` 会在 push / PR 时用 **Node 18 / 20 / 22** 三个版本
-各跑一遍三套测试：
-`actions/checkout` → `setup-node` → `cd _test && npm ci` → 依次执行三个脚本。
+各跑一遍四套测试：
+`actions/checkout` → `setup-node` → `cd _test && npm ci` → 依次执行四个脚本。
 这样「检出目录没有 linkedom、集成测试跑不起来」的情况不会再出现 ——
 依赖由锁文件保证，runner 每次都是干净且一致的。
 
 ## 关于 `node_modules`
 
 `_test/node_modules/` 里只装了 `linkedom`（含 19 个传递依赖）供 `integration.mjs` 使用，
-**不进仓库**。前两个套件零依赖，删掉整个目录也照样跑；只有 `integration.mjs` 需要它。
+**不进仓库**。另外三套零依赖，删掉整个目录也照样跑；只有 `integration.mjs` 需要它。
 
 重建方式（务必用 `ci`，版本以锁文件为准）：
 
 ```bash
 cd _test && npm ci
 ```
+
+## `storage.mjs` 覆盖什么
+
+存储层的坑有个共同点：**只在真实使用中才暴露**，平时的正常路径怎么点都看不出来。
+这个套件把出过事故的几类行为钉死：
+
+| 用例 | 钉住的规则 |
+|---|---|
+| 【1】配额满后的降级读写 | **写失败后立即读**必须还能拿到内存里的数据（旧实现读到 `null`） |
+| 【2】清理后重试 | 一条写不动 ≠ 整体降级；`pruneHistory` 重试成功就不该降级 |
+| 【3】空间释放后恢复 | 降级**不是单向**的；恢复过程不能丢内存里攒的数据 |
+| 【4】localStorage 不可用 | 隐身模式下不抛异常，靠内存兜住，`exportAll` / `storageUsage` 仍可用 |
+| 【5】跨设备同日导入 | **日报必须与历史逐项相等**（旧实现逐字段取 max 会少算） |
+| 【6】daily 独有日期 | 历史里没有、只在老备份 daily 里的日期不能被重建覆盖掉 |
+| 【7】重复导入幂等 | 同一份备份导三次，日报逐字段不变 |
+| 【8】增量 vs 全量 | `updateDaily`（逐条累加）与 `rebuildDailyFromHistory`（全量重建）产出**完全相同**的对象 |
+
+测试用一个「按字节数判断」的 localStorage 桩模拟配额 —— 真实配额满不是
+「setItem 永远抛」，而是取决于**这一条**的大小，所以桩里可以精确地
+只打掉某一条写入，从而测出「清理老记录后重试成功」这条路径。
+
+> 8 组用例都验证过「把旧实现注入回去会失败」：注入 bug 后【1】报 2 项、
+> 【5】【6】共报 6 项未通过。
 
 ## 测试环境的两处「降级垫片」（不是应用 bug）
 
