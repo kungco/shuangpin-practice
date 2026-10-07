@@ -295,6 +295,19 @@ const qa = (s) => Array.from(document.querySelectorAll(s));
 ok(!!q('#nav'), '导航栏存在');
 ok(qa('#nav .nav-btn').length === 6, `导航按钮 6 个（实际 ${qa('#nav .nav-btn').length}）`);
 
+/* 导航顺序：介绍页在前，「练习」放到最后。
+   理由：新用户进来先要知道「双拼是什么 / 值不值得学」，再谈练不练；
+   把「练习」放末位，顺带降低误点开始的门槛感。顺序本身是产品决策，
+   容易被后续插页打乱，因此这里锁死顺序，而不只是锁数量。 */
+{
+  const order = qa('#nav .nav-btn').map(b => b.getAttribute('data-view'));
+  const want = ['why', 'keymap', 'stats', 'review', 'settings', 'practice'];
+  ok(JSON.stringify(order) === JSON.stringify(want),
+    `导航顺序为 ${want.join(' → ')}（实际 ${order.join(' → ')}）`);
+  ok(order[order.length - 1] === 'practice', '「练习」排在最后一位');
+  ok(order[0] === 'why', '「为什么用双拼」排在第一位');
+}
+
 ok(qa('#modeGrid .mode-card').length === 8, `模式卡片 8 个（实际 ${qa('#modeGrid .mode-card').length}）`);
 
 // 新增的拆分成分练习模式必须出现在选择面板上
