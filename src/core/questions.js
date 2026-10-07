@@ -16,8 +16,8 @@
  *   把声母、韵母单独抽出来问，诊断粒度立刻从「音节」细到「成分」，
  *   错在哪一半一目了然。
  *
- * 题库规模（见 data/pinyin.js）：945 单字（6 档） / 299 词组 / 45 短文，
- * 合计 1289 个可出题项，另加键位图、声母/韵母专项、音节拆分四个无限题库。
+ * 题库规模（见 data/pinyin.js）：1107 单字（7 档） / 299 词组 / 45 短文，
+ * 合计 1451 个可出题项，另加键位图、声母/韵母专项、音节拆分四个无限题库。
  *
  * 每道题的统一结构（Question）：
  *   {
@@ -462,7 +462,7 @@ export { ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS };
  * 生成一套练习题
  * @param {object} opts
  *   - mode:      'keymap' | 'sheng' | 'yun' | 'split' | 'char' | 'phrase' | 'passage'
- *   - tier:      1–6（仅 char 模式有效，表示起始字表分层）
+ *   - tier:      1–7（仅 char 模式有效，表示起始字表分层）
  *   - count:     题目数量（0 = 不限，默认 20）
  *   - adaptive:  是否启用自适应难度（根据正确率升降）
  * @returns {Array<Question>}
@@ -492,7 +492,7 @@ export function generateQuestions(opts = {}) {
           q = makeSplitQuestion(usedPinyin);
           break;
         case 'char': {
-          // 渐进：把题量沿字表分层由易到难铺开（当前 6 档）。
+          // 渐进：把题量沿字表分层由易到难铺开（当前 7 档）。
           // 用「档位数」动态均分，避免以后增减档位时曲线写死而失真。
           const total = Math.max(1, CHAR_TIERS.length);
           const ratio = i / Math.max(1, target - 1);

@@ -58,6 +58,18 @@ ok(PHRASES.length >= 250, `词组应 ≥250，实际 ${PHRASES.length}`);
 ok(PASSAGES.length >= 30, `短文应 ≥30，实际 ${PASSAGES.length}`);
 console.log(`  单字 ${Object.keys(ALL_CHARS).length} / 词组 ${PHRASES.length} / 短文 ${PASSAGES.length}`);
 
+console.log('【2c】词组语料覆盖闭合性（词组里的每个字都要能单独练到）');
+{
+  const charSet = new Set(Object.keys(ALL_CHARS));
+
+  const inPhrase = new Set();
+  for (const p of PHRASES) for (const c of p.w) if (!charSet.has(c)) inPhrase.add(c);
+  ok(inPhrase.size === 0,
+    `词组中有 ${inPhrase.size} 个字不在单字表（不该只在词组里出现）: ${[...inPhrase].join(' ')}`);
+
+  console.log(`  词组 ${PHRASES.length} 个的每个字都在单字表内（共 ${CHAR_TIERS.length} 档）`);
+}
+
 const dupChars = [];
 {
   const owner = new Map();
@@ -91,7 +103,7 @@ const dupPassage = [];
 ok(dupPassage.length === 0, `短文重复: ${dupPassage.join(' ')}`);
 console.log(`  单字 / 词组 / 短文均无重复`);
 
-console.log('【2c】短文语料 100% 有拼音');
+console.log('【2d】短文语料 100% 有拼音');
 {
   let missSet = new Set();
   for (const p of PASSAGES) {

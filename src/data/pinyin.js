@@ -7,8 +7,10 @@
  *   3. 短文段落（含标点）
  *   4. 声母表 / 韵母表 / 合法音节表
  *
- * 数据规模刻意保持精简（约 1000 字 + 250 词 + 30 段短文），
+ * 数据规模刻意保持精简（1107 字 / 299 词 / 45 段短文），
  * 既保证练习内容覆盖高频用字，又让整个应用保持「单文件可离线」。
+ * 其中第 7 组字表专门用于补齐词组语料——确保词组里出现的每个字
+ * 都能在单字模式下单独练到。
  */
 
 /* ============================================================
@@ -162,8 +164,43 @@ export const CHARS_TIER6 = {
   "迁": "qian", "移": "yi"
 };
 
+/* --- 第 7 组：词组配套字（补齐词组语料，使「词组的每个字都能在单字模式练到」）---
+   这些字原先只出现在词组里（如「喜欢」「选择」「健康」「备份」），
+   单字模式却练不到，属于数据层的不一致。此处按主题分组补入，
+   拼音取自词组数据本身，已逐字复核（含多音字：打折 zhe / 负载 zai /
+   账号 hao / 选择 ze / 瑜伽 jia / 锲而不舍 qie）。 */
+export const CHARS_TIER7 = {
+  // 情感与态度
+  "喜": "xi", "欢": "huan", "希": "xi", "爱": "ai", "焦": "jiao", "虑": "lv", "兴": "xing", "奋": "fen",
+  "孤": "gu", "骄": "jiao", "傲": "ao", "谦": "qian", "虚": "xu", "幽": "you", "犹": "you", "豫": "lv",
+  "若": "ruo", "苟": "gou", "迫": "po", "致": "zhi", "恒": "heng", "锲": "qie", "紊": "wen",
+  // 健康与身体
+  "健": "jian", "康": "kang", "眠": "mian", "免": "mian", "疫": "yi", "苗": "miao", "锻": "duan", "炼": "lian",
+  "瑜": "yu", "伽": "jia", "篮": "lan", "球": "qiu", "足": "zu", "乒": "ping", "乓": "pang", "旋": "xuan",
+  "捐": "juan", "躯": "qu", "夹": "jia", "察": "cha", "视": "shi",
+  // 饮食与起居
+  "奶": "nai", "鸡": "ji", "蛋": "dan", "蔬": "shu", "餐": "can", "厅": "ting", "碗": "wan", "刷": "shua",
+  "牙": "ya", "酒": "jiu", "店": "dian", "火": "huo", "炉": "lu", "麦": "mai", "牛": "niu", "嗅": "xiu",
+  // 出行与消费
+  "购": "gou", "付": "fu", "款": "kuan", "递": "di", "包": "bao", "卖": "mai", "折": "zhe", "惠": "hui",
+  "票": "piao", "拍": "pai", "航": "hang", "导": "dao", "铁": "tie", "李": "li", "览": "lan", "浏": "liu",
+  // 技术与办公
+  "器": "qi", "库": "ku", "码": "ma", "编": "bian", "译": "yi", "索": "suo", "引": "yin", "查": "cha",
+  "份": "fen", "级": "ji", "限": "xian", "账": "zhang", "号": "hao", "册": "ce", "签": "qian", "协": "xie",
+  "端": "duan", "迟": "chi", "集": "ji", "负": "fu", "载": "zai", "架": "jia", "构": "gou", "版": "ban",
+  "署": "shu", "试": "shi", "项": "xiang", "客": "ke", "汇": "hui", "议": "yi",
+  // 表达与书面
+  "参": "can", "选": "xuan", "择": "ze", "备": "bei", "帮": "bang", "助": "zhu", "育": "yu", "济": "ji",
+  "境": "jing", "标": "biao", "况": "kuang", "众": "zhong", "妇": "fu", "烂": "lan", "养": "yang", "童": "tong",
+  "鹰": "ying", "互": "hu", "联": "lian", "星": "xing", "普": "pu", "功": "gong", "异": "yi", "渠": "qu",
+  "井": "jing", "万": "wan", "竹": "zhu", "乍": "zha", "泄": "xie", "班": "ban", "印": "yin", "示": "shi",
+  "摄": "she", "充": "chong", "室": "shi", "观": "guan", "融": "rong", "贯": "guan", "故": "gu", "补": "bu",
+  "拙": "zhuo", "益": "yi", "抒": "shu", "登": "deng", "峰": "feng", "博": "bo", "源": "yuan", "石": "shi",
+  "庭": "ting", "鼓": "gu", "松": "song", "温": "wen", "仔": "zi", "营": "ying", "夺": "duo", "换": "huan"
+};
+
 /* 合并后的全量单字表 */
-export const ALL_CHARS = Object.assign({}, CHARS_TIER1, CHARS_TIER2, CHARS_TIER3, CHARS_TIER4, CHARS_TIER5, CHARS_TIER6);
+export const ALL_CHARS = Object.assign({}, CHARS_TIER1, CHARS_TIER2, CHARS_TIER3, CHARS_TIER4, CHARS_TIER5, CHARS_TIER6, CHARS_TIER7);
 
 /* 供练习引擎使用的分层字表（数组形式，保持声明顺序即近似常用度顺序） */
 export const CHAR_TIERS = [
@@ -172,7 +209,8 @@ export const CHAR_TIERS = [
   { id: 3, name: "中频字",   data: CHARS_TIER3 },
   { id: 4, name: "进阶字",   data: CHARS_TIER4 },
   { id: 5, name: "书面字",   data: CHARS_TIER5 },
-  { id: 6, name: "扩充字",   data: CHARS_TIER6 }
+  { id: 6, name: "扩充字",   data: CHARS_TIER6 },
+  { id: 7, name: "词组配套", data: CHARS_TIER7 }
 ];
 
 /* ============================================================
