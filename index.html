@@ -517,7 +517,7 @@
 
         <div class="settings-toggles">
           <label class="checkbox"><input type="checkbox" id="setMiniKeymap" checked /><i></i>练习时显示迷你键位图</label>
-          <label class="checkbox"><input type="checkbox" id="setSound" /><i></i>按键音效</label>
+          <label class="checkbox"><input type="checkbox" id="setSound" /><i></i>按键音效（答对轻响、答错低响、完成提示音）</label>
           <label class="checkbox"><input type="checkbox" id="setStrict" checked /><i></i>严格模式（输错必须修正当前键）</label>
           <label class="checkbox"><input type="checkbox" id="setSkipPunct" checked /><i></i>短文跟打时自动跳过标点</label>
           <label class="checkbox"><input type="checkbox" id="setHint" checked /><i></i>卡住时自动提示（在键位图上闪烁该键）</label>
@@ -549,8 +549,33 @@
             </select>
           </label>
         </div>
+        <p class="footnote" id="shortcutNote" style="margin-top:2px">
+          练习中随时可按 <code id="noteHintKey">Tab</code> 立刻查看当前键的答案，
+          按 <code id="noteSkipKey">Backspace</code> 可跳过这个字。
+        </p>
+
+        <h3 class="sub-title">快捷键</h3>
+        <p class="panel-sub" style="margin-top:-6px">
+          点击右侧按键即可改键：按下想用的新键完成设置，
+          按 <code>Delete</code> 解绑，按 <code>Esc</code> 取消。
+          把 <strong>Tab</strong> 解绑可以让它恢复成浏览器原生的焦点导航键。
+        </p>
+        <div class="shortcut-list" id="shortcutList"></div>
+
+        <h3 class="sub-title">无障碍</h3>
+        <div class="settings-grid">
+          <label class="field">
+            <span>动态效果</span>
+            <select id="setReduceMotion">
+              <option value="auto" selected>跟随系统</option>
+              <option value="on">减少动态效果</option>
+              <option value="off">保留全部动画</option>
+            </select>
+          </label>
+        </div>
         <p class="footnote" style="margin-top:2px">
-          练习中随时可按 <code>Tab</code> 立刻查看当前键的答案，按 <code>Backspace</code> 可跳过这个字。
+          开启「减少动态效果」后，答错的抖动会换成静态描边提示，
+          避免对前庭敏感的用户造成不适。默认跟随操作系统设置。
         </p>
 
         <h3 class="sub-title">数据管理</h3>
@@ -562,7 +587,7 @@
           <button class="btn btn-danger btn-sm" id="btnResetSettings">恢复默认设置</button>
         </div>
 
-        <p class="footnote">
+        <p class="footnote" id="storageNote">
           所有数据保存在浏览器 localStorage 中，不会上传到任何服务器。清除浏览器数据会导致记录丢失，建议定期导出备份。
         </p>
       </div>

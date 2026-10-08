@@ -87,6 +87,34 @@ function degradeToMemory(reason) {
 }
 
 /**
+ * 当前存储状态的**可读名称**。
+ *
+ * 给设置页 / 状态提示用。之所以要一个「名称」而不是直接暴露内部枚举：
+ * 内部值（null / true / false / 'quota-memory'）是实现细节，将来再加一态
+ * 不该逼着每个 UI 点都改；而 UI 真正想说的是「数据现在存在哪」。
+ *
+ * @returns {'persistent'|'memory'|'quota-memory'|'unprobed'}
+ */
+export function storageModeName() {
+  if (storageAvailable === null) return 'unprobed';
+  if (storageAvailable === true) return 'persistent';
+  if (storageAvailable === 'quota-memory') return 'quota-memory';
+  return 'memory';
+}
+
+/**
+ * 仅供测试：把存储状态与内存缓存清回初始态。
+ *
+ * 模块级 state（storageAvailable / memoryStore）会跨用例串味，
+ * 测试每换一个 localStorage 桩就得复位一次，否则第 2 个用例会
+ * 拿着第 1 个用例的探测结果跑。
+ */
+export function _resetStorageState() {
+  storageAvailable = null;
+  memoryStore.clear();
+}
+
+/**
  * 尝试从「配额满」状态恢复：探测能否写、并把内存里的数据补写回 localStorage。
  *
  * 为什么需要它：降级后内存里攒的是最新数据（读也优先读内存），一旦用户
@@ -225,7 +253,29 @@ export const DEFAULT_SETTINGS = {
   skipPunct: true,
   hint: true,          // 卡住自动提示总开关
   hintDelay: 3000,     // 停留多久开始闪键位（毫秒，0 = 不闪）
-  revealDelay: 6000    // 停留多久直接给答案（毫秒，0 = 不给）
+  revealDelay: 6000,   // 停留多久直接给答案（毫秒，0 = 不给）
+  /* 动效偏好。'auto' 跟随系统 prefers-reduced-motion；
+     'on'/'off' 是用户显式覆盖系统设置（有些用户系统开着但本应用想要动画）。 */
+  reduceMotion: 'auto',
+  /* 复习队列：是否只练「到期」的错题（间隔重复）。false = 练全部易错项 */
+  reviewDueOnly: true,
+  /* 快捷键。对象在 loadSettings 里单独处理（不是标量），
+     合并/校验逻辑见 ui/a11y.js::mergeShortcuts */
+  shortcuts: null
+};
+
+/** 设置项里属于「结构化对象」的键，走各自的合并逻辑而非标量类型校验 */
+const SETTINGS_OBJECT_KEYS = ['shortcuts'];
+
+/**
+ * 取值受限的枚举型设置：非法值一律回落到默认值。
+ *
+ * 为什么单独列一张表：这类设置一旦存进脏值（手工改存储、旧版本残留、
+ * 导入的备份来自别的分支），下游 switch / if 就会走进「没有分支匹配」
+ * 的空白区 —— 表现是「设置不生效但也不报错」，最难查。
+ */
+const SETTINGS_ENUMS = {
+  reduceMotion: ['auto', 'on', 'off']
 };
 
 export function loadSettings() {
@@ -233,6 +283,8 @@ export function loadSettings() {
   const merged = Object.assign({}, DEFAULT_SETTINGS);
   if (raw && typeof raw === 'object') {
     for (const k of Object.keys(DEFAULT_SETTINGS)) {
+      // 结构化字段不在这里处理，交给调用方（main.js 用 mergeShortcuts）
+      if (SETTINGS_OBJECT_KEYS.includes(k)) continue;
       if (raw[k] !== undefined && raw[k] !== null) {
         // 类型校验：防止手工改坏存储导致运行时异常
         if (typeof DEFAULT_SETTINGS[k] === 'boolean') {
@@ -241,8 +293,18 @@ export function loadSettings() {
           const n = Number(raw[k]);
           merged[k] = Number.isFinite(n) ? n : DEFAULT_SETTINGS[k];
         } else {
-          merged[k] = String(raw[k]);
+          const s = String(raw[k]);
+          // 枚举型：只认白名单里的值，其余回落到默认
+          const allow = SETTINGS_ENUMS[k];
+          merged[k] = (allow && !allow.includes(s)) ? DEFAULT_SETTINGS[k] : s;
         }
+      }
+    }
+    // 结构化字段原样带出（形制由各自的 merge 函数负责），
+    // 但只接受对象，避免脏数据把下游搞崩
+    for (const k of SETTINGS_OBJECT_KEYS) {
+      if (raw[k] && typeof raw[k] === 'object' && !Array.isArray(raw[k])) {
+        merged[k] = raw[k];
       }
     }
   }
@@ -364,6 +426,19 @@ function num(v, digits) {
   return digits ? Math.round(n * 10 ** digits) / 10 ** digits : Math.round(n);
 }
 
+/**
+ * 取一个「小数也要保住」的数值。
+ *
+ * 为什么不能直接用 num()：num(v) 不带 digits 时会**四舍五入到整数**，
+ * 而 ease 是 1.3–2.8 之间的小数 —— 用 num 会把 2.5 变成 3、把下限 1.3
+ * 变成 1，夹在 [EASE_MIN, EASE_MAX] 里的值会被舍入顶出边界，
+ * 于是「ease 上限 2.8」这条规则形同虚设。
+ */
+function numFloat(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /** 本地日期 YYYY-MM-DD */
 export function dateStr(d) {
   const dt = d instanceof Date ? d : new Date();
@@ -428,9 +503,132 @@ function updateDaily(record) {
 }
 
 /* ============================================================
-   易错字词
-   结构： { "字或词": { key, char, word, pinyin, count, lastTs, correct } }
+   易错字词 + 间隔重复调度
+   ------------------------------------------------------------
+   记录结构（在原来的基础上扩展了复习调度字段）：
+     {
+       key, char, word, pinyin,
+       count,      // 累计错误次数
+       correct,    // 累计正确次数
+       lastTs,     // 最后一次出错时间
+       mastered,   // 兼容旧字段：连续答对足够多时置位
+
+       // ---- 间隔重复（SM-2 简化版）新增 ----
+       streak,     // 连续答对次数（答错清零）
+       interval,   // 当前复习间隔（天）
+       ease,       // 难度系数（SM-2 的 EF，1.3–2.8）
+       due,        // 下次复习时间戳（ms）
+       reviewedAt  // 上次复习时间戳（ms）
+     }
    ============================================================ */
+
+/* ---- 间隔重复参数 ---- */
+
+/** 各阶段的起始间隔（天）。答对一次就往后走一格。 */
+export const REVIEW_STEPS = [1, 3, 7, 16, 35, 75];
+
+/** 难度系数上下限（SM-2 的经典取值） */
+export const EASE_MIN = 1.3;
+export const EASE_MAX = 2.8;
+export const EASE_DEFAULT = 2.5;
+
+/** 答错后的重来间隔（天）。不是 0 —— 0 会让它立刻又在待复习列表里刷屏。 */
+export const RELAPSE_INTERVAL = 1;
+
+const DAY_MS = 86400000;
+
+/**
+ * 首次进入复习队列时，多久之后到期。
+ * 用 1 天而不是「立刻」：刚错的字应该当场在练习里消化，
+ * 隔天再抽到才是「复习」的意义。
+ */
+const NEW_DUE_MS = DAY_MS;
+
+/**
+ * 从当前状态推出「下一次间隔」。
+ *
+ * SM-2 简化版的核心：
+ *   - 答对：间隔按 REVIEW_STEPS 阶梯前进；越往后每次乘 ease 拉长
+ *   - 答错：间隔重置回 RELAPSE_INTERVAL，并小幅下调 ease
+ *
+ * 为什么用「阶梯 + ease」而不是纯 SM-2 的 `interval * EF`：
+ * 纯乘法的起步太陡（1 → 2.5 → 6.25 → 15.6），对打字练习这种
+ * 「一个字的键位其实两三次就够」的场景过度拖长，反而不如固定阶梯直观。
+ *
+ * @param {object} entry
+ * @param {boolean} correct
+ * @returns {{interval:number, ease:number, streak:number}}
+ */
+export function nextSchedule(entry, correct) {
+  const e = entry || {};
+  // ease 必须用 numFloat 读 —— 用 num 会把它四舍五入成整数，
+  // 直接毁掉「1.3–2.8 的小数刻度」这层设计（详见 numFloat 注释）
+  let ease = numFloat(e.ease) || EASE_DEFAULT;
+  let streak = Math.max(0, Math.floor(num(e.streak)));
+  let interval = Math.max(0, num(e.interval));
+
+  if (!correct) {
+    // 答错：清零连对、间隔回落、难度上调（越难的东西间隔越短）
+    return {
+      interval: RELAPSE_INTERVAL,
+      ease: Math.max(EASE_MIN, ease - 0.2),
+      streak: 0
+    };
+  }
+
+  streak += 1;
+  // 阶梯内先按步进
+  const stepIdx = Math.min(streak - 1, REVIEW_STEPS.length - 1);
+  let next = REVIEW_STEPS[stepIdx];
+  // 超出阶梯后按 ease 继续拉长（例如第 7 次：75 * 2.5）
+  if (streak > REVIEW_STEPS.length) {
+    const base = REVIEW_STEPS[REVIEW_STEPS.length - 1];
+    next = Math.round(base * Math.pow(ease, streak - REVIEW_STEPS.length));
+  }
+  // 保证总是不小于上一次（避免 ease 被下调后间隔反而变短）
+  next = Math.max(interval || 0, next || 1);
+  // 上限一年，避免溢出成天文数字
+  next = Math.min(365, next);
+
+  // 答得越顺（连对越多）难度略微下调 → 以后间隔拉得更长
+  if (streak >= 3) ease = Math.min(EASE_MAX, ease + 0.1);
+
+  return { interval: next, ease, streak };
+}
+
+/**
+ * 计算下次到期时间戳。
+ * @param {number} now
+ * @param {number} intervalDays
+ */
+export function dueAt(now, intervalDays) {
+  const days = Math.max(0, num(intervalDays));
+  return Number(now || Date.now()) + Math.max(1, Math.round(days)) * DAY_MS;
+}
+
+/** 把一条记录规范成完整形状（兼容旧数据 / 脏数据） */
+function normalizeWeakEntry(e, key) {
+  const base = {
+    key: key || e.key || '',
+    char: e.char || '',
+    word: e.word || '',
+    pinyin: e.pinyin || '',
+    count: num(e.count),
+    correct: num(e.correct),
+    lastTs: num(e.lastTs),
+    mastered: !!e.mastered,
+    streak: Math.max(0, Math.floor(num(e.streak))),
+    interval: Math.max(0, num(e.interval)),
+    ease: numFloat(e.ease) || EASE_DEFAULT,
+    due: num(e.due),
+    reviewedAt: num(e.reviewedAt)
+  };
+  // 老数据没有 due：补成「已到期」，让它进入待复习队列。
+  // 这是有意为之 —— 升级后用户应该看到历史错题重新排队，
+  // 而不是因为缺字段而被静默忽略。
+  if (!base.due) base.due = base.lastTs ? base.lastTs + NEW_DUE_MS : Date.now();
+  return base;
+}
 
 export function loadWeak() {
   const obj = readJSON(KEYS.weak, {});
@@ -443,7 +641,9 @@ export function saveWeak(map) {
 
 /**
  * 记录一次错误
- * @param {object} item { char?, word?, pinyin?, key? }
+ *
+ * 同时把这条打回复习队列的起点：连对清零、间隔回落、明天到期。
+ * @param {object} item { char?, word?, pinyin? }
  */
 export function recordWeak(item) {
   if (!item) return;
@@ -451,20 +651,23 @@ export function recordWeak(item) {
     const map = loadWeak();
     const key = item.word || item.char || '';
     if (!key) return;
-    const cur = map[key] || {
-      key,
-      char: item.char || '',
-      word: item.word || '',
-      pinyin: item.pinyin || '',
-      count: 0,
-      correct: 0,
-      lastTs: 0
-    };
+    const cur = normalizeWeakEntry(map[key] || {}, key);
+    const now = Date.now();
+
     cur.count += 1;
-    cur.lastTs = Date.now();
+    cur.lastTs = now;
     if (item.pinyin) cur.pinyin = item.pinyin;
     if (item.char) cur.char = item.char;
     if (item.word) cur.word = item.word;
+
+    // 答错 → 重新排期
+    const s = nextSchedule(cur, false);
+    cur.streak = s.streak;
+    cur.interval = s.interval;
+    cur.ease = s.ease;
+    cur.due = dueAt(now, s.interval);
+    cur.mastered = false;          // 又错了，谈不上掌握
+
     map[key] = cur;
     saveWeak(map);
   } catch (err) {
@@ -472,19 +675,33 @@ export function recordWeak(item) {
   }
 }
 
-/** 记录一次正确（用于复习后消错） */
+/**
+ * 记录一次正确（用于复习后消错 + 推进间隔）
+ *
+ * 这是间隔重复的「答对」路径：连对 +1，间隔按 SM-2 简化版前进。
+ */
 export function recordWeakCorrect(item) {
   if (!item) return;
   try {
     const map = loadWeak();
     const key = item.word || item.char || '';
     if (!key || !map[key]) return;
-    map[key].correct = (map[key].correct || 0) + 1;
-    map[key].lastTs = Date.now();
-    // 连续正确多次后淡化权重（并非删除，保留历史）
-    if (map[key].correct >= 3 && map[key].count <= map[key].correct) {
-      map[key].mastered = true;
-    }
+    const cur = normalizeWeakEntry(map[key], key);
+    const now = Date.now();
+
+    cur.correct += 1;
+    cur.reviewedAt = now;
+
+    const s = nextSchedule(cur, true);
+    cur.streak = s.streak;
+    cur.interval = s.interval;
+    cur.ease = s.ease;
+    cur.due = dueAt(now, s.interval);
+
+    // 连对到一定次数且错误率已经不高 → 标记掌握（不再出现在默认队列）
+    if (cur.streak >= 4 && cur.count <= cur.correct) cur.mastered = true;
+
+    map[key] = cur;
     saveWeak(map);
   } catch (err) {
     console.warn('[storage] 正确记录失败', err && err.message);
@@ -506,34 +723,107 @@ export function weakWeight(entry, now = Date.now()) {
   return count * (0.4 + 0.6 * recency) * masteryPenalty;
 }
 
-/** 取得按权重排序的易错列表 */
+/**
+ * 取得按权重排序的易错列表
+ *
+ * @param {object} options
+ *   - limit          最多返回多少条
+ *   - minCount       错误次数下限
+ *   - includeMastered 是否包含已掌握的
+ *   - dueOnly        只要「已到期」（间隔重复用）
+ *   - now            便于测试注入时间
+ */
 export function getWeakList(options = {}) {
   const map = loadWeak();
-  const now = Date.now();
+  const now = Number(options.now) || Date.now();
   const limit = Math.max(1, Number(options.limit) || 50);
   const minCount = Number(options.minCount) || 1;
   const includeMastered = !!options.includeMastered;
+  const dueOnly = !!options.dueOnly;
 
   const list = Object.values(map)
-    .filter(e => e && e.key)
-    .filter(e => (Number(e.count) || 0) >= minCount)
+    .filter(e => e && (e.key || e.char || e.word))
+    .map(e => normalizeWeakEntry(e, e.key || e.char || e.word))
+    .filter(e => e.count >= minCount)
     .filter(e => includeMastered || !e.mastered)
+    .filter(e => !dueOnly || e.due <= now)
     .map(e => ({
       key: e.key,
       char: e.char || '',
       word: e.word || '',
       pinyin: e.pinyin || '',
-      count: Number(e.count) || 0,
-      correct: Number(e.correct) || 0,
-      lastTs: Number(e.lastTs) || 0,
-      errorRate: Number(e.count) > 0
-        ? Number(e.count) / (Number(e.count) + Number(e.correct) || 1)
-        : 0,
+      count: e.count,
+      correct: e.correct,
+      lastTs: e.lastTs,
+      // mastered 必须透出去：复习页要区分「已掌握」与「巩固中」，
+      // 调用方用 includeMastered 取到记录后没有这个字段就没法分组。
+      mastered: !!e.mastered,
+      // 间隔重复调度信息，供复习页展示
+      streak: e.streak,
+      interval: e.interval,
+      ease: round2(e.ease),
+      due: e.due,
+      reviewedAt: e.reviewedAt,
+      dueInDays: Math.round((e.due - now) / DAY_MS * 10) / 10,
+      isDue: e.due <= now,
+      errorRate: e.count > 0 ? e.count / (e.count + e.correct || 1) : 0,
       weight: weakWeight(e, now)
     }));
 
-  list.sort((a, b) => b.weight - a.weight || b.count - a.count);
+  // 排序：**到期优先** → 越早到期越靠前 → 权重 → 错误次数。
+  //
+  // 为什么到期排在 weight 前面：间隔重复的核心是「现在该复习什么」。
+  // 一个错误 20 次但刚刚复习过（下次在 30 天后）的字，此刻不该挤在
+  // 一个错误 3 次但已经到期、快要忘记的字前面 —— 前者很稳，后者告急。
+  list.sort((a, b) =>
+    (Number(b.isDue) - Number(a.isDue)) ||
+    (a.due - b.due) ||
+    (b.weight - a.weight) ||
+    (b.count - a.count)
+  );
   return list.slice(0, limit);
+}
+
+/**
+ * 复习队列概览：给复习页顶部显示「今日待复习 N 项」。
+ *
+ * @param {number} [now]
+ * @returns {{due:number, total:number, learning:number, mastered:number, nextDue:number}}
+ */
+export function reviewSummary(now) {
+  const t = Number(now) || Date.now();
+  const map = loadWeak();
+  let due = 0, total = 0, learning = 0, mastered = 0, nextDue = 0;
+
+  for (const raw of Object.values(map)) {
+    if (!raw) continue;
+    const e = normalizeWeakEntry(raw, raw.key || raw.char || raw.word);
+    if (!e.key) continue;
+    total += 1;
+    if (e.mastered) { mastered += 1; continue; }
+    // 已掌握的不参与到期统计（它已经不排队了）
+    if (e.due <= t) due += 1;
+    else if (!nextDue || e.due < nextDue) nextDue = e.due;
+    if (e.streak >= 1) learning += 1;
+  }
+
+  return { due, total, learning, mastered, nextDue };
+}
+
+/** 仅供测试：把所有记录的 due 直接改成某个时间，便于构造「到期」场景 */
+export function _setAllDue(ts) {
+  const map = loadWeak();
+  for (const k of Object.keys(map)) {
+    map[k] = normalizeWeakEntry(map[k], k);
+    map[k].due = Number(ts) || 0;
+  }
+  saveWeak(map);
+}
+
+function round2(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
 }
 
 export function clearWeak() {
@@ -801,6 +1091,10 @@ export function importAll(payload) {
     // 合并后应该反映两边的总错误次数，取较大值会少算。
     // 重复导入同一份备份的场景交给上面的 history 去重兜底：只要能对上
     // 时间戳/ID，就不会被重复累加。
+    //
+    // 复习调度字段（streak / ease / due）**不累加**，只取「更靠后的那次复习」：
+    // 调度是状态而不是计数，两台设备各自排过期的，以进度更超前的一方为准，
+    // 否则同一份进度会来回互相拉扯（今天推到 7 天、明天又被另一台拉回 3 天）。
     if (payload.weak && typeof payload.weak === 'object') {
       const cur = loadWeak();
       for (const [k, v] of Object.entries(payload.weak)) {
@@ -809,6 +1103,18 @@ export function importAll(payload) {
         cur[k].count = (cur[k].count || 0) + (v.count || 0);
         cur[k].correct = (cur[k].correct || 0) + (v.correct || 0);
         cur[k].lastTs = Math.max(cur[k].lastTs || 0, v.lastTs || 0);
+
+        const a = normalizeWeakEntry(cur[k], k);
+        const b = normalizeWeakEntry(v, k);
+        // 取「间隔更长 / 进度更靠前」的调度状态，其余字段保留本地
+        const ahead = (b.interval || 0) > (a.interval || 0) ? b : a;
+        cur[k].streak = ahead.streak;
+        cur[k].interval = ahead.interval;
+        cur[k].ease = ahead.ease;
+        cur[k].due = Math.max(a.due || 0, b.due || 0);
+        cur[k].reviewedAt = Math.max(a.reviewedAt || 0, b.reviewedAt || 0);
+        // 两边都掌握了才算掌握；只要还有一边在复习队列里，就继续排期
+        cur[k].mastered = !!(a.mastered && b.mastered);
       }
       writeJSON(KEYS.weak, cur);
       n++;

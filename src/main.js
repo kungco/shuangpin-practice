@@ -27,6 +27,14 @@ import {
 } from './core/scheme.js';
 import { renderKeymap } from './ui/keymap.js';
 import { drawLine, drawBars } from './ui/chart.js';
+import { play as playSound, prime as primeSound, resetErrorFatigue,
+         isSupported as soundSupported } from './ui/sound.js';
+import {
+  prefersReducedMotion, watchReducedMotion, motionClass,
+  mergeShortcuts, validateShortcuts, normalizeShortcutKey, prettyKey,
+  matchesShortcut, letterFromEvent, announce, SHORTCUT_ACTIONS,
+  DEFAULT_SHORTCUTS
+} from './ui/a11y.js';
 
 /* ============================================================
    全局状态
@@ -43,11 +51,102 @@ const app = {
   lastErrorTarget: null,
   stats: { chartMetric: 'speed', chartRange: '20', dailyDays: 14, heatRange: 'all' },
   saveTimer: null,
-  hint: null           // 当前提示状态（由引擎 hint / reveal 事件驱动）
+  hint: null,          // 当前提示状态（由引擎 hint / reveal 事件驱动）
+  _capturingShortcut: false,  // 设置页「按下新键」捕获中：此时全局快捷键必须让路
+  _armAudio: null             // 首次用户手势时解锁音频（用完置空）
 };
 
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+
+/* ============================================================
+   辅助功能（无障碍 / 快捷键 / 音效）
+   ============================================================ */
+
+/**
+ * 把拼音拆成「逐键」的展示文本，用于播报与提示。
+ *
+ * 例：'ni' → 'N I'；'zhuang' 这种多键的也会被逐个点开，
+ * 但调用方通常只传**当前这一题**的键，所以长度可控。
+ *
+ * @param {{keys?:string[]|string}} fb 引擎反馈对象，或直接给键串
+ */
+function spellKeys(fb) {
+  let s = '';
+  if (fb && Array.isArray(fb.keys)) s = fb.keys.join('');
+  else if (fb && typeof fb.keys === 'string') s = fb.keys;
+  else if (typeof fb === 'string') s = fb;
+  if (!s) return '';
+  return Array.from(s).join(' ').toUpperCase();
+}
+
+/**
+ * 确保屏幕阅读器用的 aria-live 区域存在。
+ *
+ * 为什么在运行时插入而不是写在 index.html 里：
+ * 这两个节点**没有任何视觉呈现**，放在静态 HTML 里会让人以为
+ * 「这东西是页面的一部分」，删改时容易误伤。运行时创建则明确
+ * 表达「它只是辅助功能的基础设施」。
+ */
+function ensureLiveRegions() {
+  try {
+    if (typeof document === 'undefined' || !document.body) return;
+    if (!document.getElementById('srLive')) {
+      const el = document.createElement('div');
+      el.id = 'srLive';
+      el.className = 'sr-only';
+      el.setAttribute('role', 'status');
+      el.setAttribute('aria-live', 'polite');
+      el.setAttribute('aria-atomic', 'true');
+      document.body.appendChild(el);
+    }
+    if (!document.getElementById('srLiveAssertive')) {
+      const el = document.createElement('div');
+      el.id = 'srLiveAssertive';
+      el.className = 'sr-only';
+      el.setAttribute('role', 'alert');
+      el.setAttribute('aria-live', 'assertive');
+      el.setAttribute('aria-atomic', 'true');
+      document.body.appendChild(el);
+    }
+  } catch (_) { /* 辅助设施失败不应影响主流程 */ }
+}
+
+/**
+ * 初始化辅助功能：减少动态效果 + 音频解锁 + 播报区域。
+ *
+ * 「音频解锁」是浏览器的硬性要求：AudioContext 必须由**用户手势**
+ * 触发才能出声。所以这里在第一次 pointerdown / keydown 时就预热一次，
+ * 之后按键反馈音才不会「第一次没声音」。
+ */
+function initA11y() {
+  try {
+    motionClass(currentReduceMotion());
+  } catch (_) {}
+
+  // 系统设置中途变化时跟随（仅在 'auto' 模式下 —— 用户显式选了
+  // 'on'/'off' 就应尊重用户的显式选择，不能被系统覆盖）
+  try {
+    watchReducedMotion(() => {
+      if ((app.settings.reduceMotion || 'auto') === 'auto') motionClass(true);
+    });
+  } catch (_) {}
+
+  ensureLiveRegions();
+
+  // 音频解锁：一次性，之后自动摘掉监听
+  const armAudio = () => {
+    try { primeSound(); } catch (_) {}
+    try { document.removeEventListener('pointerdown', armAudio, true); } catch (_) {}
+    try { document.removeEventListener('keydown', armAudio, true); } catch (_) {}
+    app._armAudio = null;
+  };
+  app._armAudio = armAudio;
+  try {
+    document.addEventListener('pointerdown', armAudio, true);
+    document.addEventListener('keydown', armAudio, true);
+  } catch (_) {}
+}
 
 /* ============================================================
    启动
@@ -56,11 +155,15 @@ const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 function boot() {
   try {
     app.settings = S.loadSettings();
+    // 快捷键：把「脏数据」在进入应用前就修正掉（合并默认值 + 冲突校验），
+    // 免得后面每个用到的地方都要自己防一手
+    app.settings.shortcuts = mergeShortcuts(app.settings.shortcuts);
     // 先确保 [hidden] 兜底规则生效，再渲染任何东西
     ensureHiddenRule();
     if (!S.isStorageAvailable()) {
       toast('浏览器存储不可用，本次记录不会被保存', 'err', 5000);
     }
+    initA11y();
     initNav();
     initSetupPanel();
     initSessionPanel();
@@ -374,6 +477,11 @@ function bindEngineEvents() {
   eng.on('error', (fb) => {
     showErrorFeedback(fb);
     app.lastErrorTarget = fb;
+    // 错误反馈：音效 + 屏幕阅读器播报（assertive：走打断队列，因为用户需要立刻知道按错了）
+    playSound('error', app.settings.sound);
+    if (fb && fb.expectedAll && fb.expectedAll.length) {
+      announce(`按错。应键入 ${fb.expectedAll.map(k => String(k).toUpperCase()).join(' 或 ')}`, 'assertive');
+    }
   });
 
   eng.on('unit', () => {
@@ -1167,6 +1275,24 @@ function isTouchDevice() {
   return ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
 }
 
+/**
+ * 当前是否应「减少动态效果」。
+ *
+ * 用户显式设置（'on'/'off'）优先；'auto' 时跟随系统。
+ * 这个值在启动与系统设置变化时都会刷新（见 initA11y）。
+ */
+function currentReduceMotion() {
+  const pref = app.settings && app.settings.reduceMotion;
+  if (pref === 'on') return true;
+  if (pref === 'off') return false;
+  return prefersReducedMotion();
+}
+
+/** 当前生效的快捷键映射（用户配置已合并默认值、已校验） */
+function shortcuts() {
+  return mergeShortcuts(app.settings && app.settings.shortcuts);
+}
+
 let lastKeyAt = 0;
 
 function onKeyDown(e) {
@@ -1181,10 +1307,17 @@ function onKeyDown(e) {
   // 中文输入法组合中：忽略，避免把候选词当按键
   if (e.isComposing || e.keyCode === 229) return;
 
-  // 全局快捷键
-  if (e.key === 'Escape') {
+  // 快捷键在「设置页改键」时需要先被吞掉，避免触发器动作
+  if (app._capturingShortcut) return;
+
+  const sc = shortcuts();
+
+  /* ---- 全局快捷键 ---- */
+  // 暂停/继续（默认 Esc）
+  if (matchesShortcut(e, sc.pause)) {
     if (isModalOpen()) { closeModal(); return; }
     if (app.engine && app.engine.state === STATE.RUNNING) {
+      e.preventDefault();
       app.engine.pause();
       updatePauseButton();
       return;
@@ -1193,26 +1326,39 @@ function onKeyDown(e) {
 
   if (!isSessionActive()) return;
 
-  // 练习面板激活时不响应 Tab 的默认行为（避免焦点跳走），
-  // 而是把它「征用」成「看答案」的快捷键。
-  if (e.key === 'Tab') {
+  // 看答案 / 求助（默认 Tab）
+  if (matchesShortcut(e, sc.hint)) {
+    // 只有真的绑定了快捷键才 preventDefault —— 用户选择「不占用 Tab」时，
+    // Tab 应当恢复成浏览器原生的焦点导航，不能被我们吞掉。
     e.preventDefault();
     if (app.engine && app.engine.state === STATE.RUNNING) requestHintNow();
     return;
   }
 
-  // 空格 / 退格：跳过当前（辅助功能）
-  if (e.key === 'Backspace' || (e.key === ' ' && e.ctrlKey)) {
+  // 跳过当前（默认 Backspace）
+  if (matchesShortcut(e, sc.skip)) {
     e.preventDefault();
     if (app.engine && app.engine.state === STATE.RUNNING) {
       app.engine.skipCurrent();
       clearFeedback();
+      playSound('correct', app.settings.sound);
     }
     return;
   }
 
-  // 只处理单个字母键
-  const key = normalizeKey(e.key);
+  // 提交（测验模式下 Enter 结束）
+  if (matchesShortcut(e, sc.submit)) {
+    if (app.engine && app.engine.state === STATE.RUNNING && app.engine.examMode) {
+      e.preventDefault();
+      finishSession();
+      return;
+    }
+  }
+
+  /* ---- 作答键：按**物理键位**取字母 ----
+     用 e.code 而非 e.key，才能让 Dvorak / 其它布局的用户练到
+     「手指实际落在哪个键」，详见 ui/a11y.js::letterFromEvent 的注释。 */
+  const key = letterFromEvent(e);
   if (!key) {
     // 其它键不阻止默认，但也不进入练习
     return;
@@ -1240,33 +1386,68 @@ function handleKeyInput(rawKey) {
   if (!result || !result.handled) return;
 
   if (result.correct === false) {
-    // 错误反馈已由 error 事件渲染
+    // 错误反馈已由 error 事件渲染（含音效与播报）
     flashStageError();
   } else if (result.feedback && result.feedback.type === 'ok') {
+    // 正确：轻脆一声 + 播报当前进度（polite，不打断）
+    playSound('correct', app.settings.sound);
     flashStageOk();
     clearFeedback();
+    announceProgress();
   } else {
     clearFeedback();
   }
 }
 
+/** 播报练习进度（屏幕阅读器，polite 队列） */
+function announceProgress() {
+  try {
+    const eng = app.engine;
+    if (!eng) return;
+    const s = eng.visibleStats ? eng.visibleStats() : null;
+    if (!s) return;
+    // 只在「整题完成」时播报，避免每按一键都念 —— 那会吵到没法用
+    const t = eng.currentTarget();
+    if (t && t.kind === 'syllable' && t.pos === 0) {
+      announce(`${t.char || t.pinyin || ''} 完成。已完成 ${s.totalChars} 字，正确率 ${s.accuracy}%`);
+    }
+  } catch (_) {}
+}
+
+/**
+ * 错误时让「舞台」抖一下 —— 但必须尊重「减少动态效果」。
+ *
+ * 抖动/闪烁对前庭敏感的用户会引起真实不适，所以系统开了这个设置时
+ * 我们换成**不移动**的提示：把边框闪一下，信息量等价，但不动。
+ */
 function flashStageError() {
   const stage = $('#stage');
   if (!stage) return;
-  stage.animate(
-    [{ transform: 'translateX(0)' }, { transform: 'translateX(-3px)' },
-     { transform: 'translateX(3px)' }, { transform: 'translateX(0)' }],
-    { duration: 180, easing: 'ease-in-out' }
-  );
+  if (currentReduceMotion()) {
+    // 静态替代：描边高亮一下，不做位移
+    stage.classList.add('is-error-static');
+    setTimeout(() => stage.classList.remove('is-error-static'), 260);
+    return;
+  }
+  try {
+    stage.animate(
+      [{ transform: 'translateX(0)' }, { transform: 'translateX(-3px)' },
+       { transform: 'translateX(3px)' }, { transform: 'translateX(0)' }],
+      { duration: 180, easing: 'ease-in-out' }
+    );
+  } catch (_) { /* 不支持 Web Animations 时静默降级 */ }
 }
 
 function flashStageOk() {
   const decode = $('#decode');
   if (!decode) return;
-  decode.animate(
-    [{ opacity: 1 }, { opacity: .55 }, { opacity: 1 }],
-    { duration: 160 }
-  );
+  if (currentReduceMotion()) return;   // 正确本来就不需要视觉强调
+  try {
+    decode.animate(
+      [{ opacity: 1 }, { opacity: .55 }, { opacity: 1 }],
+      { duration: 160 }
+    );
+  } catch (_) { /* 同上 */ }
 }
 
 function isSessionActive() {
@@ -1700,17 +1881,27 @@ function renderReviewView() {
 
   try {
     const sum = summarize();
-    const list = weakRanking(60);
+    // 复习队列：默认只取「到期」的（间隔重复）。
+    // 但列表本身仍展示全部未掌握项 —— 用户需要能看到「接下来几天会考什么」，
+    // 只给一个到期队列会让人不知道全貌。
+    const all = weakRanking(60);
+    const dueList = all.filter(w => w.isDue);
+    const list = app.settings.reviewDueOnly ? dueList : all;
     const groups = groupWeakItems(list);
     const advice = reviewAdvice(sum, list);
+    const rv = S.reviewSummary();
 
-    if (sub) sub.textContent = '根据你的历史错误自动生成。';
+    if (sub) {
+      sub.textContent = rv.due > 0
+        ? `间隔重复：今天有 ${rv.due} 项到期，另有 ${Math.max(0, rv.total - rv.due - rv.mastered)} 项在等待。`
+        : '间隔重复：今天没有到期项，复习节奏保持得不错。';
+    }
 
-    if (!list.length) {
+    if (!all.length) {
       body.innerHTML = `
         <div class="empty-state">
           <strong>暂无需要复习的内容</strong>
-          练习中出错的字词会自动收集到这里，并按错误频率排序。
+          练习中出错的字词会自动收集到这里，并按错误频率与复习间隔排序。
         </div>
         <div class="review-cta">
           <button class="btn btn-primary" id="btnReviewPracticeAll">开始一次普通练习</button>
@@ -1719,6 +1910,31 @@ function renderReviewView() {
       return;
     }
 
+    /* ---- 到期概览卡 ---- */
+    const dueCard = `
+      <div class="review-due-card${rv.due ? ' has-due' : ''}">
+        <div class="rdc-main">
+          <span class="rdc-num">${rv.due}</span>
+          <span class="rdc-label">项今天到期</span>
+        </div>
+        <div class="rdc-meta">
+          <span>队列共 <b>${rv.total}</b> 项</span>
+          <span>已掌握 <b>${rv.mastered}</b> 项</span>
+          <span>巩固中 <b>${rv.learning}</b> 项</span>
+          ${rv.nextDue ? `<span>下次到期 <b>${escapeHtml(relTime(rv.nextDue))}</b></span>` : ''}
+        </div>
+        <label class="checkbox rdc-toggle">
+          <input type="checkbox" id="chkReviewDueOnly"${app.settings.reviewDueOnly ? ' checked' : ''} /><i></i>
+          只练到期项
+        </label>
+      </div>`;
+
+    /**
+     * 复习项 chip。
+     *
+     * 展示「下次复习」而不是只展示错误次数 —— 间隔重复的核心信息是
+     * **什么时候该复习它**，错误次数只是历史。
+     */
     const groupHtml = (title, items, note) => {
       if (!items.length) return '';
       return `
@@ -1731,11 +1947,24 @@ function renderReviewView() {
             ${items.map(w => {
               const split = w.char ? primarySplit(w.pinyin) : null;
               const keys = split ? split.code : '';
-              return `<button class="review-chip" data-key="${escapeHtml(w.key)}" title="点击单独练习">
-                <span class="rc-char">${escapeHtml(w.key)}</span>
-                <span class="rc-py">${escapeHtml(w.pinyin || '')}</span>
-                ${keys ? `<span class="rc-keys">${escapeHtml(keys)}</span>` : ''}
-                <span class="rc-err">×${w.count}</span>
+              // 间隔进度：一个条形，越满说明越接近掌握
+              const prog = Math.min(100, Math.round((w.streak / 4) * 100));
+              const dueText = w.isDue
+                ? '今天到期'
+                : `还有 ${fmtDays(w.dueInDays)}`;
+              return `<button class="review-chip${w.isDue ? ' is-due' : ''}"
+                              data-key="${escapeHtml(w.key)}"
+                              title="点击单独练习｜连对 ${w.streak} 次｜下次 ${escapeHtml(dueText)}">
+                <span class="rc-line">
+                  <span class="rc-char">${escapeHtml(w.key)}</span>
+                  <span class="rc-py">${escapeHtml(w.pinyin || '')}</span>
+                  ${keys ? `<span class="rc-keys">${escapeHtml(keys)}</span>` : ''}
+                  <span class="rc-err">×${w.count}</span>
+                </span>
+                <span class="rc-sched">
+                  <span class="rc-bar"><i style="width:${prog}%"></i></span>
+                  <span class="rc-due">${escapeHtml(dueText)}</span>
+                </span>
               </button>`;
             }).join('')}
           </div>
@@ -1743,27 +1972,57 @@ function renderReviewView() {
         </div>`;
     };
 
+    const noDue = app.settings.reviewDueOnly && !dueList.length;
+
     body.innerHTML = `
+      ${dueCard}
+
       <div class="review-summary">
         ${advice.map(escapeHtml).join('<br>')}
       </div>
 
-      ${groupHtml('易错单字', groups.char, '')}
-      ${groupHtml('易错词语', groups.phrase, '')}
-      ${groups.other.length ? groupHtml('其他', groups.other, '') : ''}
+      ${noDue ? `
+        <div class="empty-state" style="padding:26px">
+          <strong>今天没有到期的复习项</strong>
+          间隔重复会在你快要忘记的时候把内容送回来。想现在就练，可以关掉上面的「只练到期项」。
+        </div>` : ''}
+
+      ${noDue ? '' : groupHtml('易错单字', groups.char, '')}
+      ${noDue ? '' : groupHtml('易错词语', groups.phrase, '')}
+      ${noDue || !groups.other.length ? '' : groupHtml('其他', groups.other, '')}
 
       <div class="review-cta">
-        <button class="btn btn-primary" id="btnReviewPractice">强化练习这些内容</button>
+        <button class="btn btn-primary" id="btnReviewPractice">${rv.due ? `复习到期的 ${Math.min(rv.due, 20)} 项` : '强化练习这些内容'}</button>
         <button class="btn btn-ghost" id="btnReviewPracticeAll">普通练习</button>
         <button class="btn btn-ghost" id="btnClearWeak">清空易错记录</button>
       </div>
     `;
+
+    // 「只练到期项」开关
+    const chkDue = $('#chkReviewDueOnly');
+    if (chkDue) {
+      chkDue.addEventListener('change', () => {
+        app.settings.reviewDueOnly = !!chkDue.checked;
+        saveSettingsDebounced();
+        renderReviewView();
+      });
+    }
 
     bindReviewActions();
   } catch (err) {
     console.error('[review] 渲染失败', err);
     body.innerHTML = '<div class="empty-state">复习内容生成失败</div>';
   }
+}
+
+/** 把「还有 N 天」写成人话（0.5 天 → 半天） */
+function fmtDays(d) {
+  const n = Number(d);
+  if (!Number.isFinite(n)) return '—';
+  if (n <= 0) return '今天';
+  if (n < 1) return '半天';
+  if (n < 2) return '1 天';
+  return `${Math.round(n)} 天`;
 }
 
 function bindReviewActions() {
@@ -1775,8 +2034,12 @@ function bindReviewActions() {
 
   const btnWeak = $('#btnReviewPractice');
   if (btnWeak) btnWeak.addEventListener('click', () => {
-    const list = weakRanking(60);
-    const qs = generateReviewQuestions(list, 20);
+    const all = weakRanking(60);
+    // 间隔重复：优先练到期的；到期的不足时用权重最高的补齐 ——
+    // 用户点「复习」总是期望有内容可练，而不是收到一句「今天没有到期的」。
+    const due = all.filter(w => w.isDue);
+    const pick = (due.length ? due.concat(all.filter(w => !w.isDue)) : all).slice(0, 20);
+    const qs = generateReviewQuestions(pick, 20);
     if (!qs.length) { toast('暂时没有可用的复习内容', 'err'); return; }
     switchView('practice');
     startSession(qs, 'char');
@@ -1892,7 +2155,33 @@ function initSettingsView() {
   bindToggle(setMini, 'showMiniKeymap', () => {
     applyMiniKeymapVisibility();
   });
-  bindToggle(setSound, 'sound');
+
+  /* ---- 按键音效 ----
+     开的时候立刻放一声：既确认「确实有声音」，又顺便完成
+     AudioContext 的用户手势解锁（否则要等第一次按键才出声，
+     用户会以为开关没生效）。 */
+  if (setSound) {
+    setSound.checked = !!app.settings.sound;
+    if (!soundSupported()) {
+      setSound.disabled = true;
+      const lab = setSound.closest('label');
+      if (lab) {
+        lab.classList.add('is-disabled');
+        lab.title = '当前浏览器不支持 WebAudio，音效不可用';
+      }
+    }
+    setSound.addEventListener('change', () => {
+      app.settings.sound = !!setSound.checked;
+      saveSettingsDebounced();
+      if (setSound.checked) {
+        // 设置页的这次点击本身就是合法手势，可直接解锁
+        primeSound();
+        playSound('correct', true);
+        app._armAudio = null;
+      }
+    });
+  }
+
   bindToggle(setStrict, 'strict');
   bindToggle(setSkipPunct, 'skipPunct');
 
@@ -1918,6 +2207,21 @@ function initSettingsView() {
       applyHintSettingsToEngine();
     });
   }
+
+  /* ---- 无障碍：减少动态效果 ---- */
+  const setReduceMotion = $('#setReduceMotion');
+  if (setReduceMotion) {
+    setReduceMotion.value = app.settings.reduceMotion || 'auto';
+    setReduceMotion.addEventListener('change', () => {
+      const v = setReduceMotion.value;
+      app.settings.reduceMotion = (v === 'on' || v === 'off') ? v : 'auto';
+      saveSettingsDebounced();
+      motionClass(currentReduceMotion());
+    });
+  }
+
+  /* ---- 快捷键改键面板 ---- */
+  initShortcutSettings();
 
   // 导入
   const fileImport = $('#fileImport');
@@ -1962,8 +2266,13 @@ function initSettingsView() {
         close();
         if (act !== 'ok') return;
         app.settings = Object.assign({}, S.DEFAULT_SETTINGS);
+        // 快捷键是对象，必须单独合并（DEFAULT_SETTINGS 里是 null，
+        // 直接用会得到一个没有快捷键的状态）
+        app.settings.shortcuts = mergeShortcuts(null);
         S.saveSettings(app.settings);
+        motionClass(currentReduceMotion());
         syncSettingsUI();
+        initShortcutSettings();
         toast('已恢复默认设置');
       });
     });
@@ -1973,12 +2282,163 @@ function initSettingsView() {
   try {
     const bytes = S.storageUsage();
     const kb = (bytes / 1024).toFixed(1);
-    const note = $('.footnote', $('#view-settings'));
+    // 必须精确定位到 #storageNote —— 设置页里有多个 .footnote，
+    // 用 $('.footnote') 会命中第一个（可能是快捷键说明那段），
+    // 一个 textContent 赋值就把它的 <code> 子节点全抹掉了。
+    const note = $('#storageNote');
     if (note) {
       note.textContent = `所有数据保存在浏览器 localStorage 中（当前约 ${kb} KB），不会上传到任何服务器。` +
         '清除浏览器数据会导致记录丢失，建议定期导出备份。';
     }
   } catch (_) {}
+}
+
+/* ============================================================
+   快捷键改键面板
+   ============================================================ */
+
+/**
+ * 渲染设置页的快捷键面板，并为每一行绑定「点击 → 按下新键」的捕获流程。
+ *
+ * 整个面板是**幂等**的：每次调用都重建 DOM 并重新绑定，
+ * 这样「恢复默认设置」之后不需要单独 refresh 逻辑。
+ */
+function initShortcutSettings() {
+  const list = $('#shortcutList');
+  if (!list) return;
+
+  const sc = shortcuts();
+  list.innerHTML = Object.values(SHORTCUT_ACTIONS).map(a => {
+    const k = sc[a.key] || '';
+    return `
+      <div class="shortcut-row">
+        <span class="shortcut-label">${escapeHtml(a.label)}</span>
+        <button class="shortcut-key${k ? '' : ' is-unbound'}"
+                type="button"
+                data-action="${escapeHtml(a.key)}"
+                aria-label="修改「${escapeHtml(a.label)}」的快捷键，当前为 ${escapeHtml(k ? prettyKey(k) : '未绑定')}">
+          ${escapeHtml(k ? prettyKey(k) : '未设置')}
+        </button>
+      </div>`;
+  }).join('');
+
+  // 说明段落里的键名同步（Tab / Backspace 是用户最容易感知的两个）
+  syncShortcutNote();
+
+  $$('.shortcut-key', list).forEach(btn => {
+    btn.addEventListener('click', () => {
+      startCapture(btn.getAttribute('data-action'), btn);
+    });
+  });
+}
+
+/** 让设置页顶部的说明文本跟随实际快捷键变化 */
+function syncShortcutNote() {
+  const sc = shortcuts();
+  const h = $('#noteHintKey');
+  const s = $('#noteSkipKey');
+  if (h) h.textContent = sc.hint ? prettyKey(sc.hint) : '未设置';
+  if (s) s.textContent = sc.skip ? prettyKey(sc.skip) : '未设置';
+}
+
+/**
+ * 进入「按下新键」捕获状态。
+ *
+ * 捕获期间：
+ *   - app._capturingShortcut = true，全局快捷键处理函数直接 return，
+ *     否则你在改「看答案」键时按 Tab 会被当成「要看答案」
+ *   - 只接受单个非修饰键；Esc 取消；Backspace/Delete 解绑
+ *   - 点击面板外取消
+ *
+ * @param {string} action 动作名（hint/skip/pause/submit）
+ * @param {HTMLElement} btn 被点击的按钮（用于显示「按下新键…」）
+ */
+function startCapture(action, btn) {
+  if (!action || !SHORTCUT_ACTIONS[action]) return;
+  // 同时只允许一个捕获
+  if (app._capturingShortcut) return;
+
+  app._capturingShortcut = true;
+  const original = btn.textContent;
+  btn.classList.add('is-capturing');
+  btn.textContent = '按下新键…';
+
+  let done = false;
+
+  const cleanup = () => {
+    done = true;
+    app._capturingShortcut = false;
+    btn.classList.remove('is-capturing');
+    btn.textContent = original;
+    document.removeEventListener('keydown', onCapture, true);
+    document.removeEventListener('pointerdown', onOutside, true);
+  };
+
+  const applyAndSave = (key) => {
+    const next = shortcuts();
+    if (key === '') {
+      next[action] = '';                    // 解绑
+    } else {
+      // 冲突检测：同一个键不能绑两个动作
+      const clash = Object.keys(next).find(a => a !== action && next[a] === key);
+      if (clash) {
+        toast(`${prettyKey(key)} 已被「${SHORTCUT_ACTIONS[clash].label}」占用`, 'err');
+        return false;
+      }
+      if (RESERVED_KEYS.includes(key)) {
+        toast(`${prettyKey(key)} 是浏览器保留键，不能占用`, 'err');
+        return false;
+      }
+      next[action] = key;
+    }
+    const check = validateShortcuts(next);
+    if (!check.ok) { toast(check.reason, 'err'); return false; }
+    app.settings.shortcuts = next;
+    saveSettingsDebounced();
+    return true;
+  };
+
+  const rerender = () => {
+    initShortcutSettings();
+    // 面板重建后当前按钮已被替换，原引用失效 —— 但 cleanup 仍需执行，
+    // 所以这里直接改标记，让 cleanup 里的 DOM 操作尽量无害化。
+  };
+
+  const onCapture = (e) => {
+    if (done) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const k = e.key;
+    // 单独按修饰键不算（等真正的键）
+    if (k === 'Shift' || k === 'Control' || k === 'Alt' || k === 'Meta') return;
+    // Esc 取消
+    if (k === 'Escape') { cleanup(); return; }
+    // Backspace / Delete = 解绑
+    if (k === 'Backspace' || k === 'Delete') {
+      if (applyAndSave('')) { cleanup(); rerender(); }
+      return;
+    }
+    // 忽略纯修饰键组合（Ctrl+A 之类不做快捷键）
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+    const nk = normalizeShortcutKey(k);
+    if (!nk || nk.length > 12) return;
+    if (applyAndSave(nk)) { cleanup(); rerender(); }
+  };
+
+  const onOutside = (e) => {
+    if (done) return;
+    if (btn.contains && btn.contains(e.target)) return;
+    // 点面板外：取消。但按钮自身已被替换过，所以不看 e.target 是否在 btn 内
+    cleanup();
+  };
+
+  document.addEventListener('keydown', onCapture, true);
+  // 延后一拍再挂「点外部取消」，否则当前这次点击会立刻把自己取消掉
+  setTimeout(() => {
+    if (!done) document.addEventListener('pointerdown', onOutside, true);
+  }, 0);
 }
 
 /**
@@ -2006,12 +2466,13 @@ function applyHintSettingsToEngine() {
 
 /** 把 settings 同步到所有相关 UI */
 function syncSettingsUI() {
-  const pairs = [
+  const selects = [
     ['#selDuration', 'duration'], ['#setDuration', 'duration'],
     ['#selCount', 'count'], ['#setCount', 'count'],
-    ['#setHintDelay', 'hintDelay'], ['#setRevealDelay', 'revealDelay']
+    ['#setHintDelay', 'hintDelay'], ['#setRevealDelay', 'revealDelay'],
+    ['#setReduceMotion', 'reduceMotion']
   ];
-  pairs.forEach(([sel, key]) => {
+  selects.forEach(([sel, key]) => {
     const el = $(sel);
     if (el) el.value = String(app.settings[key]);
   });
@@ -2021,7 +2482,8 @@ function syncSettingsUI() {
     ['#setStrict', 'strict'],
     ['#setSkipPunct', 'skipPunct'],
     ['#setHint', 'hint'],
-    ['#chkWeakBoost', 'weakBoost']
+    ['#chkWeakBoost', 'weakBoost'],
+    ['#chkReviewDueOnly', 'reviewDueOnly']
   ];
   checks.forEach(([sel, key]) => {
     const el = $(sel);
@@ -2030,6 +2492,7 @@ function syncSettingsUI() {
   selectMode(app.settings.mode, true);
   applyMiniKeymapVisibility();
   updateModeCounts();
+  syncShortcutNote();
 }
 
 /* ============================================================
@@ -2293,3 +2756,17 @@ if (document.readyState === 'loading') {
 
 // 暴露给控制台，便于排查
 window.__app = app;
+
+/* 测试钩子：让自检脚本能在不改动内部实现的前提下触发重渲染。
+   之所以显式挂这几个（而不是让测试去翻 app 内部）：
+   渲染函数是**闭包私有**的，测试拿不到；硬要暴露全部内部函数会
+   让「哪些是公开契约」变得模糊。这里只开一扇小门，且命名带 __ 前缀
+   明确标注「非公开 API」。 */
+window.__hooks = {
+  renderReviewView,
+  renderStatsView,
+  syncSettingsUI,
+  initShortcutSettings,
+  currentReduceMotion,
+  motionClass
+};

@@ -5,6 +5,19 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
+# PowerShell 脚本：CRLF + **带 BOM 的 UTF-8**。
+# 为什么要强调 BOM：PowerShell 5.1 在**没有 BOM** 时会按系统 ANSI
+# （简体中文环境即 GBK）解码脚本文件。下面这些中文注释被错解后会出现
+# 「乱码字节吞掉换行 / 引号」的情况，报错还指向完全不相干的行
+# （典型症状：`表达式或语句中包含意外的标记"}"`），极难排查。
+#
+# 实现方式：文件本身就以 BOM 存在（BOM 属于文件内容，git 会原样保存），
+# 这里只声明换行符。**不**使用 working-tree-encoding —— 那条路要依赖
+# git 编译了 iconv，且会在 blob 与工作区之间做一次隐式转换，
+# 出问题时很难看出是哪一层变了。多写 3 个字节换来确定性，值得。
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+
 # 二进制文件不参与换行转换
 *.png binary
 *.jpg binary

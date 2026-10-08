@@ -1068,8 +1068,150 @@ for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passag
   }
 }
 
+/* ---------- 辅助功能 / 快捷键 / 间隔重复 ---------- */
+console.log('\n【12】辅助功能与间隔重复（接线层）');
+{
+  const a11y = await import('../src/ui/a11y.js');
+  const sound = await import('../src/ui/sound.js');
+  const setEl = q('#view-settings');
+
+  // 渲染函数是 main.js 的闭包私有实现，测试通过显式测试钩子触发重渲染
+  const renderReviewViewFn = fakeWindow.__hooks && fakeWindow.__hooks.renderReviewView;
+  ok(typeof renderReviewViewFn === 'function', 'main.js 暴露了 __hooks.renderReviewView');
+
+  /* ---- 12.1 新增设置项必须落进 settings 对象 ---- */
+  const st = sMod.loadSettings();
+  ok(st.reduceMotion === 'auto' || st.reduceMotion === 'on' || st.reduceMotion === 'off',
+    `reduceMotion 有合法默认值（实际 ${st.reduceMotion}）`);
+  ok(typeof st.reviewDueOnly === 'boolean', `reviewDueOnly 为布尔（实际 ${st.reviewDueOnly}）`);
+
+  /* ---- 12.2 屏幕阅读器区域在 boot 后应当已注入 ---- */
+  ok(!!q('#srLive'), '运行时注入了 #srLive（polite）');
+  ok(!!q('#srLiveAssertive'), '运行时注入了 #srLiveAssertive（assertive）');
+  ok(q('#srLive').getAttribute('aria-live') === 'polite', '#srLive aria-live=polite');
+  ok(q('#srLiveAssertive').getAttribute('aria-live') === 'assertive', '#srLiveAssertive aria-live=assertive');
+  ok(q('#srLive').className.includes('sr-only'), '#srLive 带 sr-only（视觉不可见但可朗读）');
+
+  /* ---- 12.3 减少动态效果：类名跟随设置 ---- */
+  const html = fakeWindow.document.documentElement;
+  app.settings.reduceMotion = 'on';
+  await import('../src/ui/a11y.js').then(m => m.motionClass(true));
+  ok(html.classList.contains('reduce-motion'), 'reduceMotion=on 时 html 带 reduce-motion');
+  a11y.motionClass(false);
+  ok(!html.classList.contains('reduce-motion'), 'reduceMotion=off 时移除 reduce-motion');
+  app.settings.reduceMotion = 'auto';
+
+  /* ---- 12.4 快捷键面板渲染 ---- */
+  const list = q('#shortcutList');
+  ok(!!list, '设置页存在 #shortcutList');
+  ok(list.children.length === Object.keys(a11y.SHORTCUT_ACTIONS).length,
+    `快捷键行数 = 可配置动作数（${list.children.length}）`);
+  const rowKeys = qa('#shortcutList .shortcut-key');
+  ok(rowKeys.length >= 4, `快捷键按钮 ≥ 4 个（实际 ${rowKeys.length}）`);
+  ok(rowKeys.every(b => b.textContent.trim().length > 0), '每个快捷键按钮都有可见键名');
+
+  /* ---- 12.5 说明段落里的键名与实际一致 ---- */
+  const sc0 = app.settings.shortcuts;
+  ok(q('#noteHintKey') && q('#noteHintKey').textContent === a11y.prettyKey(sc0.hint),
+    `#noteHintKey 显示 ${a11y.prettyKey(sc0.hint)}`);
+  ok(q('#noteSkipKey') && q('#noteSkipKey').textContent === a11y.prettyKey(sc0.skip),
+    `#noteSkipKey 显示 ${a11y.prettyKey(sc0.skip)}`);
+
+  /* ---- 12.6 回归：数据占用提示精确落在 #storageNote ----
+     设置页有多个 .footnote，早先用 $('.footnote') 会命中第一个，
+     一个 textContent 赋值把快捷键说明里的 <code id> 全抹掉了。 */
+  ok(!!q('#storageNote'), '存在 #storageNote');
+  ok(/localStorage/.test(q('#storageNote').textContent), '#storageNote 内容已写入');
+  ok(!!q('#shortcutNote'), '存在 #shortcutNote');
+  ok(!!q('#shortcutNote').querySelector('#noteHintKey'),
+    '★ 快捷键说明的 <code> 子节点未被误伤（回归保护）');
+  ok(setEl.querySelectorAll('.footnote').length >= 3,
+    `设置页有多个 .footnote（实际 ${setEl.querySelectorAll('.footnote').length}）`);
+
+  /* ---- 12.7 改键捕获期间必须屏蔽全局快捷键 ---- */
+  ok(app._capturingShortcut === false, '默认不在改键捕获状态');
+  app._capturingShortcut = true;
+  const beforeMode = app.settings.mode;
+  // 捕获状态下按 Tab 不应触发「看答案」
+  fire(document, 'keydown', { key: 'Tab', code: 'Tab' });
+  ok(app.settings.mode === beforeMode, '★ 捕获状态下 Tab 不触发任何动作');
+  app._capturingShortcut = false;
+
+  /* ---- 12.8 音效开关是「安全的」：任何情况下都不能抛 ---- */
+  ok(typeof sound.play === 'function', 'sound.play 导出');
+  let soundThrew = false;
+  try {
+    sound.play('correct', true);
+    sound.play('error', true);
+    sound.play('finish', true);
+    sound.play('correct', false);
+    sound.play('nonsense-kind', true);
+  } catch (_) { soundThrew = true; }
+  ok(!soundThrew, '音效合成在无 AudioContext 环境下静默降级，不抛异常');
+  ok(sound.isSupported() === false, 'linkedom 环境无 WebAudio，isSupported() 返回 false');
+
+  /* ---- 12.9 间隔重复：复习页展示到期信息 ---- */
+  const w = sMod.getWeakList({ limit: 10, minCount: 1 });
+  // 直接构造一条到期记录，验证渲染链路
+  sMod.recordWeak({ key: '测', char: '测', pinyin: 'ce' });
+  sMod._setAllDue(Date.now() - 1000);
+  renderReviewViewFn();
+  const body = q('#reviewBody');
+  ok(/今天|到期/.test(body.textContent), '复习页出现「到期」相关文案');
+  const dueChip = body.querySelector('.review-chip.is-due');
+  ok(!!dueChip, '★ 到期项带 is-due 标记');
+  ok(!!body.querySelector('.rc-sched .rc-bar'), '复习 chip 含掌握度进度条');
+  ok(!!body.querySelector('.rc-due'), '复习 chip 含「下次复习」文本');
+  const sub = q('#reviewSub');
+  ok(/到期/.test(sub.textContent), `复习页副标题提得到期（${sub.textContent.slice(0, 30)}…）`);
+
+  /* ---- 12.10 「只练到期项」开关 ---- */
+  const chkDue = q('#chkReviewDueOnly');
+  ok(!!chkDue, '复习页存在「只练到期项」开关');
+  if (chkDue) {
+    app.settings.reviewDueOnly = true;
+    renderReviewViewFn();
+    ok(!!q('#chkReviewDueOnly'), '重渲染后开关仍在');
+  }
+
+  /* ---- 12.11 getWeakList 到期优先排序 ---- */
+  sMod.clearWeak();
+  const nowTs = Date.now();
+  // 甲：错 3 次但已连对复习（→ due 被推到未来）；乙：刚出错、已到期
+  // 注意 recordWeak/recordWeakCorrect 的入参是**对象**（{char} 或 {word}），
+  // 传字符串会被 `if (!item) return` 静默吞掉 —— 这正是下面要钉住的点。
+  sMod.recordWeak({ char: '甲', pinyin: 'jia' });
+  sMod.recordWeak({ char: '甲', pinyin: 'jia' });
+  sMod.recordWeak({ char: '甲', pinyin: 'jia' });
+  sMod.recordWeakCorrect({ char: '甲' });
+  sMod.recordWeakCorrect({ char: '甲' });
+  sMod.recordWeak({ char: '乙', pinyin: 'yi' });
+  sMod._setAllDue(nowTs - 1000);              // 先全部置为到期
+  sMod.recordWeakCorrect({ char: '甲' });     // 再让甲「刚复习过」→ due 推向未来
+  const sorted = sMod.getWeakList({ limit: 10, minCount: 1, now: nowTs });
+  ok(sorted.length >= 2, `排序样本 ≥ 2 项（实际 ${sorted.length}）`);
+  const jia = sorted.find(e => e.key === '甲');
+  const yi = sorted.find(e => e.key === '乙');
+  ok(!!jia && !!yi, '甲乙两条记录都在');
+  ok(yi.isDue === true && jia.isDue === false,
+    `构造正确：乙到期、甲未到期（乙=${yi && yi.isDue}，甲=${jia && jia.isDue}）`);
+  ok(sorted[0].key === '乙',
+    `★ 到期项排在最前（首位 ${sorted[0].key}）`);
+  ok(sorted[sorted.length - 1].key === '甲',
+    `★ 未到期项排在最后（末位 ${sorted[sorted.length - 1].key}）`);
+  // 同一个 key 反复记录应当累加而不是覆盖
+  ok(jia.count === 3, `同一 key 反复记录会累加错误次数（甲 count=${jia && jia.count}）`);
+  sMod.clearWeak();
+}
+
 /* ---------- 收尾 ---------- */
-console.log('\n【12】最终检查');
+console.log('\n【13】最终检查');
+ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);
+if (warnings.length) {
+  console.log('  警告明细：');
+  warnings.slice(0, 5).forEach(w => console.log(`    · ${String(w).slice(0, 120)}`));
+}
+console.log(`  （warnings ${warnings.length} 条）`);
 ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);
 console.log(`  （warnings ${warnings.length} 条）`);
 

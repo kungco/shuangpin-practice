@@ -370,6 +370,368 @@ console.log('\n【8】rebuildDailyFromHistory 与增量更新口径一致');
     '★ 增量更新与全量重建产出完全相同的日报对象');
 }
 
+/* ============================================================
+   【9】间隔重复：排期算法本体
+   ============================================================ */
+console.log('\n【9】间隔重复排期（SM-2 简化版）');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  ok(Array.isArray(S.REVIEW_STEPS) && S.REVIEW_STEPS.length >= 4,
+    `间隔阶梯存在且合理（${JSON.stringify(S.REVIEW_STEPS)}）`);
+  ok(S.REVIEW_STEPS.every((v, i) => i === 0 || v > S.REVIEW_STEPS[i - 1]),
+    '间隔阶梯严格递增');
+  ok(S.EASE_DEFAULT === 2.5, `默认难度系数 2.5（实际 ${S.EASE_DEFAULT}）`);
+
+  // 答对：间隔按阶梯前进
+  let e = { interval: 0, ease: S.EASE_DEFAULT, streak: 0 };
+  const steps = [];
+  for (let i = 0; i < 6; i++) {
+    const s = S.nextSchedule(e, true);
+    steps.push(s.interval);
+    e = { interval: s.interval, ease: s.ease, streak: s.streak };
+  }
+  ok(steps[0] === 1, `第 1 次答对 → 1 天后复习（实际 ${steps[0]}）`);
+  ok(steps[1] === 3, `第 2 次答对 → 3 天（实际 ${steps[1]}）`);
+  ok(steps[2] === 7, `第 3 次答对 → 7 天（实际 ${steps[2]}）`);
+  ok(steps[3] === 16, `第 4 次答对 → 16 天（实际 ${steps[3]}）`);
+  ok(steps[4] === 35, `第 5 次答对 → 35 天（实际 ${steps[4]}）`);
+  ok(steps.every((v, i) => i === 0 || v > steps[i - 1]), '间隔单调递增');
+  ok(e.streak === 6, `连对计数累加到 6（实际 ${e.streak}）`);
+
+  // 阶梯走完后按 ease 指数拉长
+  const beyond = S.nextSchedule({ interval: 75, ease: 2.5, streak: 6 }, true);
+  ok(beyond.interval > 75, `超出阶梯后按 ease 继续拉长（${beyond.interval} 天）`);
+  ok(beyond.interval <= 365, `间隔有上限 365 天（实际 ${beyond.interval}）`);
+
+  // 答错：间隔重置为 1，streak 归零，ease 下降
+  const lapsed = S.nextSchedule({ interval: 35, ease: 2.5, streak: 5 }, false);
+  ok(lapsed.interval === S.RELAPSE_INTERVAL, `答错 → 间隔重置为 ${S.RELAPSE_INTERVAL} 天（实际 ${lapsed.interval}）`);
+  ok(lapsed.streak === 0, `答错 → 连对归零（实际 ${lapsed.streak}）`);
+  ok(lapsed.ease < 2.5, `答错 → ease 下降（实际 ${lapsed.ease}）`);
+  ok(lapsed.ease >= S.EASE_MIN, `ease 不低于下限 ${S.EASE_MIN}（实际 ${lapsed.ease}）`);
+
+  // ease 上下限
+  let hard = { interval: 1, ease: S.EASE_MIN, streak: 0 };
+  for (let i = 0; i < 5; i++) hard = S.nextSchedule(hard, false);
+  ok(hard.ease >= S.EASE_MIN, `连续答错时 ease 触底不越界（实际 ${hard.ease}）`);
+
+  let easy = { interval: 1, ease: S.EASE_MAX, streak: 3 };
+  for (let i = 0; i < 5; i++) easy = S.nextSchedule(easy, true);
+  ok(easy.ease <= S.EASE_MAX, `连续答对时 ease 触顶不越界（实际 ${easy.ease}）`);
+
+  // 脏输入不能算出 NaN
+  const dirty = S.nextSchedule({}, true);
+  ok(Number.isFinite(dirty.interval) && dirty.interval >= 1,
+    `空 entry 也能得到合法间隔（实际 ${dirty.interval}）`);
+  const dirty2 = S.nextSchedule(null, false);
+  ok(Number.isFinite(dirty2.interval), `null entry 不产生 NaN（实际 ${dirty2.interval}）`);
+
+  // dueAt：契约是「永远排到未来，至少 1 天」——
+  // 不是「0 天就该是 now」：排到当下一刻等于立刻又在队列里刷屏，
+  // 所以实现里对天数做了 Math.max(1, ...)。这里钉住的是这个意图。
+  const now = 1800000000000;
+  ok(S.dueAt(now, 1) === now + 86400000, 'dueAt(1 天) = now + 86400000');
+  ok(S.dueAt(now, 3) === now + 3 * 86400000, 'dueAt(3 天) 正确');
+  ok(S.dueAt(now, 0) > now, `★ dueAt(0) 仍排到未来（+${(S.dueAt(now, 0) - now) / 86400000} 天），不排到当下`);
+  ok(S.dueAt(now, -5) > now, '★ 负数天数不会排出过去时间');
+  ok(Number.isFinite(S.dueAt(now, NaN)),
+    `★ NaN 天数不产生 NaN 结果（实际 ${S.dueAt(now, NaN)}）`);
+  ok(Number.isFinite(S.dueAt(undefined, 1)), '缺省 now 也不产生 NaN');
+  ok(S.dueAt(now, 0.4) >= now + 86400000, '小数天数向上取整到至少 1 天');
+}
+
+/* ============================================================
+   【10】间隔重复：与 recordWeak / getWeakList / reviewSummary 联动
+   ============================================================ */
+console.log('\n【10】间隔重复与记录联动');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  S.clearWeak();
+
+  /* ---- 答错会建立排期 ---- */
+  S.recordWeak({ char: '错', pinyin: 'cuo' });
+  let list = S.getWeakList({ limit: 10, minCount: 1 });
+  ok(list.length === 1, '记录 1 条易错项');
+  const first = list[0];
+  ok(first.count === 1, `错误次数 1（实际 ${first.count}）`);
+  ok(first.streak === 0, `首次答错连对为 0（实际 ${first.streak}）`);
+  ok(first.interval === S.RELAPSE_INTERVAL, `间隔为 ${S.RELAPSE_INTERVAL} 天（实际 ${first.interval}）`);
+  ok(typeof first.due === 'number' && first.due > Date.now() - 1000, 'due 已排到未来');
+  ok(first.isDue === false, '刚答错不该马上到期（间隔 1 天）');
+  ok(first.mastered === false || first.mastered === undefined, '新错误项未标记掌握');
+
+  /* ---- 旧格式（没有调度字段）能自动补齐 ---- */
+  // 直接往底层塞一条老数据
+  S.writeJSON(S.KEYS.weak, {
+    旧: { key: '旧', char: '旧', count: 5, correct: 0, lastTs: Date.now() }
+  });
+  const legacy = S.getWeakList({ limit: 10, minCount: 1 });
+  ok(legacy.length === 1, '旧格式记录仍能被读出');
+  ok(typeof legacy[0].due === 'number' && legacy[0].due > 0,
+    `★ 旧格式缺 due 字段时自动补齐（due=${legacy[0].due}）`);
+  ok(typeof legacy[0].streak === 'number' && typeof legacy[0].interval === 'number',
+    '旧格式补齐 streak / interval');
+  ok(legacy[0].mastered === false || legacy[0].mastered === undefined, '旧格式不会被误判为已掌握');
+
+  /* ---- 答对会推进间隔 ---- */
+  S.clearWeak();
+  S.recordWeak({ char: '进', pinyin: 'jin' });
+  S.recordWeakCorrect({ char: '进' });
+  let after1 = S.getWeakList({ limit: 10, minCount: 1 })[0];
+  ok(after1.correct === 1, `答对计数 1（实际 ${after1.correct}）`);
+  ok(after1.streak === 1, `连对 1（实际 ${after1.streak}）`);
+  ok(after1.interval === 1, `第 1 次答对间隔 1 天（实际 ${after1.interval}）`);
+  ok(!!after1.reviewedAt, '记录了最近复习时间 reviewedAt');
+
+  S.recordWeakCorrect({ char: '进' });
+  S.recordWeakCorrect({ char: '进' });
+  const after3 = S.getWeakList({ limit: 10, minCount: 1 })[0];
+  ok(after3.streak === 3, `连对 3（实际 ${after3.streak}）`);
+  ok(after3.interval === 7, `连对 3 次后间隔 7 天（实际 ${after3.interval}）`);
+  ok(after3.due > after1.due, '间隔推进后 due 更靠后');
+
+  /* ---- 再答错会重置，且取消掌握 ---- */
+  S.recordWeakCorrect({ char: '进' });          // streak 到 4 → 可能标记掌握
+  const beforeRelapse = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
+  S.recordWeak({ char: '进', pinyin: 'jin' });  // 又错了
+  const relapse = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
+  ok(relapse.streak === 0, `★ 答错后连对归零（实际 ${relapse.streak}）`);
+  ok(relapse.interval === S.RELAPSE_INTERVAL, `★ 答错后间隔重置为 ${S.RELAPSE_INTERVAL} 天（实际 ${relapse.interval}）`);
+  ok(!relapse.mastered, `★ 掌握标记被撤销（before=${beforeRelapse.mastered} → ${relapse.mastered}）`);
+
+  /* ---- 掌握判定：连对够多且错误率不高 ---- */
+  S.clearWeak();
+  S.recordWeak({ char: '熟', pinyin: 'shu' });
+  for (let i = 0; i < 5; i++) S.recordWeakCorrect({ char: '熟' });
+  const mastered = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
+  ok(mastered.mastered === true, `连对 5 次且错误率不高 → 标记掌握（streak=${mastered.streak}, count=${mastered.count}, correct=${mastered.correct}）`);
+  // 默认队列应排除已掌握项
+  const visible = S.getWeakList({ limit: 10, minCount: 1 });
+  ok(visible.every(e => !e.mastered), '★ 默认队列不包含已掌握项');
+  const withMastered = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true });
+  ok(withMastered.length === 1, 'includeMastered 时能看到已掌握项');
+}
+
+/* ============================================================
+   【11】间隔重复：排序、到期筛选、概览
+   ============================================================ */
+console.log('\n【11】到期优先排序 / dueOnly / reviewSummary');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  S.clearWeak();
+  const now = Date.now();
+
+  // 甲：错 3 次但已复习（due 在未来）；乙：错 1 次但已到期
+  S.recordWeak({ char: '甲', pinyin: 'jia' });
+  S.recordWeak({ char: '甲', pinyin: 'jia' });
+  S.recordWeak({ char: '甲', pinyin: 'jia' });
+  S.recordWeakCorrect({ char: '甲' });
+  S.recordWeakCorrect({ char: '甲' });
+  S.recordWeak({ char: '乙', pinyin: 'yi' });
+
+  // 强制把「乙」置为已到期
+  const map = S.readJSON(S.KEYS.weak, {});
+  map['乙'].due = now - 1000;
+  S.writeJSON(S.KEYS.weak, map);
+
+  const sorted = S.getWeakList({ limit: 10, minCount: 1, now });
+  ok(sorted.length === 2, `两条记录都在（实际 ${sorted.length}）`);
+  ok(sorted[0].key === '乙', `★ 到期项排在最前（实际首位 ${sorted[0].key}）`);
+  ok(sorted[0].isDue === true, '首位 isDue = true');
+  ok(sorted[1].key === '甲', `未到期项排在后面（实际 ${sorted[1].key}）`);
+  ok(sorted[1].isDue === false, '末位 isDue = false');
+
+  // 到期项即使 weight 更低也要排在前面（错 1 次 vs 错 3 次）
+  ok(sorted[0].count < sorted[1].count,
+    `★ 到期优先压过错误次数（到期项错 ${sorted[0].count} 次，未到期项错 ${sorted[1].count} 次）`);
+
+  // 排序余量：同为到期时按 due 升序
+  const map2 = S.readJSON(S.KEYS.weak, {});
+  map2['甲'].due = now - 5000;      // 甲更早到期
+  map2['乙'].due = now - 1000;
+  S.writeJSON(S.KEYS.weak, map2);
+  const byDue = S.getWeakList({ limit: 10, minCount: 1, now });
+  ok(byDue[0].key === '甲', `★ 同为到期时越早到期越靠前（实际首位 ${byDue[0].key}）`);
+
+  /* ---- dueOnly 过滤 ---- */
+  const dueOnly = S.getWeakList({ limit: 10, minCount: 1, now, dueOnly: true });
+  ok(dueOnly.every(e => e.isDue), `dueOnly 只返回到期项（${dueOnly.length} 项）`);
+
+  // 把全部置为未到期 → dueOnly 应为空
+  S._setAllDue(now + 10 * 86400000);
+  const noneDue = S.getWeakList({ limit: 10, minCount: 1, now, dueOnly: true });
+  ok(noneDue.length === 0, '全部推后时 dueOnly 返回空');
+
+  /* ---- reviewSummary ---- */
+  S._setAllDue(now - 1000);
+  const sum = S.reviewSummary(now);
+  ok(sum.total === 2, `概览 total = 2（实际 ${sum.total}）`);
+  ok(sum.due === 2, `概览 due = 2（实际 ${sum.due}）`);
+  ok(sum.mastered === 0, `概览 mastered = 0（实际 ${sum.mastered}）`);
+  ok(sum.learning >= 1, `概览 learning ≥ 1（实际 ${sum.learning}）`);
+
+  // 全部未到期时 due=0，且给出 nextDue
+  S._setAllDue(now + 3 * 86400000);
+  const sum2 = S.reviewSummary(now);
+  ok(sum2.due === 0, `全部未到期时 due = 0（实际 ${sum2.due}）`);
+  ok(sum2.nextDue > now, `给出下次到期时间（${sum2.nextDue}）`);
+
+  // 已掌握的项不计入 due
+  S.clearWeak();
+  S.recordWeak({ char: '掌', pinyin: 'zhang' });
+  for (let i = 0; i < 5; i++) S.recordWeakCorrect({ char: '掌' });
+  S._setAllDue(now - 1000);
+  const sum3 = S.reviewSummary(now);
+  ok(sum3.total === 1, `概览包含已掌握项（total=${sum3.total}）`);
+  ok(sum3.due === 0, `★ 已掌握的项不再计入「今日到期」（due=${sum3.due}）`);
+  ok(sum3.mastered === 1, `已掌握计数正确（mastered=${sum3.mastered}）`);
+}
+
+/* ============================================================
+   【12】间隔重复：跨设备导入时调度信息取「更靠前」的一侧
+   ============================================================ */
+console.log('\n【12】导入合并的调度字段取舍');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  S.clearWeak();
+  const now = Date.now();
+
+  // 本机：连对 3 次（间隔 7 天）
+  S.recordWeak({ char: '合', pinyin: 'he' });
+  S.recordWeakCorrect({ char: '合' });
+  S.recordWeakCorrect({ char: '合' });
+  S.recordWeakCorrect({ char: '合' });
+  const local = S.getWeakList({ limit: 10, minCount: 1 })[0];
+
+  // 备份：同一字但进度更低（只连对 1 次）
+  const backup = {
+    app: 'shuangpin-practice',
+    version: S.DATA_VERSION,
+    weak: {
+      合: { key: '合', char: '合', pinyin: 'he', count: 2, correct: 1, lastTs: now, streak: 1, interval: 1, ease: 2.5, due: now + 86400000 }
+    }
+  };
+  S.importAll(backup);
+  const merged = S.getWeakList({ limit: 10, minCount: 1 })[0];
+
+  ok(merged.count >= local.count, `错误次数取累加（本地 ${local.count} → 合并后 ${merged.count}）`);
+  ok(merged.interval >= local.interval,
+    `★ 排期取更靠前的一侧（本地 ${local.interval} 天 → 合并后 ${merged.interval} 天）`);
+  ok(merged.streak >= local.streak,
+    `连对次数不倒退（本地 ${local.streak} → 合并后 ${merged.streak}）`);
+  ok(Number.isFinite(merged.due), '合并后 due 仍是合法数值');
+  ok(Number.isFinite(merged.ease), '合并后 ease 仍是合法数值');
+
+  // 反向：备份比本地更靠前 → 应采纳备份的更大间隔
+  S.clearWeak();
+  S.recordWeak({ char: '逆', pinyin: 'ni' });     // 本地很低
+  const localLow = S.getWeakList({ limit: 10, minCount: 1 })[0];
+  S.importAll({
+    app: 'shuangpin-practice',
+    version: S.DATA_VERSION,
+    weak: {
+      逆: { key: '逆', char: '逆', pinyin: 'ni', count: 1, correct: 4, lastTs: now, streak: 4, interval: 16, ease: 2.7, due: now + 16 * 86400000 }
+    }
+  });
+  const mergedHigh = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
+  ok(mergedHigh.interval >= 16,
+    `★ 备份更靠前时采纳备份的间隔（本地 ${localLow.interval} → 合并后 ${mergedHigh.interval}）`);
+}
+
+/* ============================================================
+   【13】设置项：新增字段的类型与回退
+   ============================================================ */
+console.log('\n【13】设置项（reduceMotion / reviewDueOnly / shortcuts）');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  const d = S.DEFAULT_SETTINGS;
+  ok(d.reduceMotion === 'auto', `reduceMotion 默认 'auto'（实际 ${d.reduceMotion}）`);
+  ok(d.reviewDueOnly === true, `reviewDueOnly 默认 true（实际 ${d.reviewDueOnly}）`);
+  ok(d.shortcuts === null, `shortcuts 默认 null（实际 ${d.shortcuts}）`);
+
+  // 默认值读取
+  const def = S.loadSettings();
+  ok(def.reduceMotion === 'auto', '未存过时读到 auto');
+  ok(def.reviewDueOnly === true, '未存过时读到 true');
+
+  /* ★ 关键：shortcuts 是对象，不能走「标量类型检查」那条路 ——
+     否则会被强制成 "[object Object]" 存进去。 */
+  S.saveSettings(Object.assign({}, def, {
+    shortcuts: { hint: 'f1', skip: 'f2', pause: '', submit: 'enter' }
+  }));
+  const back = S.loadSettings();
+  ok(typeof back.shortcuts === 'object' && back.shortcuts !== null,
+    `★ shortcuts 以对象形式存取（实际类型 ${typeof back.shortcuts}）`);
+  ok(back.shortcuts && back.shortcuts.hint === 'f1',
+    `★ shortcuts 内容未被字符串化（hint=${back.shortcuts && back.shortcuts.hint}）`);
+
+  // 存进去的是垃圾（数组 / 字符串）→ 回退 null
+  S.saveSettings(Object.assign({}, def, { shortcuts: ['a', 'b'] }));
+  ok(S.loadSettings().shortcuts === null, 'shortcuts 为数组时回退 null');
+  S.saveSettings(Object.assign({}, def, { shortcuts: 'oops' }));
+  ok(S.loadSettings().shortcuts === null, 'shortcuts 为字符串时回退 null');
+
+  // reduceMotion 只接受三个合法值
+  S.saveSettings(Object.assign({}, def, { reduceMotion: 'on' }));
+  ok(S.loadSettings().reduceMotion === 'on', 'reduceMotion 可存 on');
+  S.saveSettings(Object.assign({}, def, { reduceMotion: 'off' }));
+  ok(S.loadSettings().reduceMotion === 'off', 'reduceMotion 可存 off');
+  S.saveSettings(Object.assign({}, def, { reduceMotion: '乱写' }));
+  ok(S.loadSettings().reduceMotion === 'auto',
+    `★ 非法 reduceMotion 回退 auto（实际 ${S.loadSettings().reduceMotion}）`);
+
+  // reviewDueOnly 是布尔
+  S.saveSettings(Object.assign({}, def, { reviewDueOnly: false }));
+  ok(S.loadSettings().reviewDueOnly === false, 'reviewDueOnly 可存 false');
+}
+
+/* ============================================================
+   【14】存储三态：命名与复位
+   ============================================================ */
+console.log('\n【14】存储状态命名');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  ok(typeof S.storageModeName === 'function', '导出 storageModeName()');
+  const n0 = S.storageModeName();
+  ok(typeof n0 === 'string' && n0.length > 0, `正常态有可读名称（${n0}）`);
+
+  // 配额满 → 名称应变化
+  ls.state.limit = 200;
+  S.writeJSON('k.huge', { big: 'z'.repeat(2000) });
+  const n1 = S.storageModeName();
+  ok(n1 !== n0, `★ 降级后名称变化（${n0} → ${n1}）`);
+  ok(/内存|memory|quota|配额/i.test(n1), `降级态名称可辨识（${n1}）`);
+
+  // 复位钩子
+  ok(typeof S._resetStorageState === 'function', '导出 _resetStorageState()（测试钩子）');
+  S._resetStorageState();
+  ok(S.storageModeName() === n0, '★ 复位后回到初始状态名');
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 存储层自检全部通过'
   : `❌ 存储层自检共 ${fail} 项未通过`));

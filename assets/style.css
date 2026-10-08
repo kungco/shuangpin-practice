@@ -836,7 +836,7 @@ table.weak-table .bar-cell { min-width: 110px; }
   border-radius: var(--radius-sm);
   background: var(--surface);
   padding: 7px 12px;
-  display: flex; align-items: baseline; gap: 9px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 3px;
   cursor: pointer;
   transition: border-color .15s, background .15s;
 }
@@ -1238,6 +1238,129 @@ table.weak-table .bar-cell { min-width: 110px; }
   width: 10px; height: 10px; opacity: 0;
   border: none; outline: none; background: transparent;
 }
+
+/* ---------------- 复习页：间隔重复 ---------------- */
+
+/* 到期概览卡：复习页第一眼要看到「今天该练几项」 */
+.review-due-card {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px;
+  padding: 14px 18px; margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.review-due-card.has-due {
+  border-color: #bcd0fb;
+  background: var(--primary-soft);
+}
+.rdc-main { display: flex; align-items: baseline; gap: 7px; }
+.rdc-num { font-size: 30px; font-weight: 700; line-height: 1; color: var(--primary); }
+.rdc-label { font-size: 14px; color: var(--text-2); }
+.rdc-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--text-2); }
+.rdc-meta b { color: var(--text); }
+.rdc-toggle { margin-left: auto; font-size: 13px; }
+
+/* 复习项 chip：因为要挂一条「掌握度进度条」，原来的单行 baseline
+   布局放不下，改成两行的 block 布局（上行内容、下行进度条）。 */
+.review-chip { position: relative; }
+.review-chip .rc-line { display: flex; align-items: baseline; gap: 9px; }
+.review-chip.is-due {
+  border-left: 3px solid var(--primary);
+  background: var(--primary-soft);
+}
+.rc-sched { display: flex; align-items: center; gap: 7px; margin-top: 1px; }
+.rc-bar {
+  display: block; flex: 1 1 auto; height: 3px; border-radius: 2px;
+  background: rgba(29,36,51,.10); overflow: hidden;
+}
+.rc-bar > i { display: block; height: 100%; background: var(--primary); border-radius: 2px; }
+.rc-due { flex: 0 0 auto; font-size: 11px; color: var(--text-3); font-family: var(--mono); }
+.review-chip.is-due .rc-due { color: var(--primary); font-weight: 600; }
+
+/* 设置页：快捷键改键面板 */
+.shortcut-list { display: flex; flex-direction: column; gap: 8px; margin: 4px 0; }
+.shortcut-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 9px 14px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.shortcut-label { font-size: 14px; }
+.shortcut-key {
+  min-width: 92px; padding: 5px 12px;
+  font: inherit; font-size: 13px; font-weight: 600;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.shortcut-key:hover { border-color: var(--primary); }
+.shortcut-key.is-unbound { color: var(--text-3); font-weight: 500; font-style: italic; }
+.shortcut-key.is-capturing {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  animation: keycap-pulse .9s ease-in-out infinite;
+}
+@keyframes keycap-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47,109,246,.35); }
+  50%      { box-shadow: 0 0 0 4px rgba(47,109,246,0); }
+}
+.checkbox.is-disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---------------- 无障碍 ---------------- */
+
+/* 给屏幕阅读器专用：视觉上不可见但仍会被朗读。
+   不能用 display:none / visibility:hidden —— 那连屏幕阅读器也读不到了。
+   用 1px 裁剪是业界验证过的写法。 */
+.sr-only {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 键盘导航：只在「键盘操作」时显示焦点环。
+   用 :focus-visible 而不是 :focus —— 鼠标点击不该出现焦点环。
+   #stage / #hiddenInput 排除在外：前者是题面区（无交互语义），
+   后者是给移动端唤起键盘用的隐藏输入，给它画环会露出一个怪异的方框。 */
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+#stage:focus-visible, #hiddenInput:focus-visible { outline: none; }
+
+/* 「减少动态效果」：把动画与过渡压到几乎不可见。
+   注意保留 transition 的存在（时长极小而非 none）—— 有些脚本依赖
+   transitionend 事件，直接 none 会让它们永远等不到回调。 */
+html.reduce-motion *,
+html.reduce-motion *::before,
+html.reduce-motion *::after {
+  animation-duration: .001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* 减少动态效果下的答错提示：不动，只描边 */
+#stage.is-error-static {
+  box-shadow: 0 0 0 2px rgba(220,61,61,.55) inset;
+  background: var(--err-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 用户没在应用里选过 'off' 时的兜底（与 html.reduce-motion 等效，
+     但覆盖到 JS 尚未执行前的首屏） */
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+.btn-xs { padding: 3px 9px !important; font-size: 12px !important; }
 
 /* ---------------- 响应式 ---------------- */
 
