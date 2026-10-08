@@ -14,9 +14,10 @@
 import {
   generateQuestions, generateReviewQuestions, LEVELS, LEVEL_MAP,
   questionFromCharChar, questionFromPhrase, isPunct,
-  ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS
+  ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS, phrasePool
 } from './core/questions.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
+import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
 import { summarize, historySeries, dailySeries, weakRanking, groupWeakItems,
          reviewAdvice, formatDuration, formatClock, keyHeatmap } from './core/stats.js';
@@ -49,7 +50,7 @@ const app = {
   heatKeymap: null,    // 统计页热力图控制器（与上面两个互不干扰）
   sessionMode: 'char',
   lastErrorTarget: null,
-  stats: { chartMetric: 'speed', chartRange: '20', dailyDays: 14, heatRange: 'all' },
+  stats: { mode: 'all', chartMetric: 'speed', chartRange: '20', dailyDays: 14, heatRange: 'all' },
   saveTimer: null,
   lastResumeSave: 0,
   hint: null,          // 当前提示状态（由引擎 hint / reveal 事件驱动）
@@ -250,10 +251,14 @@ function initSetupPanel() {
   const selTier = $('#selCharTier');
   if (selTier) {
     selTier.innerHTML = CHAR_TIERS.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')
-      + '<option value="progressive">逐档挑战</option>';
+      + '<option value="progressive">自适应挑战（按掌握程度升降档）</option>';
     selTier.value = app.settings.charTier;
     selTier.addEventListener('change', () => {
       app.settings.charTier = selTier.value;
+      if (selTier.value === 'progressive' && app.settings.trainingPolicy === 'full') {
+        app.settings.trainingPolicy = 'progressive';
+        if ($('#selTrainingPolicy')) $('#selTrainingPolicy').value = 'progressive';
+      }
       saveSettingsDebounced();
     });
   }
@@ -273,6 +278,18 @@ function initSetupPanel() {
       saveSettingsDebounced();
     });
   }
+
+  for (const [id, key] of [['selTrainingPolicy', 'trainingPolicy'], ['selPhraseCategory', 'phraseCategory'], ['selPhraseLength', 'phraseLength']]) {
+    const el = $(`#${id}`);
+    if (!el) continue;
+    el.value = app.settings[key];
+    el.addEventListener('change', () => {
+      app.settings[key] = el.value;
+      updatePhrasePoolInfo();
+      saveSettingsDebounced();
+    });
+  }
+  updatePhrasePoolInfo();
 
   const btnStart = $('#btnStart');
   // 注意：必须用箭头函数包装。若直接传 startSession，
@@ -312,6 +329,8 @@ function selectMode(mode, silent) {
   toggleExamNote(m);
   const tierField = $('#charTierField');
   if (tierField) tierField.hidden = m !== 'char';
+  for (const id of ['phraseCategoryField', 'phraseLengthField']) { const el = $(`#${id}`); if (el) el.hidden = m !== 'phrase'; }
+  if ($('#trainingField')) $('#trainingField').hidden = m === 'exam';
   if (!silent) saveSettingsDebounced();
 }
 
@@ -378,24 +397,52 @@ function updateModeCounts() {
 }
 
 // 生成器保留去重集合，不限量时按小批次补充，避免续练数据无限膨胀。
-function createQuestionSource(config, initial = []) {
+function updatePhrasePoolInfo() {
+  const info = $('#phrasePoolInfo');
+  if (info) {
+    const count = phrasePool(app.settings).length;
+    info.textContent = count ? `可练 ${count} 个词组；练完后循环` : '此组合暂无词组，请更换分类或长度';
+  }
+}
+
+function createQuestionSource(config, initial = [], savedState = {}) {
   const recent = S.loadRecent(config.mode);
-  const context = { used: new Set(recent), usedPinyin: new Set(recent), usedPhrase: new Set(recent) };
+  const context = {};
+  for (const name of ['used', 'usedPinyin', 'usedPhrase', 'usedKeys']) {
+    const state = savedState?.[name];
+    context[name] = new Set(Array.isArray(state?.items) ? state.items : recent);
+    context[name].last = state?.last;
+    context[name].cycles = Number(state?.cycles) || 0;
+    context[name].draws = Number(state?.draws) || 0;
+  }
   for (const q of initial) {
     context.used.add(q.text || q.promptText);
     context.usedPhrase.add(q.text || q.promptText);
+    if (q.kind === 'key') context.usedKeys.add(`${q.role}:${q.promptText}`);
     const py = q.pinyin || q.chars?.[0]?.pinyin;
     if (py) context.usedPinyin.add(q.kind === 'part' ? `${q.part}:${py}` : py);
   }
-  return () => {
-    const weak = config.weakBoost && ['char', 'phrase'].includes(config.mode) ? weakRanking(60) : [];
-    const review = weak.length ? generateReviewQuestions(weak, Math.floor(config.count / 5)) : [];
-    const fresh = generateQuestions({ ...config, count: config.count - review.length, context });
+  const source = (overrides = {}) => {
+    const options = { ...config, ...overrides };
+    // Fixed-tier practice and phrase filters also apply to weak review candidates.
+    const allowedWords = options.mode === 'phrase' ? new Set(phrasePool(options).map(p => p.w)) : null;
+    const allowedChars = options.mode === 'char' && options.charTier !== 'progressive'
+      ? CHAR_TIERS.find(t => String(t.id) === String(options.charTier))?.data : null;
+    const weak = options.weakBoost && ['char', 'phrase'].includes(options.mode) && !(options.mode === 'char' && options.charTier === 'progressive')
+      ? weakRanking(60).filter(it => allowedWords ? allowedWords.has(it.word)
+        : !it.word && (!allowedChars || Object.hasOwn(allowedChars, it.char))) : [];
+    const review = weak.length ? generateReviewQuestions(weak, Math.floor(options.count / 5)) : [];
+    const historyKeys = S.getKeyErrorTotals().counts;
+    const keyWeights = { ...historyKeys };
+    for (const [key, count] of Object.entries(overrides.keyWeights || {})) keyWeights[key] = (keyWeights[key] || 0) + count;
+    const fresh = generateQuestions({ ...options, keyWeights, count: options.count - review.length, context });
     const out = fresh.slice();
-    // 每五题最多一题易错复习，避免新内容被挤走。
     review.forEach((q, i) => out.splice(Math.min(out.length, i * 5 + 4), 0, q));
     return out;
   };
+  source.exportState = () => Object.fromEntries(Object.entries(context).map(([name, used]) =>
+    [name, { items: [...used], last: used.last, cycles: used.cycles || 0, draws: used.draws || 0 }]));
+  return source;
 }
 
 function saveSettingsDebounced() {
@@ -449,13 +496,14 @@ function startSession(questionsOverride, modeOverride) {
     const unlimited = !preset && count === 0 && mode !== 'exam';
     const generation = {
       mode, count: unlimited ? (mode === 'passage' ? 3 : 20) : (count || 50),
-      charTier: app.settings.charTier, weakBoost: app.settings.weakBoost
+      charTier: app.settings.charTier, weakBoost: app.settings.weakBoost,
+      phraseCategory: app.settings.phraseCategory, phraseLength: app.settings.phraseLength
     };
     const questionSource = preset ? null : createQuestionSource(generation);
     const questions = preset || questionSource();
 
     if (!Array.isArray(questions) || !questions.length) {
-      toast('题目生成失败，请重试', 'err');
+      toast(mode === 'phrase' ? '此分类与长度组合暂无词组，请更换筛选条件' : '题目生成失败，请重试', 'err');
       return;
     }
 
@@ -476,6 +524,7 @@ function startSession(questionsOverride, modeOverride) {
       strict: app.settings.strict,
       skipPunct: app.settings.skipPunct,
       examMode: isExam,
+      trainingPolicy: app.settings.trainingPolicy,
       hintEnabled: isExam ? false : app.settings.hint,
       hintDelayMs: isExam ? 0 : app.settings.hintDelay,
       revealDelayMs: isExam ? 0 : app.settings.revealDelay
@@ -506,7 +555,8 @@ function resumeSession() {
   if (!saved) { toast('没有可继续的进度', 'err'); return; }
   try {
     const generation = saved.generation || { mode: saved.mode, count: saved.mode === 'passage' ? 3 : 20, charTier: app.settings.charTier };
-    const source = saved.unlimited ? createQuestionSource(generation, saved.questions) : null;
+    const source = saved.unlimited || generation.charTier === 'progressive'
+      ? createQuestionSource(generation, saved.questions, saved.generationState) : null;
     const eng = PracticeEngine.restore(saved, source);
     if (!eng) { toast('进度已损坏，无法恢复', 'err'); S.clearResume(); return; }
     if (app.engine) app.engine.destroy();
@@ -530,7 +580,7 @@ function resumeSession() {
 function rememberCurrentQuestion(eng) {
   const q = eng.currentQuestion();
   if (q && q.meta?.from !== 'review') {
-    S.recordRecent(eng.mode, q.kind === 'part' ? `${q.part}:${q.pinyin}` : (q.text || q.promptText));
+    S.recordRecent(eng.mode, q.kind === 'key' ? `${q.role}:${q.promptText}` : q.kind === 'part' ? `${q.part}:${q.pinyin}` : (q.text || q.promptText));
   }
 }
 
@@ -554,9 +604,9 @@ function bindEngineEvents() {
     app.lastErrorTarget = fb;
     // 错误反馈：音效 + 屏幕阅读器播报（assertive：走打断队列，因为用户需要立刻知道按错了）
     playSound('error', app.settings.sound);
-    if (fb && fb.expectedAll && fb.expectedAll.length) {
+    if (!eng.examMode && eng.assistanceLevel() === 0 && fb && fb.expectedAll && fb.expectedAll.length) {
       announce(`按错。应键入 ${fb.expectedAll.map(k => String(k).toUpperCase()).join(' 或 ')}`, 'assertive');
-    }
+    } else announce('按错，请重试。', 'assertive');
   });
 
   eng.on('unit', ({ target, independent }) => {
@@ -575,6 +625,7 @@ function bindEngineEvents() {
   /* ---- 卡住提示 ---- */
   eng.on('hint', (payload) => {
     app.hint = payload;
+    applyMiniKeymapVisibility();
     renderHint(payload);
     highlightMiniKeymap();
   });
@@ -900,8 +951,10 @@ function renderSession() {
 
   if (!q || !prompt || !decode) return;
 
-  if (stageMode) stageMode.textContent = q.label || (LEVEL_MAP[eng.mode] ? LEVEL_MAP[eng.mode].name : '练习');
-  if (stageTip) stageTip.textContent = LEVEL_MAP[eng.mode] ? LEVEL_MAP[eng.mode].tip : '';
+  if (stageMode) stageMode.textContent = (q.label || '练习') + (!eng.examMode ? ` · ${TRAINING_LABELS[eng.assistanceLevel()]}` : '') + (eng.adaptive ? ` · 第 ${eng.training.tier} 档` : '');
+  if (stageTip) stageTip.textContent = eng.training.policy === 'progressive' && eng.assistanceLevel() < 2
+    ? '每 10 个作答单元评估一次：正确率达 90% 且反应稳定后减少提示；卡住可按 Tab 求助。'
+    : (LEVEL_MAP[eng.mode] ? LEVEL_MAP[eng.mode].tip : '');
 
   /* 测验模式：在舞台顶部挂一个「无提示」标记。
      用户随时能看见自己处在测验中（而不是以为应用坏了），
@@ -957,7 +1010,7 @@ function renderSession() {
       let extra = '';
       if (st.punct) extra = '';
       else if (st.unknown) extra = ' title="该字未收录拼音，自动跳过"';
-      else if (!eng.examMode) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)}"`;
+      else if (!eng.examMode && eng.assistanceLevel() < 2) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)}"`;
       return `<span class="${cls.join(' ')}"${extra}>${escapeHtml(st.ch)}</span>`;
     }).join('');
   }
@@ -970,6 +1023,7 @@ function renderSession() {
   updateTimebar();
 
   /* ---- 键位图高亮 ---- */
+  applyMiniKeymapVisibility();
   highlightMiniKeymap();
 
   /* ---- 提示态还原 ----
@@ -997,6 +1051,12 @@ function renderDecode(eng, q, container) {
   // 测验题干保留，答案不进入 DOM，避免视觉与读屏提前泄露键位。
   if (eng.examMode) {
     container.innerHTML = '<div class="decode-empty">凭记忆输入双拼编码</div>';
+    return;
+  }
+
+  if (eng.assistanceLevel() > 0) {
+    const py = eng.assistanceLevel() === 1 ? (q.chars || []).filter(c => !c.punct).map(c => c.pinyin).join(' ') : '';
+    container.innerHTML = `<div class="decode-empty">${py ? escapeHtml(py) : '凭记忆输入'} · 卡住可按 Tab 求助</div>`;
     return;
   }
 
@@ -1153,6 +1213,13 @@ function showErrorFeedback(fb) {
   const box = $('#feedback');
   if (!box || !fb) return;
 
+  if (app.engine?.examMode || app.engine?.assistanceLevel() > 0) {
+    box.className = 'feedback is-err'; box.hidden = false;
+    box.textContent = '按错了，请重试。' + (app.engine.examMode ? '' : ' 需要帮助可按 Tab。');
+    if (app._fbTimer) clearTimeout(app._fbTimer);
+    app._fbTimer = setTimeout(() => clearFeedback(), 3200);
+    return;
+  }
   const keySeq = (fb.expectedAll || []).map((k, i) =>
     i === fb.pos ? `<b style="text-decoration:underline">${escapeHtml(k)}</b>` : escapeHtml(k)
   ).join(' ');
@@ -1286,7 +1353,7 @@ function ensureMiniKeymap() {
  */
 function applyMiniKeymapVisibility() {
   const isExam = !!(app.engine && app.engine.examMode);
-  const visible = !isExam && app.settings.showMiniKeymap;
+  const visible = !isExam && app.settings.showMiniKeymap && (!app.engine || app.engine.assistanceLevel() === 0 || !!app.engine.hintLevel());
   const wrap = $('#miniKeymap');
   const outer = wrap && wrap.closest ? wrap.closest('.mini-keymap-wrap') : null;
   if (outer) outer.hidden = !visible;
@@ -1299,7 +1366,7 @@ function highlightMiniKeymap() {
   if (!app.keymap || !app.engine) return;
   try {
     // 测验模式下绝不把答案画到键位图上
-    if (app.engine.examMode) { app.keymap.clear(); return; }
+    if (app.engine.examMode || (app.engine.assistanceLevel() > 0 && !app.engine.hintLevel())) { app.keymap.clear(); return; }
     if (app.engine.state === STATE.PAUSED || app.engine.state === STATE.FINISHED) {
       app.keymap.clear();
       return;
@@ -1711,7 +1778,14 @@ function renderSyllableList() {
 
 function renderStatsView() {
   try {
-    const history = S.loadHistory();
+    const modeSelect = $('#statsMode');
+    if (modeSelect && !modeSelect._bound) {
+      modeSelect.innerHTML = '<option value="all">全部模式</option>' + LEVELS.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+      modeSelect._bound = true;
+      modeSelect.addEventListener('change', () => { app.stats.mode = modeSelect.value; renderStatsView(); });
+    }
+    if (modeSelect) modeSelect.value = app.stats.mode;
+    const history = S.loadHistory().filter(r => app.stats.mode === 'all' || r.mode === app.stats.mode);
     const sum = summarize(history);
 
     /* ---- 卡片 ---- */
@@ -1730,7 +1804,7 @@ function renderStatsView() {
     /* ---- 曲线 ---- */
     const canvas = $('#historyChart');
     if (canvas) {
-      const series = historySeries({ range: app.stats.chartRange, metric: app.stats.chartMetric });
+      const series = historySeries({ range: app.stats.chartRange, metric: app.stats.chartMetric, mode: app.stats.mode });
       drawLine(canvas, series.points, {
         metric: series.metric,
         avg: series.avg,
@@ -1741,7 +1815,7 @@ function renderStatsView() {
     /* ---- 每日柱状 ---- */
     const dailyCanvas = $('#dailyChart');
     if (dailyCanvas) {
-      drawBars(dailyCanvas, dailySeries(app.stats.dailyDays), { height: 200 });
+      drawBars(dailyCanvas, dailySeries(app.stats.dailyDays, app.stats.mode), { height: 200 });
     }
 
     /* ---- 错误热力图 ---- */
@@ -2569,6 +2643,7 @@ function syncSettingsUI() {
   const selects = [
     ['#selDuration', 'duration'], ['#setDuration', 'duration'],
     ['#selCharTier', 'charTier'],
+    ['#selTrainingPolicy', 'trainingPolicy'], ['#selPhraseCategory', 'phraseCategory'], ['#selPhraseLength', 'phraseLength'],
     ['#setHintDelay', 'hintDelay'], ['#setRevealDelay', 'revealDelay'],
     ['#setReduceMotion', 'reduceMotion']
   ];
@@ -2593,6 +2668,7 @@ function syncSettingsUI() {
   applyMiniKeymapVisibility();
   updateModeCounts();
   syncShortcutNote();
+  updatePhrasePoolInfo();
 }
 
 /* ============================================================

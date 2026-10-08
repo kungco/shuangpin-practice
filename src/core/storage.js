@@ -274,6 +274,9 @@ export const DEFAULT_SETTINGS = {
   duration: 180,       // 秒，0 = 不限
   count: 20,           // 题量，0 = 不限
   charTier: '1',       // 单字默认从高频字开始，可选固定档位或渐进
+  trainingPolicy: 'full',
+  phraseCategory: 'all',
+  phraseLength: 'all',
   weakBoost: false,    // 侧重易错内容
   showMiniKeymap: true,
   sound: false,
@@ -303,6 +306,9 @@ const SETTINGS_OBJECT_KEYS = ['shortcuts'];
  * 的空白区 —— 表现是「设置不生效但也不报错」，最难查。
  */
 const SETTINGS_ENUMS = {
+  trainingPolicy: ['full', 'progressive', 'pinyin', 'independent'],
+  phraseCategory: ['all', 'daily', 'office', 'travel', 'idiom'],
+  phraseLength: ['all', '2', '3', '4'],
   charTier: ['progressive', '1', '2', '3', '4', '5', '6', '7'],
   reduceMotion: ['auto', 'on', 'off']
 };
@@ -1021,6 +1027,9 @@ export function saveResume(state) {
     questionOffset: state.questionOffset,
     unlimited: state.unlimited,
     generation: state.generation,
+    generationState: state.generationState,
+    training: state.training,
+    unitStartedAt: state.unitStartedAt,
     charIndex: state.charIndex,
     keyIndex: state.keyIndex,
     typed: state.typed,

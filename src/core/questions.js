@@ -24,7 +24,7 @@
  *   错在哪一半一目了然。
  *
  * 题库规模（见 data/pinyin.js）：1787 单字（7 档） / 2247 词组 / 100 短文，
- * 合计 1451 个可出题项，另加键位图、声母/韵母专项、音节拆分四个无限题库。
+ * 合计 4134 个可出题项，另加键位图、声母/韵母专项、音节拆分四个无限题库。
  *
  * 每道题的统一结构（Question）：
  *   {
@@ -162,64 +162,30 @@ function nextId() { uid += 1; return `q${Date.now().toString(36)}${uid}`; }
  * L1：键位熟悉 —— 单键作答
  * 题目形态：给出一个韵母或声母，要求按对应键。
  */
-function makeKeymapQuestion() {
-  const rng = Math.random;
-  // 优先出韵母（韵母是双拼记忆的主体）
-  const useYun = rng() < 0.78;
-
-  const yunKeys = Object.keys(KEY_TO_YUNMU).filter(k => KEY_TO_YUNMU[k].length);
-  const smKeys  = Object.keys(KEY_TO_SHENGMU).filter(k => KEY_TO_SHENGMU[k].length);
-
-  if (useYun && yunKeys.length) {
-    const key = yunKeys[Math.floor(rng() * yunKeys.length)];
-    const yunmus = KEY_TO_YUNMU[key];
-    const yun = yunmus[Math.floor(rng() * yunmus.length)];
-    return {
-      id: nextId(),
-      level: 1,
-      kind: 'key',
-      label: '韵母键',
-      promptText: yun,
-      promptSub: '按出该韵母所在的键',
-      answerKeys: [key],
-      role: 'yun',
-      explain: `韵母 ${yun} 在小鹤双拼中位于 ${key} 键`,
-      keyDetail: { key, yunmu: yun, shengmu: null }
-    };
-  }
-
-  if (smKeys.length) {
-    const key = smKeys[Math.floor(rng() * smKeys.length)];
-    const sms = KEY_TO_SHENGMU[key];
-    const sm = sms[Math.floor(rng() * sms.length)];
-    /* 答案直接取自方案表 SHENGMU_TO_KEYS，**不要**在这里硬编码。
-       历史 bug：这里曾把 zh/ch/sh 写成 ['V','H'] / ['I','H'] / ['U','H']，
-       理由是想当然地以为「zh 要按 z 和 h 两下」。但小鹤双拼里 zh/ch/sh
-       各自只占一个键（V / I / U），只影响音节第一键，第二键是韵母。
-       硬编码的第二个 H 会逼用户多按一个键，且与 README、键位图自相矛盾。
-       现在一律以方案表为准，方案表怎么定就怎么出题。 */
-    const seq = (SHENGMU_TO_KEYS[sm] || [key]).map(k => String(k).toUpperCase());
-    return {
-      id: nextId(),
-      level: 1,
-      kind: 'key',
-      label: '声母键',
-      promptText: sm,
-      promptSub: '按出该声母所在的键',
-      answerKeys: seq,
-      role: 'sheng',
-      explain: `声母 ${sm} 位于 ${seq.join('')} 键`,
-      keyDetail: { key, shengmu: sm, yunmu: null }
-    };
-  }
-
-  // 极端兜底：键表为空
+export const KEY_COMPONENTS = [
+  ...Object.entries(KEY_TO_YUNMU).flatMap(([key, parts]) => parts.map(part => ({ key, part, role: 'yun' }))),
+  ...Object.entries(KEY_TO_SHENGMU).flatMap(([key, parts]) => parts.map(part => ({ key, part, role: 'sheng' })))
+];
+function makeKeymapQuestion(ctx, weights = {}) {
+  const used = ctx.usedKeys ||= new Set();
+  used.draws = (used.draws || 0) + 1;
+  const weak = used.cycles > 0 && used.draws % 5 === 0
+    ? KEY_COMPONENTS.filter(x => (Number(weights[x.key.toLowerCase()]) || 0) > 0 && `${x.role}:${x.part}` !== used.last) : [];
+  let pick;
+  if (weak.length) {
+    const total = weak.reduce((sum, x) => sum + Math.min(20, Number(weights[x.key.toLowerCase()])), 0);
+    let ticket = Math.random() * total;
+    pick = weak.find(x => (ticket -= Math.min(20, Number(weights[x.key.toLowerCase()]))) < 0) || weak[0];
+    used.last = `${pick.role}:${pick.part}`;
+  } else pick = pickUnused(KEY_COMPONENTS, used, x => `${x.role}:${x.part}`, weights);
+  const { key, part, role } = pick;
+  const seq = role === 'sheng' ? (SHENGMU_TO_KEYS[part] || [key]) : [key];
   return {
-    id: nextId(), level: 1, kind: 'key', label: '韵母键',
-    promptText: 'a', promptSub: '按出该韵母所在的键',
-    answerKeys: ['A'], role: 'yun',
-    explain: '韵母 a 位于 A 键',
-    keyDetail: { key: 'A', yunmu: 'a', shengmu: null }
+    id: nextId(), level: 1, kind: 'key', label: role === 'yun' ? '韵母键' : '声母键',
+    promptText: part, promptSub: `按出该${role === 'yun' ? '韵母' : '声母'}所在的键`,
+    answerKeys: seq.map(k => String(k).toUpperCase()), role,
+    explain: `${part} 位于 ${seq.join('')} 键`,
+    keyDetail: { key, shengmu: role === 'sheng' ? part : null, yunmu: role === 'yun' ? part : null }
   };
 }
 
@@ -228,21 +194,53 @@ function makeKeymapQuestion() {
  */
 // 先随机抽取尚未出过的候选；候选耗尽后才开始下一轮。
 // used 可跨批次复用，并以近期实际见过的内容初始化。
-function pickUnused(pool, used, key = x => x) {
-  let available = pool.filter(x => !used.has(key(x)));
-  if (!available.length) {
-    for (const x of pool) used.delete(key(x));
-    available = pool.filter(x => key(x) !== used.last);
-    if (!available.length) available = pool;
+// One shuffled queue per stable pool and used set: O(n) per cycle, O(1) per draw.
+const drawQueues = new WeakMap();
+function pickUnused(pool, used, key = x => x, weights = null) {
+  let queues = drawQueues.get(used);
+  if (!queues) { queues = new Map(); drawQueues.set(used, queues); }
+  let queue = queues.get(pool);
+  if (!queue?.length) {
+    queue = pool.filter(x => !used.has(key(x)));
+    if (!queue.length) {
+      for (const x of pool) used.delete(key(x));
+      queue = pool.slice();
+    }
+    // After the first complete key cycle, weak keys get earlier positions,
+    // while every component is still covered before another cycle starts.
+    if (weights && used.cycles > 0) {
+      queue = queue.map(x => ({ x, rank: -Math.log(Math.max(1e-9, Math.random())) /
+        (1 + Math.min(20, Number(weights[x.key?.toLowerCase()]) || 0)) }))
+        .sort((a, b) => b.rank - a.rank).map(x => x.x);
+    } else {
+      for (let i = queue.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [queue[i], queue[j]] = [queue[j], queue[i]];
+      }
+    }
+    if (queue.length > 1 && key(queue[queue.length - 1]) === used.last)
+      [queue[0], queue[queue.length - 1]] = [queue[queue.length - 1], queue[0]];
+    queues.set(pool, queue);
   }
-  const pick = available[Math.floor(Math.random() * available.length)];
-  if (pick !== undefined) { used.add(key(pick)); used.last = key(pick); }
+  let pick = queue.pop();
+  // A shared set can also be populated by another pool (exam or tier changes).
+  while (pick !== undefined && used.has(key(pick))) pick = queue.pop();
+  if (pick === undefined && pool.length) return pickUnused(pool, used, key, weights);
+  if (pick !== undefined) {
+    used.add(key(pick)); used.last = key(pick);
+    if (weights && !queue.length) used.cycles = (used.cycles || 0) + 1;
+  }
   return pick;
+}
+const candidatePools = new Map();
+function cachedPool(name, build) {
+  if (!candidatePools.has(name)) candidatePools.set(name, build());
+  return candidatePools.get(name);
 }
 
 function makeSplitQuestion(usedPinyin) {
   // 从常用字中抽音节，避免重复
-  const pool = [...new Set(Object.values(CHARS_TIER1).concat(Object.values(CHARS_TIER2)))].filter(py => splitSyllable(py).length);
+  const pool = cachedPool('split', () => [...new Set(Object.values(CHARS_TIER1).concat(Object.values(CHARS_TIER2)))].filter(py => splitSyllable(py).length));
   const py = pickUnused(pool, usedPinyin) || 'zhang';
   return buildSyllableQuestion(py, 2);
 }
@@ -280,10 +278,10 @@ function makePartQuestion(part, usedPinyin) {
   const wantSheng = part !== 'yun';
 
   // 优先从高频字里抽，保证练习的是真正会遇到的音节
-  const pool = [...new Set(Object.values(CHARS_TIER1).concat(Object.values(CHARS_TIER2)))].filter(py => {
+  const pool = cachedPool(`part:${part}`, () => [...new Set(Object.values(CHARS_TIER1).concat(Object.values(CHARS_TIER2)))].filter(py => {
     const sp = primarySplit(py);
     return sp && (!wantSheng || !sp.zero);
-  });
+  }));
   const py = pickUnused(pool, usedPinyin, py => `${part}:${py}`);
   const picked = primarySplit(py);
   if (!picked) return makeFallbackCharQuestion();
@@ -319,12 +317,12 @@ function makePartQuestion(part, usedPinyin) {
 function makeCharQuestion(tier, usedSet) {
   const tiers = CHAR_TIERS.slice().sort((a, b) => a.id - b.id).map(x => x.data);
   const t = tiers[Math.max(0, Math.min(tiers.length - 1, (tier || 1) - 1))];
-  let entries = Object.entries(t).filter(([, py]) => splitSyllable(py).length);
+  let entries = cachedPool(`char:${tier}`, () => Object.entries(t).filter(([, py]) => splitSyllable(py).length));
   if (!entries.length) entries = Object.entries(ALL_CHARS).filter(([, py]) => splitSyllable(py).length);
   if (!entries.length) return makeFallbackCharQuestion();
 
   const pick = pickUnused(entries, usedSet, x => x[0]);
-  return buildWordQuestion(pick[0], [pick[1]], 3, { tierName: tierName(tier) });
+  return buildWordQuestion(pick[0], [pick[1]], 3, { tier, tierName: tierName(tier) });
 }
 
 function tierName(t) {
@@ -356,14 +354,16 @@ function buildWordQuestion(word, pinyins, level, meta = {}) {
 /**
  * L4：词组打字
  */
-function makePhraseQuestion(usedSet) {
-  const pool = PHRASES.filter(p => p.w.length === p.p.length &&
-    p.p.every(py => splitSyllable(py).length));
-  if (!pool.length) return makeFallbackCharQuestion();
-
-  const pick = pickUnused(pool, usedSet, x => x.w);
-
-  return buildWordQuestion(pick.w, pick.p, 4);
+export function phrasePool(opts = {}) {
+  const category = ['daily', 'office', 'travel', 'idiom'].includes(opts.phraseCategory) ? opts.phraseCategory : 'all';
+  const length = [2, 3, 4].includes(Number(opts.phraseLength)) ? Number(opts.phraseLength) : 0;
+  return cachedPool(`phrase:${category}:${length}`, () => PHRASES.filter(p =>
+    (category === 'all' || p.c === category) && (!length || Array.from(p.w).length === length) &&
+    Array.from(p.w).length === p.p.length && p.p.every(py => splitSyllable(py).length)));
+}
+function makePhraseQuestion(usedSet, opts = {}) {
+  const pick = pickUnused(phrasePool(opts), usedSet, x => x.w);
+  return pick ? buildWordQuestion(pick.w, pick.p, 4, { category: pick.c }) : null;
 }
 
 /**
@@ -458,7 +458,8 @@ function makeExamQuestion(i, target, ctx) {
  */
 export function annotatePassage(text, vettedReadings = null) {
   const arr = Array.from(String(text || ''));
-  const readings = tokenizeWithPinyin(text).flatMap(block => block.chars);
+  const readings = Array.isArray(vettedReadings) && vettedReadings.length === arr.length
+    ? [] : tokenizeWithPinyin(text).flatMap(block => block.chars);
   return arr.map((ch, i) => {
     if (isPunct(ch)) {
       return { ch, pinyin: '', syl: null, punct: true, unknown: false };
@@ -524,7 +525,7 @@ export function generateQuestions(opts = {}) {
       let q = null;
       switch (mode) {
         case 'keymap':
-          q = makeKeymapQuestion();
+          q = makeKeymapQuestion(ctx, opts.keyWeights);
           break;
         case 'sheng':
           q = makePartQuestion('sheng', usedPinyin);
@@ -536,18 +537,16 @@ export function generateQuestions(opts = {}) {
           q = makeSplitQuestion(usedPinyin);
           break;
         case 'char': {
-          // 渐进：把题量沿字表分层由易到难铺开（当前 7 档）。
-          // 用「档位数」动态均分，避免以后增减档位时曲线写死而失真。
+          // 自适应档位由练习表现决定，续题不会按批内位置重新升档。
           const total = Math.max(1, CHAR_TIERS.length);
-          const ratio = i / Math.max(1, target - 1);
           const fixedTier = Math.floor(Number(opts.charTier));
           const tier = fixedTier >= 1 && fixedTier <= total
-            ? fixedTier : Math.min(total, 1 + Math.floor(ratio * total));
+            ? fixedTier : Math.max(1, Math.min(total, Number(opts.adaptiveTier) || 1));
           q = makeCharQuestion(tier, used);
           break;
         }
         case 'phrase':
-          q = makePhraseQuestion(used);
+          q = makePhraseQuestion(used, opts);
           break;
         case 'passage': {
           // 短文按难度循环出，题量语义为「段落数」
@@ -568,7 +567,7 @@ export function generateQuestions(opts = {}) {
   }
 
   // 极端兜底：保证至少有一题
-  if (!out.length) out.push(makeFallbackCharQuestion());
+  if (!out.length && mode !== 'phrase') out.push(makeFallbackCharQuestion());
   return out;
 }
 

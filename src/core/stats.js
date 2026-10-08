@@ -42,8 +42,8 @@ export function summarize(history) {
     totalSeconds += num(r.durationSec);
     bestSpeed = Math.max(bestSpeed, num(r.speed));
     bestAccuracy = Math.max(bestAccuracy, num(r.accuracy));
-    speedSum += num(r.speed);
-    accSum += num(r.accuracy);
+    speedSum += num(r.speed) * num(r.durationSec);
+    accSum += num(r.accuracy) * num(r.totalChars);
     lastTs = Math.max(lastTs, num(r.ts));
   }
 
@@ -59,8 +59,8 @@ export function summarize(history) {
     totalChars,
     totalSeconds,
     bestSpeed: round1(bestSpeed),
-    avgSpeed: round1(speedSum / list.length),
-    avgAccuracy: round1(accSum / list.length),
+    avgSpeed: totalSeconds > 0 ? round1(speedSum / totalSeconds) : 0,
+    avgAccuracy: totalChars > 0 ? round1(accSum / totalChars) : 0,
     bestAccuracy: round1(bestAccuracy),
     streakDays: computeStreak(daySet),
     totalDays,
@@ -104,7 +104,7 @@ export function computeStreak(daySet) {
  * @returns {{points:Array<{ts,date,value,accuracy,speed,mode}>, min, max, avg}}
  */
 export function historySeries(opts = {}) {
-  const list = loadHistory().slice().sort((a, b) => a.ts - b.ts);
+  const list = loadHistory().filter(r => !opts.mode || opts.mode === 'all' || r.mode === opts.mode).sort((a, b) => a.ts - b.ts);
   const range = opts.range || '20';
   let trimmed;
   if (range === 'all') trimmed = list;
@@ -127,7 +127,8 @@ export function historySeries(opts = {}) {
   const values = points.map(p => p.value);
   const min = values.length ? Math.min(...values) : 0;
   const max = values.length ? Math.max(...values) : 0;
-  const avg = values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+  const summary = summarize(trimmed);
+  const avg = metric === 'acc' ? summary.avgAccuracy : summary.avgSpeed;
 
   return { points, min, max, avg: round1(avg), metric };
 }
@@ -136,8 +137,16 @@ export function historySeries(opts = {}) {
  * 每日练习量
  * @param {number} days 最近多少天（默认 14）
  */
-export function dailySeries(days = 14) {
-  const daily = loadDaily();
+export function dailySeries(days = 14, mode = 'all') {
+  // Use the same retained history for overview, trends and daily totals.
+  const daily = {};
+  for (const rec of loadHistory().filter(r => mode === 'all' || r.mode === mode)) {
+    const day = daily[rec.date] ||= { chars: 0, sessions: 0, durationSec: 0, bestSpeed: 0, speedSum: 0 };
+    day.chars += num(rec.totalChars); day.sessions++;
+    day.durationSec += num(rec.durationSec);
+    day.bestSpeed = Math.max(day.bestSpeed, num(rec.speed));
+    day.speedSum += num(rec.speed) * num(rec.durationSec);
+  }
   const n = Math.max(1, Math.min(365, Number(days) || 14));
   const out = [];
   const cursor = new Date();
@@ -159,7 +168,7 @@ export function dailySeries(days = 14) {
       sessions: rec ? num(rec.sessions) : 0,
       durationSec: rec ? num(rec.durationSec) : 0,
       bestSpeed: rec ? num(rec.bestSpeed) : 0,
-      avgSpeed: rec && num(rec.sessions) > 0 ? round1(num(rec.speedSum) / num(rec.sessions)) : 0
+      avgSpeed: rec && num(rec.durationSec) > 0 ? round1(num(rec.speedSum) / num(rec.durationSec)) : 0
     });
   }
   return out;

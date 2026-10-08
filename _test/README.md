@@ -1,6 +1,6 @@
 # 自检脚本
 
-六个互相独立的测试套件，**只用于开发期自检，不影响应用运行**。
+七个互相独立的测试套件，**只用于开发期自检，不影响应用运行**。
 （应用本身零依赖，但**不能直接双击 `index.html`** —— 浏览器禁止在 `file://`
 协议下加载 ES 模块，必须经由本地 HTTP 服务打开。见文末说明。）
 
@@ -11,6 +11,7 @@
 | `storage.mjs` | **存储降级**（配额满 → 内存 → 恢复落盘）、**导入合并**、**日报与历史一致性**、**间隔重复排期（SM-2 简化版）**、设置项类型校验 | 无 |
 | `a11y.mjs` | **减少动态效果**、**快捷键规范化与冲突校验**、**物理键位映射（Dvorak / AZERTY）**、**屏幕阅读器播报**、**WebAudio 音效合成与连错降音** | 无 |
 | `launcher.mjs` | **启动脚本静态自检**：编码前提（BOM / CRLF / chcp 顺序）、引用的文件是否存在、标签配对、三级回退链、与服务端脚本的接口一致性、危险写法扫描 | 无 |
+| `training.mjs` | 提示撤除、独立作答、自适应档位、键位覆盖、词组筛选、续练、加权统计与 500 / 5,000 题性能 | 无 |
 | `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**、**辅助功能接线层**） | `linkedom` |
 
 > `storage.mjs` / `a11y.mjs` / `launcher.mjs` 都是「零依赖 + 毫秒级」的套件，
@@ -57,12 +58,12 @@
 
 ## 运行
 
-**推荐（一次装依赖，之后跑全部六套）：**
+**推荐（一次装依赖，之后跑全部七套）：**
 
 ```bash
 cd _test
 npm ci            # 按 package-lock.json 精确还原依赖（首次或换环境时执行）
-npm test          # 依次跑 verify → engine → storage → a11y → launcher → integration
+npm test          # 依次跑 verify → engine → storage → a11y → launcher → training → integration
 ```
 
 也可以单独跑：
@@ -73,6 +74,7 @@ node _test/engine.mjs
 node _test/storage.mjs
 node _test/a11y.mjs
 node _test/launcher.mjs
+node _test/training.mjs
 node _test/integration.mjs
 ```
 
@@ -81,7 +83,7 @@ node _test/integration.mjs
 
 ### 依赖可复现性（为什么要用 `npm ci`）
 
-`integration.mjs` 需要 `linkedom` 来模拟 DOM，其余五套**零依赖**。
+`integration.mjs` 需要 `linkedom` 来模拟 DOM，其余六套**零依赖**。
 为了「换个环境/换个人跑结果都一样」，`_test/` 下提交了两个文件：
 
 | 文件 | 作用 |
@@ -97,7 +99,7 @@ node _test/integration.mjs
 ### CI
 
 `.github/workflows/tests.yml` 会在 push / PR 时用 **Node 18 / 20 / 22** 三个版本
-各跑一遍六套测试：
+各跑一遍七套测试：
 `actions/checkout` → `setup-node` → `cd _test && npm ci` → 依次执行六个脚本。
 这样「检出目录没有 linkedom、集成测试跑不起来」的情况不会再出现 ——
 依赖由锁文件保证，runner 每次都是干净且一致的。

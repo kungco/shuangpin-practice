@@ -1399,6 +1399,66 @@ console.log('【新增】题量设置与自动续题接线');
   cleanup();
 }
 
+console.log('【新增】训练阶段、分类筛选、自适应续练与模式统计');
+{
+  const sMod = await import('../src/core/storage.js');
+  const cleanup = () => { if (app.engine) app.engine.destroy(); app.engine = null; app.sessionActive = false; };
+  cleanup();
+  app.settings.hint = false;
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'phrase'), 'click');
+  q('#selPhraseCategory').value = 'office'; fire(q('#selPhraseCategory'), 'change');
+  q('#selPhraseLength').value = '3'; fire(q('#selPhraseLength'), 'change');
+  q('#selTrainingPolicy').value = 'independent'; fire(q('#selTrainingPolicy'), 'change');
+  q('#selCount').value = '20'; fire(q('#selCount'), 'change');
+  app.settings.weakBoost = true;
+  fire(q('#btnStart'), 'click');
+  ok(app.engine.questions.every(x => x.meta.category === 'office' && Array.from(x.text).length === 3),
+    '筛选范围同样约束易错强化');
+  ok(!q('#decode').querySelector('code') && q('#decode').textContent.includes('凭记忆'), '独立输入不渲染答案');
+  ok(!q('#prompt').querySelector('[title]') && q('#miniKeymap').hidden, '独立输入隐藏拼音悬浮和键位图');
+  const target = app.engine.currentTarget();
+  app.engine.pressKey(target.keys[target.pos].toLowerCase() === 'z' ? 'x' : 'z');
+  ok(!q('#feedback').querySelector('code') && q('#feedback').textContent.includes('重试'), '答错反馈也不泄露答案');
+  app.engine.hintEnabled = true;
+  app.engine.requestHint('reveal');
+  ok(!q('#miniKeymap').hidden && !q('#hintBar').hidden, '主动求助可显示已计入辅助的答案');
+  cleanup();
+  q('#selPhraseCategory').value = 'idiom'; fire(q('#selPhraseCategory'), 'change');
+  q('#selPhraseLength').value = '2'; fire(q('#selPhraseLength'), 'change');
+  fire(q('#btnStart'), 'click');
+  ok(!app.engine && q('#phrasePoolInfo').textContent.includes('暂无'), '空筛选不启动混入其他内容的练习');
+
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char'), 'click');
+  q('#selTrainingPolicy').value = 'full'; fire(q('#selTrainingPolicy'), 'change');
+  q('#selCharTier').value = 'progressive'; fire(q('#selCharTier'), 'change');
+  ok(app.settings.trainingPolicy === 'progressive', '选择自适应挑战自动接入逐步撤提示');
+  q('#selCount').value = '0'; fire(q('#selCount'), 'change');
+  app.settings.duration = 0;
+  fire(q('#btnStart'), 'click');
+  while (app.engine.stats.totalChars < 25) {
+    const t = app.engine.currentTarget(); app.engine.pressKey(t.keys[t.pos]);
+  }
+  ok(app.engine.training.stage === 2 && app.engine.training.difficulty.length === 5,
+    '完整提示到拼音到独立输入由表现晋级');
+  fire(q('#btnPause'), 'click');
+  const saved = sMod.loadResume();
+  ok(saved.training.stage === 2 && saved.generationState.used.items.length > 0, '暂停保存阶段、表现窗口及覆盖范围');
+  cleanup();
+  fire(q('#btnResume'), 'click');
+  while (app.engine.stats.totalChars < 31) {
+    const t = app.engine.currentTarget(); app.engine.pressKey(t.keys[t.pos]);
+  }
+  ok(app.engine.training.tier === 2 && app.engine.currentQuestion().meta.tier === 2,
+    '续练独立表现累积升档，新题立即使用新档位');
+  ok(q('#stageMode').textContent.includes('第 2 档'), '页面显示当前档位和训练阶段');
+  cleanup();
+  sMod.clearResume();
+  fire(q('[data-view="stats"]'), 'click');
+  q('#statsMode').value = 'phrase'; fire(q('#statsMode'), 'change');
+  const onlyPhrase = sMod.loadHistory().filter(x => x.mode === 'phrase');
+  ok(q('#statCards').textContent.includes(`${onlyPhrase.length}`) && q('#statsMode').value === 'phrase', '统计可按词组模式查看');
+}
+
 /* ---------- 收尾 ---------- */
 console.log('\n【13】最终检查');
 ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);

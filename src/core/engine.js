@@ -40,6 +40,7 @@ import {
   acceptableKeys, minKeystrokes, highlightForSplit
 } from './scheme.js';
 import { isPunct } from './questions.js';
+import { createTraining, observeTraining } from './training.js';
 
 /* 默认提示时间线（毫秒）。可在 config 里覆盖；设为 0 即关闭该级提示。 */
 export const HINT_DEFAULTS = {
@@ -127,6 +128,10 @@ export class PracticeEngine {
        ③ 更重要的是**防篡改**：如果后续有人往设置里加「测试时也允许提示」，
           examMode 这层硬闸门能保证测验语义不被改坏。 */
     this.examMode = cfg.examMode === true;
+    this.trainingEnabled = !!cfg.trainingPolicy || !!cfg.training;
+    this.training = createTraining(cfg.trainingPolicy || cfg.training?.policy, cfg.training);
+    this.adaptive = !this.examMode && this.mode === 'char' && this.generation?.charTier === 'progressive';
+    this._unitStartedAt = 0;
     if (this.examMode) {
       // 硬约束：考试模式下一律无提示，且不再允许被外部打开
       this.hintEnabled = false;
@@ -157,6 +162,7 @@ export class PracticeEngine {
       totalChars: 0,        // 已完成的可打字字符数
       correctChars: 0,      // 一次未错的字符数
       wrongChars: 0,        // 出过错的字符数
+      hintedCorrectChars: 0,
       hintedChars: 0,       // 依赖过提示才打出的字符数（不计入独立正确率分子）
       keystrokes: 0,        // 总按键数
       wrongKeystrokes: 0,   // 错误按键数
@@ -229,6 +235,8 @@ export class PracticeEngine {
 
   pause() {
     if (this.state !== STATE.RUNNING) return this;
+    this.elapsedSec = this.activeSeconds();
+    this._lastTickAt = Date.now();
     this.state = STATE.PAUSED;
     this._stopTicker();
     this._clearHintTimer();
@@ -597,7 +605,7 @@ export class PracticeEngine {
        若提示后仍然出错，则该字符本来就在 wrongChars 里，不受影响。 */
     const hinted = Number(s.hintedChars) || 0;
     const independentTotal = total;
-    const independentCorrect = Math.max(0, s.correctChars - Math.min(hinted, s.correctChars));
+    const independentCorrect = Math.max(0, s.correctChars - (s.hintedCorrectChars ?? Math.min(hinted, s.correctChars)));
     const independentAccuracy = independentTotal > 0
       ? (independentCorrect / independentTotal) * 100
       : accuracy;
@@ -645,6 +653,17 @@ export class PracticeEngine {
     if (!target) {
       this._advanceQuestion('empty-target');
       return { handled: false, reason: 'no-target' };
+    }
+
+    if (this.trainingEnabled && !this.examMode && this.assistanceLevel() === 0) {
+      const mark = target.kind === 'key' || target.kind === 'part'
+        ? `key:${this.index}` : `${this.index}:${this.charIndex}`;
+      this._hintedChars.add(mark);
+      // Full guidance also displays the next character's code. Remember that
+      // assistance if this completion withdraws guidance mid-word/passage.
+      const nextChar = this.currentQuestion()?.chars?.[this.charIndex + 1];
+      if (target.kind !== 'key' && target.kind !== 'part' && nextChar?.syl)
+        this._hintedChars.add(`${this.index}:${this.charIndex + 1}`);
     }
 
     // 标点 / 无拼音字符：自动跳过
@@ -813,6 +832,7 @@ export class PracticeEngine {
 
   /** 完成一个「作答单元」（一个音节 / 一个键位题 / 一个拆分成分题） */
   _completeUnit(target) {
+    const unitSeconds = Math.max(0, this.activeSeconds() - this._unitStartedAt);
     // 统计字符
     if (target.kind === 'key' || target.kind === 'part') {
       // 单键类题目：以「一次正确作答」计 1 个字符
@@ -840,10 +860,12 @@ export class PracticeEngine {
 
     const mark = target.kind === 'key' || target.kind === 'part'
       ? `key:${this.index}` : `${this.index}:${this.charIndex}`;
-    this.emit('unit', {
-      target, stats: this.visibleStats(),
-      independent: !this._erroredChars.has(mark) && !this._hintedChars.has(mark)
-    });
+    const correct = !this._erroredChars.has(mark);
+    const independent = correct && !this._hintedChars.has(mark);
+    if (correct && this._hintedChars.has(mark)) this.stats.hintedCorrectChars++;
+    observeTraining(this.training, { correct, independent, seconds: unitSeconds }, this.adaptive);
+    this._unitStartedAt = this.activeSeconds();
+    this.emit('unit', { target, stats: this.visibleStats(), independent, seconds: unitSeconds });
 
     if (target.kind === 'key' || target.kind === 'part') {
       // 单键类题目：推进到下一题
@@ -918,6 +940,11 @@ export class PracticeEngine {
 
   /** 推进到下一题 */
   _advanceQuestion(reason) {
+    if (reason === 'skip') {
+      observeTraining(this.training, { correct: false, independent: false,
+        seconds: this.activeSeconds() - this._unitStartedAt }, this.adaptive);
+    }
+    this._unitStartedAt = this.activeSeconds();
     this.keyIndex = 0;
     this.charIndex = 0;
     this.typed = '';
@@ -927,7 +954,7 @@ export class PracticeEngine {
 
     if (this.index >= this.questions.length && this.unlimited) {
       let next = null;
-      try { next = this.questionSource?.(); } catch (err) { console.error('[engine] 续题失败', err); }
+      try { next = this.questionSource?.({ adaptiveTier: this.training.tier, keyWeights: this.stats.keyErrors }); } catch (err) { console.error('[engine] 续题失败', err); }
       if (Array.isArray(next) && next.length) {
         this.questionOffset += this.questions.length;
         this.questions = next.slice();
@@ -946,6 +973,11 @@ export class PracticeEngine {
       return;
     }
 
+    // Already queued questions may belong to the previous adaptive tier.
+    if (this.adaptive && this.currentQuestion()?.meta?.tier !== this.training.tier && this.questionSource) {
+      const next = this.questionSource({ count: 1, adaptiveTier: this.training.tier, weakBoost: false });
+      if (next?.length) this.questions[this.index] = next[0];
+    }
     // 新题目的起始位置：若开头是标点/无拼音字符，直接跳过
     const q = this.currentQuestion();
     if (q && Array.isArray(q.chars) && this.skipPunct) {
@@ -1108,8 +1140,18 @@ export class PracticeEngine {
   }
 
   /** 导出可续练的现场 */
+  assistanceLevel() { return this.examMode ? 2 : this.training.stage; }
+
+  activeSeconds() {
+    return this.elapsedSec + (this.state === STATE.RUNNING && this._lastTickAt
+      ? Math.min(5, Math.max(0, (Date.now() - this._lastTickAt) / 1000)) : 0);
+  }
+
   exportResume() {
     return {
+      training: this.trainingEnabled ? this.training : null,
+      unitStartedAt: this._unitStartedAt,
+      generationState: this.questionSource?.exportState?.(),
       createdAt: Date.now(),
       questionOffset: this.questionOffset,
       unlimited: this.unlimited,
@@ -1124,12 +1166,13 @@ export class PracticeEngine {
       erroredChars: Array.from(this._erroredChars),
       hintedMarks: Array.from(this._hintedChars),
       skipped: this._skippedCount || 0,
-      elapsedSec: this.elapsedSec,
+      elapsedSec: this.activeSeconds(),
       stats: {
         totalChars: this.stats.totalChars,
         correctChars: this.stats.correctChars,
         wrongChars: this.stats.wrongChars,
         hintedChars: this.stats.hintedChars,
+        hintedCorrectChars: this.stats.hintedCorrectChars,
         keystrokes: this.stats.keystrokes,
         wrongKeystrokes: this.stats.wrongKeystrokes,
         combo: this.stats.combo,
@@ -1155,6 +1198,7 @@ export class PracticeEngine {
     try {
       const eng = new PracticeEngine({
         questions: saved.questions,
+        training: saved.training,
         unlimited: saved.unlimited === true,
         questionOffset: saved.questionOffset,
         generation: saved.generation,
@@ -1176,12 +1220,15 @@ export class PracticeEngine {
       eng._hintedChars = new Set(Array.isArray(saved.hintedMarks) ? saved.hintedMarks : []);
       eng._skippedCount = Math.max(0, Number(saved.skipped) || 0);
       eng.elapsedSec = Math.max(0, Number(saved.elapsedSec) || 0);
+      eng._unitStartedAt = Math.max(0, Math.min(eng.elapsedSec, Number(saved.unitStartedAt) || 0));
       if (saved.stats && typeof saved.stats === 'object') {
         const st = saved.stats;
         eng.stats.totalChars = Math.max(0, Number(st.totalChars) || 0);
         eng.stats.correctChars = Math.max(0, Number(st.correctChars) || 0);
         eng.stats.wrongChars = Math.max(0, Number(st.wrongChars) || 0);
         eng.stats.hintedChars = Math.max(0, Number(st.hintedChars) || 0);
+        eng.stats.hintedCorrectChars = st.hintedCorrectChars == null
+          ? Math.min(eng.stats.hintedChars, eng.stats.correctChars) : Math.max(0, Number(st.hintedCorrectChars) || 0);
         eng.stats.keystrokes = Math.max(0, Number(st.keystrokes) || 0);
         eng.stats.wrongKeystrokes = Math.max(0, Number(st.wrongKeystrokes) || 0);
         eng.stats.combo = Math.max(0, Number(st.combo) || 0);

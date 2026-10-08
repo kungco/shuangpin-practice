@@ -92,6 +92,31 @@
             <input id="customCount" type="number" min="1" max="5000" step="1" value="20" aria-label="自定义题量（1 至 5000）" hidden />
           </label>
 
+          <label class="field" id="trainingField">
+            <span>提示训练</span>
+            <select id="selTrainingPolicy" aria-label="提示训练">
+              <option value="full">完整提示</option>
+              <option value="progressive">逐步撤掉提示</option>
+              <option value="pinyin">只显示拼音</option>
+              <option value="independent">独立输入</option>
+            </select>
+          </label>
+          <label class="field" id="phraseCategoryField" hidden>
+            <span>词组分类</span>
+            <select id="selPhraseCategory" aria-label="词组分类">
+              <option value="all">全部分类</option><option value="daily">日常</option>
+              <option value="office">办公</option><option value="travel">出行</option><option value="idiom">成语</option>
+            </select>
+          </label>
+          <label class="field" id="phraseLengthField" hidden>
+            <span>词组长度（难度）</span>
+            <select id="selPhraseLength" aria-label="词组长度">
+              <option value="all">全部长度</option><option value="2">二字 · 入门</option>
+              <option value="3">三字 · 进阶</option><option value="4">四字 · 挑战</option>
+            </select>
+            <small id="phrasePoolInfo" aria-live="polite"></small>
+          </label>
+
           <label class="field" id="charTierField">
             <span>单字难度</span>
             <select id="selCharTier" aria-label="单字难度"></select>
@@ -441,6 +466,10 @@
     <section class="view" id="view-stats">
       <div class="panel">
         <h2 class="panel-title">练习统计</h2>
+        <label class="field"><span>统计模式</span>
+          <select id="statsMode" aria-label="统计模式"><option value="all">全部模式</option></select>
+        </label>
+        <p class="panel-sub">平均速度按练习时长加权，正确率按完成字数加权。统计基于保留的历史成绩。</p>
         <div class="stat-cards" id="statCards"></div>
 
         <h3 class="sub-title">历史成绩曲线</h3>
@@ -460,7 +489,7 @@
         <h3 class="sub-title">每日练习量</h3>
         <div class="chart-wrap"><canvas id="dailyChart" width="920" height="200"></canvas></div>
 
-        <h3 class="sub-title">错误热力图</h3>
+        <h3 class="sub-title">错误热力图（全部模式）</h3>
         <p class="panel-sub" style="margin-top:-6px">
           颜色越深表示该键被按错（即「想不起来」）的次数越多。数字为累计次数。
           与「易错字词表」互补：字词表看「哪些字不会」，热力图看「哪些键不熟」。
@@ -483,7 +512,7 @@
         </div>
         <div class="heat-top" id="heatTop"></div>
 
-        <h3 class="sub-title">易错字词 TOP</h3>
+        <h3 class="sub-title">易错字词（全部模式） TOP</h3>
         <div class="weak-table-wrap" id="weakTableWrap"></div>
 
         <div class="danger-zone">

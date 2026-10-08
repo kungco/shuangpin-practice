@@ -280,7 +280,7 @@ for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passag
 
 console.log('【7b】单字练习覆盖全部字表档位');
 {
-  const qs = generateQuestions({ mode: 'char', count: 60 });
+  const qs = CHAR_TIERS.flatMap(t => generateQuestions({ mode: 'char', count: 10, charTier: t.id }));
   const names = new Set(qs.map(q => q.meta && q.meta.tierName).filter(Boolean));
   ok(names.size === CHAR_TIERS.length,
     `单字题应覆盖 ${CHAR_TIERS.length} 个档位，实际 ${names.size} 个: ${[...names].join('/')}`);
