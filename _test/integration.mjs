@@ -636,7 +636,7 @@ for (const v of ['why', 'keymap', 'stats', 'review', 'settings', 'practice']) {
 
 /* ---------- 能力测验（无提示 + 评分）端到端 ----------
    测验模式的「无提示」是在引擎层硬关的，UI 上还额外藏掉迷你键位图、
-   提示条与提示标记。这里从**用户路径**出发验证这条链路真的接通了：
+   提示条与提示标记，也不渲染拆分答案。这里从**用户路径**出发验证这条链路真的接通了：
    点卡片 → 引擎 examMode 为真 → 提示设施被隐藏 → 交卷出分数卡。
    单元测试只能证明引擎不开提示，证明不了「面板没藏起来」，
    所以这一节是必要的。 */
@@ -701,8 +701,15 @@ console.log('\n【10e】能力测验：无提示 + 评分');
 
   // 打完这一卷（全部打对）
   let g = 0;
+  const testedKinds = new Set();
+  let answersExposed = false;
   while (app.engine && app.engine.state === 'running' && g < 40000) {
     g++;
+    testedKinds.add(app.engine.currentQuestion().level);
+    if (q('#decode .kc-letter') || q('#decode .syl-block') || q('#prompt .ch[title]')) {
+      answersExposed = true;
+    }
+    if (!q('#prompt').textContent.includes(app.engine.currentQuestion().promptText)) answersExposed = true;
     const t = app.engine.currentTarget();
     if (!t) break;
     if (t.kind === 'skip' || t.kind === 'punct') { app.engine.pressKey('a'); continue; }
@@ -711,6 +718,8 @@ console.log('\n【10e】能力测验：无提示 + 评分');
     app.engine.pressKey(k.toLowerCase());
     await new Promise(r => setTimeout(r, 2));
   }
+  ok(testedKinds.size === 3, '测验覆盖拆分、单字与词组三类题');
+  ok(!answersExposed, '测验每次换题和逐键输入均保留题干，不提前暴露拆分键位或拼音悬浮提示');
   const sm = app.engine ? app.engine.summary() : null;
   ok(sm && sm.state === 'finished', `测验完成（${sm ? sm.totalChars : 0} 题，${sm ? sm.accuracy : 0}%）`);
   ok(sm && sm.hintedChars === 0, `测验全程 0 次提示（实际 ${sm && sm.hintedChars}）`);
@@ -1183,8 +1192,6 @@ console.log('\n【12】辅助功能与间隔重复（接线层）');
   sMod.recordWeak({ char: '甲', pinyin: 'jia' });
   sMod.recordWeak({ char: '甲', pinyin: 'jia' });
   sMod.recordWeak({ char: '甲', pinyin: 'jia' });
-  sMod.recordWeakCorrect({ char: '甲' });
-  sMod.recordWeakCorrect({ char: '甲' });
   sMod.recordWeak({ char: '乙', pinyin: 'yi' });
   sMod._setAllDue(nowTs - 1000);              // 先全部置为到期
   sMod.recordWeakCorrect({ char: '甲' });     // 再让甲「刚复习过」→ due 推向未来
@@ -1239,6 +1246,93 @@ console.log('\n【12】辅助功能与间隔重复（接线层）');
   app.settings.reviewDueOnly = true;                        // 恢复默认
   if (app.engine) { app.engine.destroy(); app.engine = null; }
   sMod.clearWeak();
+
+  /* ---- 12.13 无到期项时不应被高频字兜底绕过 ---- */
+  sMod.recordWeak({ char: '甲', pinyin: 'jia' });
+  sMod._setAllDue(nowTs + 10 * 86400000);
+  renderReviewViewFn();
+  const noDueBtn = q('#btnReviewPractice');
+  ok(!!noDueBtn && noDueBtn.hasAttribute('disabled'), '无到期项时复习按钮被禁用');
+  ok(/今天没有到期项/.test(noDueBtn && noDueBtn.textContent || ''),
+    '无到期项时按钮文案明确说明当前不可复习');
+  fire(noDueBtn, 'click');
+  ok(!app.engine, '无到期项时点击不会生成高频字兜底题');
+  sMod.clearWeak();
+}
+
+/* ---------- 保存现场、设置落库与无效测验 ---------- */
+console.log('\n【新增】页面生命周期与续练');
+{
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  q('#overlay').hidden = true;
+  q('#sessionPanel').hidden = true;
+  q('#setupPanel').hidden = false;
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char'), 'click');
+  q('#selCharTier').value = '2';
+  fire(q('#selCharTier'), 'change');
+  q('#selCount').value = '10';
+  fire(q('#selCount'), 'change');
+  fire(q('#btnStart'), 'click');
+  const eng = app.engine;
+  const target = eng.currentTarget();
+  fireKey(target.keys[0].toLowerCase());
+  ok(sMod.loadResume()?.keyIndex === 1, '第一键后自动保存现场');
+  eng.requestHint('reveal');
+  fire(q('#btnPause'), 'click');
+  const saved = sMod.loadResume();
+  ok(saved?.keyIndex === 1 && saved.hintedMarks.length === 1,
+    '暂停保存当前键位置和提示标记');
+  const restored = engineMod.PracticeEngine.restore(saved);
+  ok(restored?.keyIndex === 1 && restored.currentTarget().pos === 1,
+    '经过存储层的现场仍从第二键恢复');
+  restored?.destroy();
+  q('#selCharTier').value = '3';
+  fire(q('#selCharTier'), 'change');
+  (fakeWindow._ls.pagehide || []).forEach(h => h(new FakeEvent('pagehide')));
+  ok(sMod.loadSettings().charTier === '3', '离开页面立即保存尚在延迟中的设置');
+  ok(sMod.loadResume()?.keyIndex === 1, '暂停后离开页面也保留现场');
+  eng.destroy(); app.engine = null;
+  fire(q('#btnResume'), 'click');
+  ok(app.engine?.keyIndex === 1, '点击继续练习恢复到第二键');
+  while (app.engine.index < app.engine.questions.length - 1) {
+    const t = app.engine.currentTarget();
+    app.engine.pressKey(t.keys[t.pos]);
+  }
+  app.engine.pressKey(app.engine.currentTarget().keys[0]);
+  fire(q('#btnQuit'), 'click');
+  fire(q('#modal [data-act="save"]'), 'click');
+  ok(!app.engine && sMod.loadResume()?.index === 9 && sMod.loadResume()?.keyIndex === 1,
+    '最后一个字未打完时仍能保存续练，不能提前算作完成');
+  q('#sessionPanel').hidden = true;
+  q('#setupPanel').hidden = false;
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'exam'), 'click');
+  fire(q('#btnStart'), 'click');
+  const historyCount = sMod.loadHistory().length;
+  fire(q('#btnQuit'), 'click');
+  ok(q('#modal').textContent.includes('至少完成 20 个字符'), '提前交卷明确说明有效成绩的最低样本量');
+  fire(q('#modal [data-act="cancel"]'), 'click');
+  app.engine.finish('user');
+  const score = app.lastResult?.score;
+  ok(score && !score.valid && score.score === 0, '零作答交卷不产生有效分数');
+  ok(q('#modal .score-num')?.textContent === '—' && !q('#modal .score-badge') && !q('#modal .score-parts'),
+    '无效测验弹窗不显示分数、分项得分或等级徽章');
+  ok(!q('#modal').textContent.includes('已完成部分已计入统计'), '零作答不会声称成绩已计入统计');
+  ok(sMod.loadHistory().length === historyCount, '零作答测验不写入历史');
+  ok(sMod.loadResume() === null, '交卷后清除续练现场');
+  app.engine.destroy(); app.engine = null;
+  q('#overlay').hidden = true;
+  fire(q('#btnStart'), 'click');
+  const shortEngine = app.engine;
+  while (shortEngine.stats.totalChars < 3) {
+    const t = shortEngine.currentTarget();
+    shortEngine.pressKey(t.keys[t.pos]);
+  }
+  shortEngine.elapsedSec = 2;
+  shortEngine.finish('user');
+  const shortRecord = sMod.loadHistory().slice(-1)[0];
+  ok(shortRecord?.scoreValid === false && shortRecord.score === undefined,
+    '有作答的小样本保留练习历史但不记有效分数');
+  app.engine.destroy(); app.engine = null;
 }
 
 /* ---------- 收尾 ---------- */

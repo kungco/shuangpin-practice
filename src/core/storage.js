@@ -17,10 +17,11 @@ export const KEYS = {
   weak: `${NS}.weak`,           // 易错字词
   keyErrors: `${NS}.keyErrors`, // 键维度错误次数（错误热力图用）
   resume: `${NS}.resume`,       // 未完成的练习现场
+  device: `${NS}.device`,       // 错题计数的设备来源（不随备份覆盖）
   version: `${NS}.version`
 };
 
-export const DATA_VERSION = 2;
+export const DATA_VERSION = 3;
 
 /* ============================================================
    底层读写（带降级）
@@ -271,6 +272,7 @@ export const DEFAULT_SETTINGS = {
   mode: 'char',
   duration: 180,       // 秒，0 = 不限
   count: 20,           // 题量，0 = 不限
+  charTier: '1',       // 单字默认从高频字开始，可选固定档位或渐进
   weakBoost: false,    // 侧重易错内容
   showMiniKeymap: true,
   sound: false,
@@ -300,6 +302,7 @@ const SETTINGS_OBJECT_KEYS = ['shortcuts'];
  * 的空白区 —— 表现是「设置不生效但也不报错」，最难查。
  */
 const SETTINGS_ENUMS = {
+  charTier: ['progressive', '1', '2', '3', '4', '5', '6', '7'],
   reduceMotion: ['auto', 'on', 'off']
 };
 
@@ -646,13 +649,48 @@ function normalizeWeakEntry(e, key) {
     interval: Math.max(0, num(e.interval)),
     ease: numFloat(e.ease) || EASE_DEFAULT,
     due: num(e.due),
-    reviewedAt: num(e.reviewedAt)
+    reviewedAt: num(e.reviewedAt),
+    successDay: typeof e.successDay === 'string' ? e.successDay : '',
+    countsBySource: weakSources(e)
   };
+  base.count = Object.values(base.countsBySource).reduce((sum, value) => sum + value.count, 0);
+  base.correct = Object.values(base.countsBySource).reduce((sum, value) => sum + value.correct, 0);
   // 老数据没有 due：补成「已到期」，让它进入待复习队列。
   // 这是有意为之 —— 升级后用户应该看到历史错题重新排队，
   // 而不是因为缺字段而被静默忽略。
   if (!base.due) base.due = base.lastTs ? base.lastTs + NEW_DUE_MS : Date.now();
   return base;
+}
+
+// 每个来源是单调增长的计数器，合并时取 max，再求和。
+// 老备份没有来源编号，用稳定的快照身份兼容重复导入。
+function weakSources(e) {
+  const sources = {};
+  if (e.countsBySource && typeof e.countsBySource === 'object') {
+    for (const [id, value] of Object.entries(e.countsBySource)) {
+      if (!value || typeof value !== 'object') continue;
+      sources[id] = { count: Math.max(0, num(value.count)), correct: Math.max(0, num(value.correct)) };
+    }
+  }
+  if (!Object.keys(sources).length) {
+    const id = `legacy:${num(e.lastTs)}:${num(e.reviewedAt)}:${num(e.count)}:${num(e.correct)}`;
+    sources[id] = { count: Math.max(0, num(e.count)), correct: Math.max(0, num(e.correct)) };
+  }
+  return sources;
+}
+
+function incrementWeak(entry, field) {
+  let device = readJSON(KEYS.device, null);
+  if (typeof device !== 'string' || !device) {
+    device = globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    writeJSON(KEYS.device, device);
+  }
+  const id = `device:${device}`;
+  const counter = entry.countsBySource[id] || { count: 0, correct: 0 };
+  counter[field] += 1;
+  entry.countsBySource[id] = counter;
+  entry[field] += 1;
 }
 
 export function loadWeak() {
@@ -679,7 +717,7 @@ export function recordWeak(item) {
     const cur = normalizeWeakEntry(map[key] || {}, key);
     const now = Date.now();
 
-    cur.count += 1;
+    incrementWeak(cur, 'count');
     cur.lastTs = now;
     if (item.pinyin) cur.pinyin = item.pinyin;
     if (item.char) cur.char = item.char;
@@ -714,8 +752,12 @@ export function recordWeakCorrect(item) {
     const cur = normalizeWeakEntry(map[key], key);
     const now = Date.now();
 
-    cur.correct += 1;
+    // 同一天的重复练习不代表已经形成长期记忆。
+    const today = dateStr(new Date(now));
+    if (cur.successDay === today) return;
+    incrementWeak(cur, 'correct');
     cur.reviewedAt = now;
+    cur.successDay = today;
 
     const s = nextSchedule(cur, true);
     cur.streak = s.streak;
@@ -974,7 +1016,11 @@ export function saveResume(state) {
     questions: state.questions,
     index: state.index,
     charIndex: state.charIndex,
+    keyIndex: state.keyIndex,
     typed: state.typed,
+    erroredChars: state.erroredChars,
+    hintedMarks: state.hintedMarks,
+    skipped: state.skipped,
     elapsedSec: state.elapsedSec,
     stats: state.stats,
     settings: state.settings
@@ -1050,11 +1096,16 @@ export function importAll(payload) {
 
     if (Array.isArray(payload.history)) {
       const cur = loadHistory();
-      const seen = new Set(cur.map(r => r.id));
-      const dupDate = new Set(cur.map(r => r.ts));
-      const add = payload.history
-        .filter(r => r && typeof r === 'object')
-        .filter(r => !seen.has(r.id) && !dupDate.has(r.ts));
+      const identity = r => r.id ? `id:${r.id}`
+        : `legacy:${JSON.stringify([r.ts, r.mode, r.durationSec, r.totalChars, r.keystrokes, r.accuracy])}`;
+      const seen = new Set(cur.map(identity));
+      const add = payload.history.filter(r => {
+        if (!r || typeof r !== 'object' || !Number.isFinite(Number(r.ts))) return false;
+        const id = identity(r);
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
       const merged = cur.concat(add);
       merged.sort((a, b) => a.ts - b.ts);
       mergedHistory = merged.slice(-2000);
@@ -1111,40 +1162,30 @@ export function importAll(payload) {
       writeJSON(KEYS.daily, cur);
     }
 
-    // 易错字词：count / correct 是累计「次数」，跨设备合并时**相加**
-    // （两台设备各自记过同一个字，合并后应反映总次数）。
-    // 但必须先做**同一记录**判定：lastTs、count、correct 三者完全一致，
-    // 说明是同一份记录（典型场景：同一备份导入两次、或导出后原样导回），
-    // 此时相加会把 1 次错误变成 2 次、3 次……污染复习权重。
-    // 时间戳精确到毫秒，「不同设备在同一毫秒记了同样多次错误」实际不可能发生，
-    // 所以这个判定不会误伤真正的跨设备合并。
-    //
-    // 复习调度字段（streak / ease / due）**不累加**，只取「更靠后的那次复习」：
-    // 调度是状态而不是计数，两台设备各自排过期的，以进度更超前的一方为准，
-    // 否则同一份进度会来回互相拉扯（今天推到 7 天、明天又被另一台拉回 3 天）。
+    // 按来源合并单调计数器，同一来源取最大值，不同来源相加。
+    // 排期以最新作答为准，保留重新答错后的短间隔。
     if (payload.weak && typeof payload.weak === 'object') {
       const cur = loadWeak();
       for (const [k, v] of Object.entries(payload.weak)) {
         if (!v || typeof v !== 'object') continue;
-        if (!cur[k]) { cur[k] = Object.assign({}, v); continue; }
+        if (!cur[k]) { cur[k] = normalizeWeakEntry(v, k); continue; }
         const a = normalizeWeakEntry(cur[k], k);
         const b = normalizeWeakEntry(v, k);
-        const sameRecord = a.lastTs > 0 && a.lastTs === b.lastTs &&
-                           a.count === b.count && a.correct === b.correct;
-        if (!sameRecord) {
-          cur[k].count = a.count + b.count;
-          cur[k].correct = a.correct + b.correct;
-          cur[k].lastTs = Math.max(a.lastTs, b.lastTs);
+        const sources = a.countsBySource;
+        for (const [id, value] of Object.entries(b.countsBySource)) {
+          const old = sources[id] || { count: 0, correct: 0 };
+          sources[id] = { count: Math.max(old.count, value.count), correct: Math.max(old.correct, value.correct) };
         }
-        // 取「间隔更长 / 进度更靠前」的调度状态，其余字段保留本地
-        const ahead = (b.interval || 0) > (a.interval || 0) ? b : a;
-        cur[k].streak = ahead.streak;
-        cur[k].interval = ahead.interval;
-        cur[k].ease = ahead.ease;
-        cur[k].due = Math.max(a.due || 0, b.due || 0);
-        cur[k].reviewedAt = Math.max(a.reviewedAt || 0, b.reviewedAt || 0);
-        // 两边都掌握了才算掌握；只要还有一边在复习队列里，就继续排期
-        cur[k].mastered = !!(a.mastered && b.mastered);
+        const aTime = Math.max(a.lastTs, a.reviewedAt);
+        const bTime = Math.max(b.lastTs, b.reviewedAt);
+        // 最新作答决定排期，同时间优先短间隔，避免掩盖重新答错。
+        const ahead = bTime > aTime || (bTime === aTime && b.interval < a.interval) ? b : a;
+        cur[k] = Object.assign({}, ahead, {
+          countsBySource: sources,
+          count: Object.values(sources).reduce((sum, value) => sum + value.count, 0),
+          correct: Object.values(sources).reduce((sum, value) => sum + value.correct, 0),
+          lastTs: Math.max(a.lastTs, b.lastTs)
+        });
       }
       writeJSON(KEYS.weak, cur);
       n++;

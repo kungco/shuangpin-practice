@@ -91,6 +91,17 @@ async function freshStorage() {
   return import(`${url}?t=${++modSeq}`);
 }
 
+// 模拟跨日复习，避免同一天重复作答误作长期掌握。
+function atDay(offset, fn, base = Date.now()) {
+  const original = Date.now;
+  Date.now = () => base + offset * 86400000;
+  try { return fn(); } finally { Date.now = original; }
+}
+function reviewDays(S, char, n) {
+  const base = Date.now();
+  for (let i = 0; i < n; i++) atDay(i, () => S.recordWeakCorrect({ char }), base);
+}
+
 /* ============================================================
    【1】配额满：写进内存的数据，当前会话必须读得回来
    ============================================================ */
@@ -492,14 +503,17 @@ console.log('\n【10】间隔重复与记录联动');
   ok(!!after1.reviewedAt, '记录了最近复习时间 reviewedAt');
 
   S.recordWeakCorrect({ char: '进' });
-  S.recordWeakCorrect({ char: '进' });
+  const sameDay = S.getWeakList({ limit: 10, minCount: 1 })[0];
+  ok(sameDay.correct === 1 && sameDay.due === after1.due, '同日重复答对不推进排期');
+  atDay(1, () => S.recordWeakCorrect({ char: '进' }));
+  atDay(2, () => S.recordWeakCorrect({ char: '进' }));
   const after3 = S.getWeakList({ limit: 10, minCount: 1 })[0];
   ok(after3.streak === 3, `连对 3（实际 ${after3.streak}）`);
   ok(after3.interval === 7, `连对 3 次后间隔 7 天（实际 ${after3.interval}）`);
   ok(after3.due > after1.due, '间隔推进后 due 更靠后');
 
   /* ---- 再答错会重置，且取消掌握 ---- */
-  S.recordWeakCorrect({ char: '进' });          // streak 到 4 → 可能标记掌握
+  atDay(3, () => S.recordWeakCorrect({ char: '进' }));
   const beforeRelapse = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
   S.recordWeak({ char: '进', pinyin: 'jin' });  // 又错了
   const relapse = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
@@ -510,7 +524,7 @@ console.log('\n【10】间隔重复与记录联动');
   /* ---- 掌握判定：连对够多且错误率不高 ---- */
   S.clearWeak();
   S.recordWeak({ char: '熟', pinyin: 'shu' });
-  for (let i = 0; i < 5; i++) S.recordWeakCorrect({ char: '熟' });
+  reviewDays(S, '熟', 5);
   const mastered = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
   ok(mastered.mastered === true, `连对 5 次且错误率不高 → 标记掌握（streak=${mastered.streak}, count=${mastered.count}, correct=${mastered.correct}）`);
   // 默认队列应排除已掌握项
@@ -591,7 +605,7 @@ console.log('\n【11】到期优先排序 / dueOnly / reviewSummary');
   // 已掌握的项不计入 due
   S.clearWeak();
   S.recordWeak({ char: '掌', pinyin: 'zhang' });
-  for (let i = 0; i < 5; i++) S.recordWeakCorrect({ char: '掌' });
+  reviewDays(S, '掌', 5);
   S._setAllDue(now - 1000);
   const sum3 = S.reviewSummary(now);
   ok(sum3.total === 1, `概览包含已掌握项（total=${sum3.total}）`);
@@ -600,7 +614,7 @@ console.log('\n【11】到期优先排序 / dueOnly / reviewSummary');
 }
 
 /* ============================================================
-   【12】间隔重复：跨设备导入时调度信息取「更靠前」的一侧
+   【12】间隔重复：跨设备导入时调度信息取最新作答的一侧
    ============================================================ */
 console.log('\n【12】导入合并的调度字段取舍');
 
@@ -614,9 +628,7 @@ console.log('\n【12】导入合并的调度字段取舍');
 
   // 本机：连对 3 次（间隔 7 天）
   S.recordWeak({ char: '合', pinyin: 'he' });
-  S.recordWeakCorrect({ char: '合' });
-  S.recordWeakCorrect({ char: '合' });
-  S.recordWeakCorrect({ char: '合' });
+  reviewDays(S, '合', 3);
   const local = S.getWeakList({ limit: 10, minCount: 1 })[0];
 
   // 备份：同一字但进度更低（只连对 1 次）
@@ -632,7 +644,7 @@ console.log('\n【12】导入合并的调度字段取舍');
 
   ok(merged.count >= local.count, `错误次数取累加（本地 ${local.count} → 合并后 ${merged.count}）`);
   ok(merged.interval >= local.interval,
-    `★ 排期取更靠前的一侧（本地 ${local.interval} 天 → 合并后 ${merged.interval} 天）`);
+    `★ 旧备份不能回退较新的排期（本地 ${local.interval} 天 → 合并后 ${merged.interval} 天）`);
   ok(merged.streak >= local.streak,
     `连对次数不倒退（本地 ${local.streak} → 合并后 ${merged.streak}）`);
   ok(Number.isFinite(merged.due), '合并后 due 仍是合法数值');
@@ -646,12 +658,12 @@ console.log('\n【12】导入合并的调度字段取舍');
     app: 'shuangpin-practice',
     version: S.DATA_VERSION,
     weak: {
-      逆: { key: '逆', char: '逆', pinyin: 'ni', count: 1, correct: 4, lastTs: now, streak: 4, interval: 16, ease: 2.7, due: now + 16 * 86400000 }
+      逆: { key: '逆', char: '逆', pinyin: 'ni', count: 1, correct: 4, lastTs: now + 1000, reviewedAt: now + 1000, streak: 4, interval: 16, ease: 2.7, due: now + 16 * 86400000 }
     }
   });
   const mergedHigh = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
   ok(mergedHigh.interval >= 16,
-    `★ 备份更靠前时采纳备份的间隔（本地 ${localLow.interval} → 合并后 ${mergedHigh.interval}）`);
+    `★ 备份作答较新时采纳备份的间隔（本地 ${localLow.interval} → 合并后 ${mergedHigh.interval}）`);
 }
 
 /* ============================================================
@@ -820,12 +832,55 @@ console.log('\n【15】回归：恢复后旧值、递归重试、重复导入');
 
   // 跨设备合并语义保持：不同记录（时间戳/次数不同）仍然相加
   const other = JSON.parse(JSON.stringify(backup));
+  other.weak['测'].countsBySource = { 'device:other': { count: 2, correct: 0 } };
   other.weak['测'].count = 2;                   // 另一台设备错了 2 次
   other.weak['测'].lastTs = (backup.weak['测'].lastTs || 0) + 5;
   S.importAll(other);
   const w3 = S.getWeakList({ limit: 10, minCount: 1 })[0];
   ok(w3.count === w1.count + 2,
     `15c 真正的跨设备记录仍相加（${w1.count} + 2 = ${w3.count}）`);
+}
+
+console.log('\n【新增】备份幂等、排期与历史身份');
+{
+  installWindow(makeLocalStorage());
+  const S = await freshStorage();
+  S.recordWeak({ char: '测', pinyin: 'ce' });
+  S.recordWeak({ char: '测', pinyin: 'ce' });
+  const legacy = { app: 'shuangpin-practice', version: 2,
+    weak: { 测: { char: '测', count: 1, correct: 0, lastTs: 1 } } };
+  S.importAll(legacy);
+  S.importAll(legacy);
+  ok(S.loadWeak()['测'].count === 3, '旧备份反复导入不重复累加');
+  const snapshot = S.exportAll();
+  S.recordWeak({ char: '测', pinyin: 'ce' });
+  S.importAll(snapshot);
+  S.importAll(snapshot);
+  ok(S.loadWeak()['测'].count === 4, '旧的同设备快照不重复累计或覆盖新计数');
+  const future = Date.now() + 1000;
+  S.importAll({ app: 'shuangpin-practice', weak: { 测: {
+    char: '测', count: 1, correct: 0, lastTs: future,
+    streak: 0, interval: 1, due: future + 86400000, mastered: false,
+    countsBySource: { 'device:relapse': { count: 1, correct: 0 } }
+  } } });
+  const relapse = S.loadWeak()['测'];
+  ok(relapse.interval === 1 && !relapse.mastered && relapse.streak === 0,
+    '较新的答错状态保留短间隔与未掌握标记');
+  S.importAll({ app: 'shuangpin-practice', weak: { 测: {
+    char: '测', count: 1, correct: 5, reviewedAt: future - 100,
+    streak: 5, interval: 35, mastered: true,
+    countsBySource: { 'device:older': { count: 1, correct: 5 } }
+  } } });
+  ok(S.loadWeak()['测'].interval === 1 && !S.loadWeak()['测'].mastered,
+    '较旧的掌握状态不能覆盖最新答错');
+  S.clearHistory();
+  const a = { id: 'session-a', ts: Date.now(), mode: 'char', durationSec: 10, totalChars: 20 };
+  const b = { ...a, id: 'session-b' };
+  S.importAll({ app: 'shuangpin-practice', history: [a, b, a] });
+  S.importAll({ app: 'shuangpin-practice', history: [a, b] });
+  ok(S.loadHistory().length === 2, '同毫秒不同会话都保留，同一会话重复导入只保留一次');
+  S.saveSettings({ charTier: '99' });
+  ok(S.loadSettings().charTier === '1', '非法难度回退到高频字');
 }
 
 console.log('\n' + (fail === 0

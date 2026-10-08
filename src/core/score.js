@@ -15,10 +15,8 @@
  *    等边界情况下也站得住，这里统一取独立正确率（剔除了依赖提示的字符）。
  *    这条是硬约束 —— 分数绝不能因为提示而变高。
  *
- * 3. **样本量不足要给惩罚，而不是给满分。**
- *    只打 3 个字全对 ≠ 100 分。题量太小（< 20 字）时分数会被「可信度因子」
- *    向下修正，并向 60 分（及格线）回退。否则用户每轮打 3 个字都是满分，
- *    分数就失去意义了。
+ * 3. **样本量不足不形成有效成绩。**
+ *    有效字符少于 20 个时，只展示练习数据，不给分数和等级。
  *
  * 4. **未完成要扣分，但按完成比例扣，不是一刀切。**
  *    限时测验没打完是正常的（时间到就交卷）；乱按结束则完成度很低。
@@ -54,8 +52,6 @@ export const SCORE_CONFIG = {
 
   /* 可信度：打满多少字之后分数才完全可信 */
   minReliableChars: 20,
-  /* 样本不足时，分数向这个「及格基准」回退 */
-  fallbackScore: 60,
 
   /* 等级阈值（闭区间下界） */
   grades: [
@@ -153,7 +149,7 @@ export function scoreExam(summary, opts = {}) {
   // 测验的有效前提是「没有依赖提示」。若引擎被外部改动导致有提示，
   // 分数仍会计算，但标记为无效并给出警告（UI 可选择不记录该成绩）。
   const requireHintsZero = opts.requireHintsZero !== false;
-  const valid = !(requireHintsZero && hintedChars > 0);
+  let valid = !(requireHintsZero && hintedChars > 0);
   if (!valid) {
     warnings.push(`本次有 ${hintedChars} 个字符依赖了提示，成绩不作为有效测验分。`);
   }
@@ -176,13 +172,14 @@ export function scoreExam(summary, opts = {}) {
     ? clamp(doneQuestions / questionCount, 0, 1)
     : 1;
 
-  /* ---------- 6. 可信度（样本量不足向及格线回退） ---------- */
+  /* ---------- 6. 样本量检查 ---------- */
   // 用「有效字符数」而不是题数衡量：短文的题数少但字数多，按题数会误判。
   const sample = Math.max(0, totalChars);
   const confidence = clamp(sample / cfg.minReliableChars, 0, 1);
   const sampleWarn = confidence < 1;
   if (sampleWarn) {
-    warnings.push(`本次只完成了 ${sample} 个字符，样本偏少，分数已按可信度修正。`);
+    valid = false;
+    warnings.push(`本次只完成了 ${sample} 个字符，样本不足；至少完成 ${cfg.minReliableChars} 个字符后才形成有效成绩。`);
   }
 
   /* ---------- 7. 合成总分 ---------- */
@@ -190,18 +187,16 @@ export function scoreExam(summary, opts = {}) {
   const base = accuracyPart + speedPart;
   // 完成度线性加权：没打完就按比例拿分
   const earned = base * completion;
-  // 可信度回退：样本不足时向 fallbackScore 靠拢
-  const blended = earned * confidence + cfg.fallbackScore * (1 - confidence);
-
-  const score = clamp(blended, 0, 100);
+  // 保留实际计算值；无效成绩由 valid 标识，界面不展示其分数。
+  const score = clamp(earned, 0, 100);
 
   const g = gradeOf(score);
 
   return {
     score: Math.round(score * 10) / 10,
-    grade: g.name,
-    badge: g.badge,
-    gradeDesc: g.desc,
+    grade: valid ? g.name : '未形成有效成绩',
+    badge: valid ? g.badge : '',
+    gradeDesc: valid ? g.desc : '请在无提示的情况下完成足够的题目后再评定等级。',
     valid,
     warnings,
     parts: {

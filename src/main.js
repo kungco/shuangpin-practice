@@ -14,7 +14,7 @@
 import {
   generateQuestions, generateReviewQuestions, LEVELS, LEVEL_MAP,
   questionFromCharChar, questionFromPhrase, isPunct,
-  ALL_CHARS, PHRASES, PASSAGES
+  ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS
 } from './core/questions.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import * as S from './core/storage.js';
@@ -51,6 +51,7 @@ const app = {
   lastErrorTarget: null,
   stats: { chartMetric: 'speed', chartRange: '20', dailyDays: 14, heatRange: 'all' },
   saveTimer: null,
+  lastResumeSave: 0,
   hint: null,          // 当前提示状态（由引擎 hint / reveal 事件驱动）
   _capturingShortcut: false,  // 设置页「按下新键」捕获中：此时全局快捷键必须让路
   _captureCleanup: null,      // 当前捕获的收尾函数（保证旧监听器必然被摘掉）
@@ -246,6 +247,16 @@ function initSetupPanel() {
   const selDuration = $('#selDuration');
   const selCount = $('#selCount');
   const chkWeak = $('#chkWeakBoost');
+  const selTier = $('#selCharTier');
+  if (selTier) {
+    selTier.innerHTML = CHAR_TIERS.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')
+      + '<option value="progressive">逐档挑战</option>';
+    selTier.value = app.settings.charTier;
+    selTier.addEventListener('change', () => {
+      app.settings.charTier = selTier.value;
+      saveSettingsDebounced();
+    });
+  }
 
   if (selDuration) {
     selDuration.value = String(app.settings.duration);
@@ -312,6 +323,8 @@ function selectMode(mode, silent) {
   const stageTip = $('#stageTip');
   if (stageTip) stageTip.textContent = tip;
   toggleExamNote(m);
+  const tierField = $('#charTierField');
+  if (tierField) tierField.hidden = m !== 'char';
   if (!silent) saveSettingsDebounced();
 }
 
@@ -347,8 +360,23 @@ function updateModeCounts() {
 function saveSettingsDebounced() {
   if (app.saveTimer) clearTimeout(app.saveTimer);
   app.saveTimer = setTimeout(() => {
-    try { S.saveSettings(app.settings); } catch (e) { console.warn(e); }
+    flushSettings();
   }, 400);
+}
+
+function flushSettings() {
+  if (app.saveTimer) clearTimeout(app.saveTimer);
+  app.saveTimer = null;
+  try { S.saveSettings(app.settings); } catch (e) { console.warn(e); }
+}
+
+function saveProgress(force = false) {
+  const eng = app.engine;
+  if (!eng || ![STATE.RUNNING, STATE.PAUSED].includes(eng.state) || !eng.stats.keystrokes) return;
+  const now = Date.now();
+  if (!force && now - app.lastResumeSave < 2000) return;
+  S.saveResume(eng.exportResume());
+  app.lastResumeSave = now;
 }
 
 /* ============================================================
@@ -385,14 +413,14 @@ function startSession(questionsOverride, modeOverride) {
         const weak = weakRanking(60);
         const half = Math.max(1, Math.floor((count || 20) / 2));
         const fromWeak = generateReviewQuestions(weak, half);
-        const rest = generateQuestions({ mode, count: Math.max(1, (count || 20) - fromWeak.length) });
+        const rest = generateQuestions({ mode, count: Math.max(1, (count || 20) - fromWeak.length), charTier: app.settings.charTier });
         questions = fromWeak.concat(rest);
-        if (!questions.length) questions = generateQuestions({ mode, count: count || 20 });
+        if (!questions.length) questions = generateQuestions({ mode, count: count || 20, charTier: app.settings.charTier });
       } else {
         const effectiveCount = count > 0
           ? (mode === 'passage' ? Math.min(count, 8) : count)
           : (mode === 'passage' ? 3 : (mode === 'keymap' ? 40 : 20));
-        questions = generateQuestions({ mode, count: effectiveCount });
+        questions = generateQuestions({ mode, count: effectiveCount, charTier: app.settings.charTier });
       }    }
 
     if (!Array.isArray(questions) || !questions.length) {
@@ -426,6 +454,7 @@ function startSession(questionsOverride, modeOverride) {
     ensureMiniKeymap();
     renderSession();
 
+    app.lastResumeSave = 0;
     app.engine.start();
 
     // 隐藏续练提示
@@ -485,13 +514,11 @@ function bindEngineEvents() {
     }
   });
 
-  eng.on('unit', () => {
+  eng.on('unit', ({ target, independent }) => {
     // 每个音节/题目完成：记录易错的「正确一次」
     try {
-      const t = eng.currentTarget();
-      if (t && t.split) {
-        const ch = eng.currentChar();
-        if (ch && ch.ch) S.recordWeakCorrect({ char: ch.ch });
+      if (independent && target && target.char) {
+        S.recordWeakCorrect({ char: target.char });
       }
     } catch (e) { /* 忽略 */ }
   });
@@ -507,7 +534,7 @@ function bindEngineEvents() {
     highlightMiniKeymap();
   });
 
-  eng.on('pause', () => { updatePauseButton(); clearFeedback(); clearHint(); });
+  eng.on('pause', () => { updatePauseButton(); clearFeedback(); clearHint(); saveProgress(true); });
   eng.on('resume', () => { updatePauseButton(); clearHint(); });
 }
 
@@ -537,7 +564,7 @@ function quitSession() {
   openModal(`
     <h2>${isExam ? '结束本次测验？' : '结束本次练习？'}</h2>
     <p class="modal-sub">${isExam
-      ? '测验可以不限时慢慢打，但中途结束会按「已完成部分」计算分数，未答部分会拉低完成度。'
+      ? `至少完成 ${SCORE_CONFIG.minReliableChars} 个字符才评定分数与等级；中途交卷会按已完成部分计算，未答部分会拉低完成度。`
       : '已完成的成绩会被记录，当前进度也可以留到下次继续。'}</p>
     <div class="modal-actions">
       <button class="btn btn-ghost" data-act="cancel">${isExam ? '继续测验' : '继续练习'}</button>
@@ -565,17 +592,6 @@ function saveProgressAndExit() {
     const eng = app.engine;
     if (!eng) { showSessionUI(false); return; }
     const snap = eng.exportResume();
-    // 若已经接近完成，就不必保留
-    if (snap.index >= snap.questions.length - 1 &&
-        eng.currentQuestion() && eng.charIndex >= (eng.currentQuestion().chars || []).length - 1) {
-      const s = eng.finish('user');
-      persistRecord(s);
-      eng.destroy();
-      app.engine = null;
-      showSessionUI(false);
-      toast('练习已完成，成绩已记录');
-      return;
-    }
     S.saveResume(snap);
     eng.destroy();
     app.engine = null;
@@ -635,8 +651,10 @@ function persistRecord(summary) {
       });
       // 分数写进记录里（仅测验模式有值），这样统计页才能画「历史分数曲线」
       if (examResult) {
-        rec.score = examResult.score;
-        rec.grade = examResult.grade;
+        if (examResult.valid) {
+          rec.score = examResult.score;
+          rec.grade = examResult.grade;
+        }
         rec.scoreValid = examResult.valid;
       }
       S.appendRecord(rec);
@@ -693,7 +711,7 @@ function showResultModal(s, recorded) {
   if (s.maxCombo >= 30) {
     noteParts.push(`最长连击 ${s.maxCombo} 键，手感相当稳定。`);
   }
-  if (!s.completed && s.reason !== 'timeup') {
+  if (recorded && !s.completed && s.reason !== 'timeup') {
     noteParts.push('本次为主动结束，已完成部分已计入统计。');
   }
 
@@ -701,14 +719,14 @@ function showResultModal(s, recorded) {
   const scoreBlock = sc ? `
     <div class="score-card ${sc.valid ? '' : 'is-invalid'}">
       <div class="score-main">
-        <div class="score-num">${sc.score}<i>分</i></div>
+        <div class="score-num">${sc.valid ? `${sc.score}<i>分</i>` : '—'}</div>
         <div class="score-grade">
-          <span class="score-badge score-tier-${gradeTier(sc.score)}">${escapeHtml(sc.badge)}</span>
+          ${sc.valid ? `<span class="score-badge score-tier-${gradeTier(sc.score)}">${escapeHtml(sc.badge)}</span>` : ''}
           <span class="score-grade-name">${escapeHtml(sc.grade)}</span>
         </div>
       </div>
       <p class="score-desc">${escapeHtml(sc.gradeDesc)}</p>
-      <div class="score-parts">
+      ${sc.valid ? `<div class="score-parts">
         <div class="score-part">
           <span class="score-part-label">正确率得分</span>
           <span class="score-part-value">${sc.parts.accuracy}<i>/${SCORE_CONFIG.accuracyWeight}</i></span>
@@ -723,11 +741,11 @@ function showResultModal(s, recorded) {
           <span class="score-part-label">完成度</span>
           <span class="score-part-value">${sc.parts.completion}<i>%</i></span>
         </div>
-      </div>
+      </div>` : ''}
       <p class="score-foot">
         计分口径：正确率 ${SCORE_CONFIG.accuracyWeight} 分（用<strong>独立正确率</strong>，提示无效）
         + 速度 ${SCORE_CONFIG.speedWeight} 分（${SCORE_CONFIG.speedBaseline}–${SCORE_CONFIG.speedFull} 字/分线性计分）
-        → 按完成度加权。${sc.valid ? '本次测验<strong>全程无提示</strong>，分数有效。' : '本次测验<strong>有提示介入</strong>，分数仅供参考。'}
+        → 按完成度加权。${sc.valid ? '本次测验<strong>全程无提示</strong>，分数有效。' : '本次未达到有效测验条件，不评定分数与等级。'}
       </p>
     </div>
   ` : '';
@@ -875,7 +893,8 @@ function renderSession() {
   clearHint();
 
   /* ---- 字形行 ---- */
-  if (q.kind === 'key' || q.kind === 'part') {
+  if (q.kind === 'key' || q.kind === 'part' || q.kind === 'syllable') {
+    prompt.className = 'prompt';
     prompt.innerHTML =
       `<span style="font-family:var(--mono);color:var(--primary)">${escapeHtml(q.promptText)}</span>` +
       `<div style="font-size:14px;letter-spacing:0;color:#93a0b4;font-family:var(--sans);margin-top:6px">` +
@@ -893,7 +912,7 @@ function renderSession() {
       let extra = '';
       if (st.punct) extra = '';
       else if (st.unknown) extra = ' title="该字未收录拼音，自动跳过"';
-      else extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)}"`;
+      else if (!eng.examMode) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)}"`;
       return `<span class="${cls.join(' ')}"${extra}>${escapeHtml(st.ch)}</span>`;
     }).join('');
   }
@@ -929,6 +948,12 @@ function renderSession() {
 
 function renderDecode(eng, q, container) {
   if (!container) return;
+
+  // 测验题干保留，答案不进入 DOM，避免视觉与读屏提前泄露键位。
+  if (eng.examMode) {
+    container.innerHTML = '<div class="decode-empty">凭记忆输入双拼编码</div>';
+    return;
+  }
 
   // 拆分成分题（只听声母 / 只听韵母）：只展示要考的那一步
   if (q.kind === 'part') {
@@ -1383,6 +1408,7 @@ function handleKeyInput(rawKey) {
   if (app.hint) clearHint();
 
   const result = app.engine.pressKey(rawKey);
+  saveProgress();
 
   if (!result || !result.handled) return;
 
@@ -1993,7 +2019,7 @@ function renderReviewView() {
       ${noDue || !groups.other.length ? '' : groupHtml('其他', groups.other, '')}
 
       <div class="review-cta">
-        <button class="btn btn-primary" id="btnReviewPractice">${rv.due ? `复习到期的 ${Math.min(rv.due, 20)} 项` : '强化练习这些内容'}</button>
+        <button class="btn btn-primary" id="btnReviewPractice"${noDue ? ' disabled aria-disabled="true"' : ''}>${noDue ? '今天没有到期项' : rv.due ? `复习到期的 ${Math.min(rv.due, 20)} 项` : '强化练习这些内容'}</button>
         <button class="btn btn-ghost" id="btnReviewPracticeAll">普通练习</button>
         <button class="btn btn-ghost" id="btnClearWeak">清空易错记录</button>
       </div>
@@ -2049,6 +2075,13 @@ function bindReviewActions() {
     const pick = dueOnly
       ? due.slice(0, 20)
       : due.concat(all.filter(w => !w.isDue)).slice(0, 20);
+
+    // 空范围不能交给 generateReviewQuestions：它会用高频字兜底，
+    // 这会把「只练到期项」悄悄变成普通练习。
+    if (!pick.length) {
+      toast('今天没有到期的复习内容', 'err');
+      return;
+    }
 
     const qs = generateReviewQuestions(pick, 20);
     if (!qs.length) { toast('暂时没有可用的复习内容', 'err'); return; }
@@ -2498,6 +2531,7 @@ function syncSettingsUI() {
   const selects = [
     ['#selDuration', 'duration'], ['#setDuration', 'duration'],
     ['#selCount', 'count'], ['#setCount', 'count'],
+    ['#selCharTier', 'charTier'],
     ['#setHintDelay', 'hintDelay'], ['#setRevealDelay', 'revealDelay'],
     ['#setReduceMotion', 'reduceMotion']
   ];
@@ -2725,18 +2759,16 @@ function initGlobalGuards() {
   });
 
   // 离开页面前：保存进度 / 提示
-  window.addEventListener('beforeunload', (e) => {
-    try {
-      if (app.engine && app.engine.state === STATE.RUNNING) {
-        if (app.engine.stats.keystrokes > 3) {
-          S.saveResume(app.engine.exportResume());
-        }
-      }
-    } catch (_) {}
-  });
+  const saveBeforeLeave = () => {
+    flushSettings();
+    saveProgress(true);
+  };
+  window.addEventListener('beforeunload', saveBeforeLeave);
+  window.addEventListener('pagehide', saveBeforeLeave);
 
   // 页面隐藏时自动暂停（切标签页不会白跑时间）
   document.addEventListener('visibilitychange', () => {
+    if (document.hidden) flushSettings();
     if (document.hidden && app.engine && app.engine.state === STATE.RUNNING) {
       app.engine.pause();
       updatePauseButton();

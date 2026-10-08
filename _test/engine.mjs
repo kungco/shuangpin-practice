@@ -394,5 +394,45 @@ console.log('\n【12】考试模式：无提示硬约束');
   console.log(`  20 题测验跑完，hintedChars=0，无任何提示事件`);
 }
 
+console.log('\n【新增】独立作答与中断恢复');
+for (const scenario of ['independent', 'wrong', 'hint']) {
+  const eng = new PracticeEngine({ questions: generateQuestions({ mode: 'char', count: 2 }),
+    mode: 'char', hintEnabled: true, hintDelayMs: 0, revealDelayMs: 0 });
+  let unit;
+  eng.on('unit', e => { unit = e; });
+  eng.start();
+  const target = eng.currentTarget();
+  if (scenario === 'wrong') eng.pressKey(target.keys[0] === 'A' ? 'b' : 'a');
+  if (scenario === 'hint') eng.requestHint('reveal');
+  eng.pressKey(target.keys[0]);
+  const saved = JSON.parse(JSON.stringify(eng.exportResume()));
+  eng.destroy();
+  const restored = PracticeEngine.restore(saved);
+  ok(restored.keyIndex === 1 && restored.currentTarget().pos === 1,
+    `${scenario}：续练从第二键恢复`);
+  restored.on('unit', e => { unit = e; });
+  restored.start();
+  restored.pressKey(target.keys[1]);
+  ok(unit && unit.independent === (scenario === 'independent'),
+    `${scenario}：恢复后的独立作答状态准确`);
+  ok(restored.stats.wrongChars === (scenario === 'wrong' ? 1 : 0),
+    `${scenario}：恢复后错误字符统计保留`);
+  ok(restored.stats.hintedChars === (scenario === 'hint' ? 1 : 0),
+    `${scenario}：恢复后提示字符统计保留`);
+  restored.destroy();
+}
+
+for (const mode of ['sheng', 'yun']) {
+  const eng = new PracticeEngine({ questions: generateQuestions({ mode, count: 1 }), mode,
+    hintEnabled: true, hintDelayMs: 0, revealDelayMs: 0 });
+  let unit;
+  eng.on('unit', e => { unit = e; });
+  eng.start(); eng.requestHint('reveal');
+  eng.pressKey(eng.currentTarget().keys[0]);
+  ok(unit && !unit.independent && eng.stats.hintedChars === 1,
+    `${mode}：提示过的单键成分不计独立作答`);
+  eng.destroy();
+}
+
 console.log('\n' + (fail === 0 ? '✅ 引擎全部自检通过' : `❌ 引擎共 ${fail} 项未通过`));
 process.exit(fail === 0 ? 0 : 1);

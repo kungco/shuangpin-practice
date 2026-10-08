@@ -6,7 +6,7 @@ import { splitSyllable, getKeymapData, ALL_KEYS, isKeyCorrect, buildSyllables,
          SHENGMU_TO_KEYS } from '../src/core/scheme.js';
 import { ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS } from '../src/data/pinyin.js';
 import { generateQuestions, generateReviewQuestions, isPunct,
-         LEVELS, LEVEL_MAP, defaultCountFor } from '../src/core/questions.js';
+         LEVELS, LEVEL_MAP, defaultCountFor, annotatePassage } from '../src/core/questions.js';
 import { scoreExam, gradeOf, SCORE_CONFIG } from '../src/core/score.js';
 
 let fail = 0;
@@ -427,7 +427,7 @@ console.log('【12】测验评分算法');
   ok(hinted.valid === false, '有提示介入时分数应标记为无效');
   ok(hinted.warnings.some(w => /提示/.test(w)), '有提示时应给出警告文案');
 
-  // 样本量不足 → 向及格基准回退，且给出警告
+  // 样本量不足不形成有效成绩
   const tiny = scoreExam({
     independentAccuracy: 100, accuracy: 100, speed: 120,
     correctChars: 3, wrongChars: 0, totalChars: 3, hintedChars: 0,
@@ -503,6 +503,29 @@ console.log('【12】测验评分算法');
 
   console.log(`  满分 ${perfect.score}(${perfect.grade}) / 中等 ${decent.score}(${decent.grade}) / 全错 ${allWrong.score}(${allWrong.grade})`);
 }
+
+// 实际短文注音链路必须使用语境读音，未知字符不影响后续索引。
+for (const [text, expected] of [
+  ['重复', 'chong fu'], ['重新', 'chong xin'], ['成长', 'cheng zhang'],
+  ['长出来', 'zhang chu lai'], ['外行', 'wai hang'], ['觉得', 'jue de']
+]) {
+  const actual = annotatePassage(text).map(c => c.pinyin).join(' ');
+  ok(actual === expected, `${text} 应读 ${expected}，实际 ${actual}`);
+}
+const mixed = annotatePassage('🌱重新，成长');
+ok(mixed.length === 6 && mixed[1].pinyin === 'chong' && mixed[5].pinyin === 'zhang',
+  '未知扩展字符与标点不会错位短文注音');
+for (const tier of CHAR_TIERS) {
+  const qs = generateQuestions({ mode: 'char', count: 60, charTier: String(tier.id) });
+  ok(qs.every(q => q.chars.every(c => Object.hasOwn(tier.data, c.ch))),
+    `固定难度 ${tier.id} 的所有题目来自所选字表`);
+}
+const emptyExam = scoreExam({});
+ok(emptyExam.score === 0 && !emptyExam.valid && emptyExam.badge === '',
+  '空测验不再获得及格分或等级');
+const shortExam = scoreExam({ totalChars: 3, correctChars: 3, independentAccuracy: 100,
+  speed: 120, doneQuestions: 3, questionCount: 3 });
+ok(!shortExam.valid && shortExam.badge === '', '小样本即使全部答对也不评等级');
 
 console.log('\n' + (fail === 0
   ? '✅ 全部自检通过'

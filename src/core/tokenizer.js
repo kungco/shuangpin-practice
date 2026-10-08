@@ -26,6 +26,17 @@ const wordIndex = {};
   }
 })();
 
+// 经校对的语境读音。单字表只能提供默认音，不能用于判定多音字词。
+const CONTEXT_READINGS = {
+  '重复': ['chong', 'fu'], '重新': ['chong', 'xin'],
+  '成长': ['cheng', 'zhang'], '长出来': ['zhang', 'chu', 'lai'],
+  '长大': ['zhang', 'da'], '外行': ['wai', 'hang'],
+  '散去': ['san', 'qu'], '散开': ['san', 'kai'],
+  '散在': ['san', 'zai'], '得起': ['de', 'qi'],
+  '觉得': ['jue', 'de'], '舍不得': ['she', 'bu', 'de']
+};
+Object.assign(wordIndex, CONTEXT_READINGS);
+
 /** 单字拼音查询 */
 export function pinyinOf(ch) {
   return ALL_CHARS[ch] || '';
@@ -49,11 +60,12 @@ const WORD_BONUS = 0.4;
 export function tokenizeWithPinyin(text) {
   const out = [];
   const str = typeof text === 'string' ? text : '';
-  const n = str.length;
+  const units = Array.from(str);
+  const n = units.length;
   let i = 0;
 
   while (i < n) {
-    const ch = str[i];
+    const ch = units[i];
     if (!ALL_CHARS[ch]) {
       // 未收录：单字块（拼音留空，练习时跳过）
       out.push({ text: ch, chars: [{ ch, pinyin: '' }] });
@@ -63,9 +75,9 @@ export function tokenizeWithPinyin(text) {
 
     // 在 [i, j) 上找最优切分，j 为「连续可查区间」的右边界
     let j = i;
-    while (j < n && ALL_CHARS[str[j]]) j += 1;
+    while (j < n && ALL_CHARS[units[j]]) j += 1;
 
-    const seg = str.slice(i, j);
+    const seg = units.slice(i, j).join('');
     const pieces = bestSplit(seg);
     for (const p of pieces) {
       out.push(p);

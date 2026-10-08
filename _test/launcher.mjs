@@ -160,6 +160,14 @@ ok(!/reg\s+(add|delete)/i.test(bat), '脚本不碰注册表');
 ok(!/curl|wget|Invoke-WebRequest/i.test(bat), '脚本不联网下载任何东西');
 ok(/exit \/b 1/.test(bat), '出错路径都有非零退出码');
 
+const probe = readFileSync(resolve(ROOT, '_test/probe-service.ps1'), 'utf8');
+ok(bat.includes('PORT=8781') && !/set \/a PORT\+=/.test(bat),
+  '固定使用 8781，避免自动换端口导致数据分散');
+ok(bat.includes('probe-service.ps1') && probe.includes('SHA256'),
+  '复用服务前验证当前项目页面内容');
+ok(bat.includes('已有服务正在运行') && bat.includes('端口已被其他服务占用'),
+  '已有本项目服务可复用，其他服务占用有明确提示');
+
 console.log('\n' + (fail === 0
   ? `✅ 启动脚本自检全部通过（${pass} 项）`
   : `❌ 启动脚本自检共 ${fail} 项未通过（${pass} 通过）`));

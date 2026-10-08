@@ -56,7 +56,7 @@
           <ul class="exam-note-list">
             <li>全程<strong>不提供任何提示</strong>：不闪键位、Tab 也无效、隐藏迷你键位图。</li>
             <li>题目为 <strong>拆分 / 单字 / 词组</strong> 混合，完成后给出 <strong>0–100 综合分</strong>与等级。</li>
-            <li>分数以<strong>独立正确率</strong>为主（70 分）、速度为辅（30 分），再按完成度加权；题量不足会自动修正，刷不出虚高分。</li>
+            <li>分数以<strong>独立正确率</strong>为主（70 分）、速度为辅（30 分），再按完成度加权；至少完成 20 个字符才评定分数与等级。</li>
             <li>建议先把「键位熟悉 → 声韵拆分 → 单字」走一遍再来测，分数才有参考意义。</li>
           </ul>
         </div>
@@ -84,6 +84,11 @@
               <option value="50">50 题</option>
               <option value="100">100 题</option>
             </select>
+          </label>
+
+          <label class="field" id="charTierField">
+            <span>单字难度</span>
+            <select id="selCharTier" aria-label="单字难度"></select>
           </label>
 
           <label class="field field-check">

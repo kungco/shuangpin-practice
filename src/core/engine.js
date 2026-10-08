@@ -387,7 +387,7 @@ export class PracticeEngine {
   /** 当前作答目标对应的「字符标记」（与 _erroredChars 同一套键） */
   _currentMarkKey(target) {
     if (!target) return '';
-    if (target.kind === 'key') return `key:${this.index}`;
+    if (target.kind === 'key' || target.kind === 'part') return `key:${this.index}`;
     const ch = this.currentChar();
     if (!ch || this._isSkippable(ch)) return '';
     return `${this.index}:${this.charIndex}`;
@@ -832,7 +832,12 @@ export class PracticeEngine {
       }
     }
 
-    this.emit('unit', { target, stats: this.visibleStats() });
+    const mark = target.kind === 'key' || target.kind === 'part'
+      ? `key:${this.index}` : `${this.index}:${this.charIndex}`;
+    this.emit('unit', {
+      target, stats: this.visibleStats(),
+      independent: !this._erroredChars.has(mark) && !this._hintedChars.has(mark)
+    });
 
     if (target.kind === 'key' || target.kind === 'part') {
       // 单键类题目：推进到下一题
@@ -1089,8 +1094,11 @@ export class PracticeEngine {
       questions: this.questions,
       index: this.index,
       charIndex: this.charIndex,
-      keyIndex: 0,
-      typed: '',
+      keyIndex: this.keyIndex,
+      typed: this.typed,
+      erroredChars: Array.from(this._erroredChars),
+      hintedMarks: Array.from(this._hintedChars),
+      skipped: this._skippedCount || 0,
       elapsedSec: this.elapsedSec,
       stats: {
         totalChars: this.stats.totalChars,
@@ -1135,6 +1143,9 @@ export class PracticeEngine {
       });
       eng.index = clampInt(saved.index, 0, saved.questions.length - 1);
       eng.charIndex = clampInt(saved.charIndex, 0, 9999);
+      eng._erroredChars = new Set(Array.isArray(saved.erroredChars) ? saved.erroredChars : []);
+      eng._hintedChars = new Set(Array.isArray(saved.hintedMarks) ? saved.hintedMarks : []);
+      eng._skippedCount = Math.max(0, Number(saved.skipped) || 0);
       eng.elapsedSec = Math.max(0, Number(saved.elapsedSec) || 0);
       if (saved.stats && typeof saved.stats === 'object') {
         const st = saved.stats;
@@ -1159,6 +1170,9 @@ export class PracticeEngine {
         eng.charIndex = 0;
         eng.index = Math.min(eng.index + 1, eng.questions.length - 1);
       }
+      const target = eng.currentTarget();
+      eng.keyIndex = clampInt(saved.keyIndex, 0, Math.max(0, (target && target.len || 1) - 1));
+      eng.typed = typeof saved.typed === 'string' ? saved.typed.slice(0, eng.keyIndex) : '';
       return eng;
     } catch (err) {
       console.error('[engine] 恢复现场失败', err);

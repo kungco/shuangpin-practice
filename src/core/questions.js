@@ -485,13 +485,14 @@ function makeExamQuestion(i, target, ctx) {
  * 为短文逐字标注：标点 / 拼音 / 音节拆分
  * 未收录拼音的字标记为 unknown，练习时会被自动跳过而不会导致卡死。
  */
-function annotatePassage(text) {
+export function annotatePassage(text) {
   const arr = Array.from(String(text || ''));
-  return arr.map(ch => {
+  const readings = tokenizeWithPinyin(text).flatMap(block => block.chars);
+  return arr.map((ch, i) => {
     if (isPunct(ch)) {
       return { ch, pinyin: '', syl: null, punct: true, unknown: false };
     }
-    const py = ALL_CHARS[ch] || '';
+    const py = readings[i] ? readings[i].pinyin : '';
     if (!py || !splitSyllable(py).length) {
       // 未收录或无法拆分：标记为 unknown，引擎会跳过
       return { ch, pinyin: py, syl: null, punct: false, unknown: true };
@@ -565,7 +566,9 @@ export function generateQuestions(opts = {}) {
           // 用「档位数」动态均分，避免以后增减档位时曲线写死而失真。
           const total = Math.max(1, CHAR_TIERS.length);
           const ratio = i / Math.max(1, target - 1);
-          const tier = Math.min(total, 1 + Math.floor(ratio * total));
+          const fixedTier = Math.floor(Number(opts.charTier));
+          const tier = fixedTier >= 1 && fixedTier <= total
+            ? fixedTier : Math.min(total, 1 + Math.floor(ratio * total));
           q = makeCharQuestion(tier, used);
           break;
         }

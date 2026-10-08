@@ -34,17 +34,22 @@ if not exist "%APPDIR%\index.html" (
   exit /b 1
 )
 
-rem ---------- 1. 找一个空闲端口 ----------
+rem ---------- 1. 固定地址，避免换端口后本地数据看似丢失 ----------
 set "PORT=8781"
-:findport
-for /f "tokens=*" %%L in ('netstat -ano ^| findstr /r /c:"LISTENING" ^| findstr /c:":!PORT! "') do (
-  set /a PORT+=1
-  if !PORT! GTR 8800 (
-    echo   [错误] 8781-8800 端口全被占用，请先关掉占用的程序。
-    pause
-    exit /b 1
+set "PORTBUSY="
+for /f "tokens=*" %%L in ('netstat -ano ^| findstr /r /c:"LISTENING" ^| findstr /c:":!PORT! "') do set "PORTBUSY=1"
+if defined PORTBUSY (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%APPDIR%\_test\probe-service.ps1" -Port !PORT! -Root "%APPDIR%"
+  if not errorlevel 1 (
+    echo   已有服务正在运行，继续使用原地址。
+    start "" "http://127.0.0.1:!PORT!/index.html"
+    exit /b 0
   )
-  goto findport
+  echo   [错误] 8781 端口已被其他服务占用。请关闭占用程序后重新启动。
+  echo   为保留浏览器中的练习记录，本次不会自动更换端口。
+  echo   若此前使用过其他端口，请从原地址导出备份后再在此导入。
+  pause
+  exit /b 1
 )
 
 rem ---------- 2. 挑一个可用的解析器 ----------
@@ -118,7 +123,7 @@ set /a TRIES=0
 :waitloop
 set /a TRIES+=1
 timeout /t 1 /nobreak >nul
-netstat -ano | findstr /r /c:"LISTENING" | findstr /c:":!PORT! " >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%APPDIR%\_test\probe-service.ps1" -Port !PORT! -Root "%APPDIR%"
 if errorlevel 1 (
   if !TRIES! LSS 20 goto waitloop
   echo.
