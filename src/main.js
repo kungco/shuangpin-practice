@@ -53,6 +53,7 @@ const app = {
   saveTimer: null,
   hint: null,          // 当前提示状态（由引擎 hint / reveal 事件驱动）
   _capturingShortcut: false,  // 设置页「按下新键」捕获中：此时全局快捷键必须让路
+  _captureCleanup: null,      // 当前捕获的收尾函数（保证旧监听器必然被摘掉）
   _armAudio: null             // 首次用户手势时解锁音频（用完置空）
 };
 
@@ -2035,10 +2036,20 @@ function bindReviewActions() {
   const btnWeak = $('#btnReviewPractice');
   if (btnWeak) btnWeak.addEventListener('click', () => {
     const all = weakRanking(60);
-    // 间隔重复：优先练到期的；到期的不足时用权重最高的补齐 ——
-    // 用户点「复习」总是期望有内容可练，而不是收到一句「今天没有到期的」。
     const due = all.filter(w => w.isDue);
-    const pick = (due.length ? due.concat(all.filter(w => !w.isDue)) : all).slice(0, 20);
+
+    // ★ 先筛选、后传参：练习范围在这里**定型**，出题函数只负责按序构造。
+    // 「只练到期项」开着 → 范围只有到期项，绝不掺未到期内容 ——
+    //   用户圈定的范围被稀释等于功能失效；
+    // 关着 → 到期项全部优先入选，名额没满才用未到期项（按权重序）补齐。
+    // 之前把到期与未到期混在一起传给出题函数再按权重重排，
+    // 低权重的到期项会被沉底挤出 20 题之外 —— 按钮写着「复习到期的 1 项」，
+    // 实际一道到期题都没有。
+    const dueOnly = !!app.settings.reviewDueOnly;
+    const pick = dueOnly
+      ? due.slice(0, 20)
+      : due.concat(all.filter(w => !w.isDue)).slice(0, 20);
+
     const qs = generateReviewQuestions(pick, 20);
     if (!qs.length) { toast('暂时没有可用的复习内容', 'err'); return; }
     switchView('practice');
@@ -2355,8 +2366,15 @@ function syncShortcutNote() {
  */
 function startCapture(action, btn) {
   if (!action || !SHORTCUT_ACTIONS[action]) return;
-  // 同时只允许一个捕获
-  if (app._capturingShortcut) return;
+
+  // 同时只允许一个捕获。上一次捕获若因任何路径没有清理干净
+  // （尤其是那个 setTimeout 里才挂上的「点外部」监听），这里强制收尾 ——
+  // 残留的监听器会在下一次点击时触发旧录制器的重绘，把新点开的按钮
+  // 从页面上挪走，表现就是「第一次点没反应，第二次才行」。
+  if (typeof app._captureCleanup === 'function') {
+    app._captureCleanup();
+    app._captureCleanup = null;
+  }
 
   app._capturingShortcut = true;
   const original = btn.textContent;
@@ -2366,11 +2384,16 @@ function startCapture(action, btn) {
   let done = false;
 
   const cleanup = () => {
+    if (done) return;               // 幂等：重复调用无害
     done = true;
     app._capturingShortcut = false;
+    if (app._captureCleanup === cleanup) app._captureCleanup = null;
     btn.classList.remove('is-capturing');
     btn.textContent = original;
     document.removeEventListener('keydown', onCapture, true);
+    // 此时 onOutside 可能还没挂上（setTimeout 未到），remove 一个
+    // 尚未注册的监听是安全的 no-op —— 关键是**之后**绝不能再挂上去，
+    // 所以下面的 setTimeout 里也要看 done 标记。
     document.removeEventListener('pointerdown', onOutside, true);
   };
 
@@ -2385,10 +2408,8 @@ function startCapture(action, btn) {
         toast(`${prettyKey(key)} 已被「${SHORTCUT_ACTIONS[clash].label}」占用`, 'err');
         return false;
       }
-      if (RESERVED_KEYS.includes(key)) {
-        toast(`${prettyKey(key)} 是浏览器保留键，不能占用`, 'err');
-        return false;
-      }
+      // 保留键 / 字母键的拒绝交给 validateShortcuts（字母键是作答键，
+      // 绑了它练习里这个字母就打不出来 —— 见 a11y.js 的说明）
       next[action] = key;
     }
     const check = validateShortcuts(next);
@@ -2429,13 +2450,21 @@ function startCapture(action, btn) {
 
   const onOutside = (e) => {
     if (done) return;
-    if (btn.contains && btn.contains(e.target)) return;
-    // 点面板外：取消。但按钮自身已被替换过，所以不看 e.target 是否在 btn 内
+    // 点的是另一个改键按钮：不放行也不在这里取消 —— 让它的 click 处理器
+    // 走 startCapture 入口的「先收尾旧的，再开新的」，这样在两个动作之间
+    // 换目标只需要各点一次（否则第一次点击只会取消当前捕获，显得没反应）。
+    if (e.target && typeof e.target.closest === 'function' &&
+        e.target.closest('.shortcut-key')) {
+      return;
+    }
+    // 点面板外：取消
     cleanup();
   };
 
+  app._captureCleanup = cleanup;
   document.addEventListener('keydown', onCapture, true);
-  // 延后一拍再挂「点外部取消」，否则当前这次点击会立刻把自己取消掉
+  // 延后一拍再挂「点外部取消」，否则当前这次点击会立刻把自己取消掉。
+  // done 守卫保证 cleanup 先跑完后，这个监听**不会**再被挂上。
   setTimeout(() => {
     if (!done) document.addEventListener('pointerdown', onOutside, true);
   }, 0);

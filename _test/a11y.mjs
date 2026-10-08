@@ -166,6 +166,24 @@ eq(bad2.ok, false, 'F11 判定不合法');
 ok(/保留键/.test(bad2.reason || ''), `给出保留键提示：${bad2.reason}`);
 eq(a11y.RESERVED_KEYS.join(','), 'f5,f11,f12', '保留键表为 F5/F11/F12');
 
+/* ---- 字母键是作答键，禁止绑为快捷键 ----
+   练习作答靠 A–Z。把「看答案」绑到 A 上，练习里的 A 会被快捷键截走，
+   「安」的第一键就永远打不出来。这是本应用特有的约束。 */
+const letterBad = a11y.validateShortcuts({ hint: 'a' });
+eq(letterBad.ok, false, '★ 字母键 a 判定不合法');
+ok(/作答键/.test(letterBad.reason || ''), `给出可读原因：${letterBad.reason}`);
+eq(a11y.validateShortcuts({ hint: 'Z' }).ok, false, '大写 Z 同样拒绝');
+eq(a11y.validateShortcuts({ hint: '1' }).ok, true, '数字键不与作答冲突，允许');
+eq(a11y.validateShortcuts({ hint: 'f1' }).ok, true, '功能键允许');
+
+m = a11y.mergeShortcuts({ hint: 'a' });
+eq(m.hint, 'tab', `★ 脏配置里的字母键回落默认（实际 ${m.hint}）`);
+m = a11y.mergeShortcuts({ hint: 'a', skip: 'f2' });
+eq(m.hint, 'tab', '字母键项单独回落默认');
+eq(m.skip, 'f2', '★ 其它合法自定义键不受牵连（不整体作废）');
+m = a11y.mergeShortcuts({ pause: 'q' });
+eq(m.pause, 'escape', '任意字母（q）同样被拒');
+
 /* ============================================================
    4. matchesShortcut
    ============================================================ */

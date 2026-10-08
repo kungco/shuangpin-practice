@@ -1202,6 +1202,43 @@ console.log('\n【12】辅助功能与间隔重复（接线层）');
   // 同一个 key 反复记录应当累加而不是覆盖
   ok(jia.count === 3, `同一 key 反复记录会累加错误次数（甲 count=${jia && jia.count}）`);
   sMod.clearWeak();
+
+  /* ---- 12.12 「只练到期项」必须真的只练到期内容 ----
+     回归：早先把到期与未到期混在一起传给出题函数，出题函数又按权重
+     重排，低权重的到期项被挤出 20 题 —— 按钮写着「复习到期的 1 项」，
+     实际一道到期题都没有。现在范围在按钮点击时就定型。 */
+  sMod.clearWeak();
+  sMod.recordWeak({ char: '甲', pinyin: 'jia' });          // 唯一的到期项
+  for (let i = 0; i < 21; i++) {
+    sMod.recordWeak({ char: `未${i}`, pinyin: 'wei' });     // 21 个未到期项
+  }
+  sMod._setAllDue(nowTs + 10 * 86400000);                   // 全部推到未来
+  {
+    // 单独把「甲」置为已到期
+    const m = sMod.readJSON(sMod.KEYS.weak, {});
+    m['甲'].due = nowTs - 1000;
+    sMod.writeJSON(sMod.KEYS.weak, m);
+  }
+  app.settings.reviewDueOnly = true;
+  renderReviewViewFn();
+  const btn = q('#btnReviewPractice');
+  ok(!!btn, '复习按钮存在');
+  ok(/复习到期的 1 项/.test(btn.textContent), `按钮文案承诺到期范围（${btn.textContent.trim()}）`);
+  fire(btn, 'click');
+  // 引擎第一题必须是「甲」
+  const q1 = app.engine && app.engine.currentQuestion ? app.engine.currentQuestion() : null;
+  ok(!!q1, '会话已启动');
+  const firstChar = q1 && (q1.chars && q1.chars[0] && q1.chars[0].ch || q1.char || '');
+  ok(firstChar === '甲',
+    `★ 只练到期项时第一题就是到期字（实际 ${firstChar || '无'}）`);
+  // 关掉开关后：到期优先、未到期补齐
+  app.settings.reviewDueOnly = false;
+  renderReviewViewFn();
+  fire(q('#btnReviewPractice'), 'click');
+  ok(!!app.engine, '关掉开关后仍能启动练习');
+  app.settings.reviewDueOnly = true;                        // 恢复默认
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  sMod.clearWeak();
 }
 
 /* ---------- 收尾 ---------- */

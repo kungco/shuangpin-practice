@@ -160,6 +160,7 @@ export function writeRaw(key, value) {
     if (recoverStorage()) {
       try {
         window.localStorage.setItem(key, str);
+        memoryStore.delete(key);
         return true;
       } catch (err) {
         degradeToMemory(err && err.message);
@@ -174,20 +175,38 @@ export function writeRaw(key, value) {
   }
   try {
     window.localStorage.setItem(key, str);
+    // 成功落盘后必须清掉同一键的内存副本。
+    //
+    // 为什么：readRaw 是**内存优先**的。内存副本只在「写入失败」时产生，
+    // 但一旦产生，若之后同键的写入成功落盘而没有删掉旧副本，
+    // 读路径会永远命中内存里的老值 —— 表现为「明明保存了 50，
+    // 页面读出来还是 10」，而且怎么改设置都不生效。
+    // 不变量：memoryStore 里只允许存在「尚未成功落盘」的值。
+    memoryStore.delete(key);
     return true;
   } catch (err) {
     console.warn('[storage] 写入失败', key, err && err.message);
-    if (isQuotaError(err)) {
-      // 配额超限：先尝试清理老记录并重试一次
+    if (isQuotaError(err) && !pruneInFlight) {
+      // 配额超限：清理老记录后重试**一次**。
+      //
+      // 为什么要有 pruneInFlight 守卫：pruneHistory 内部也要写回裁剪后的
+      // 历史（writeJSON → writeRaw），如果这次写回又撞配额，就会再次走到
+      // 这里再清理一次 —— 清理触发清理，无递归归无递归地烧掉几千次写入
+      // （实测一次保存触发约 4800 次 setItem）。守卫保证整条调用链里
+      // **最多只做一次清理**：嵌套的写入直接走内存兜底。
+      pruneInFlight = true;
       try {
         pruneHistory(200);
         window.localStorage.setItem(key, str);
+        memoryStore.delete(key);
         return true;
       } catch (e2) {
-        console.error('[storage] 清理后仍写入失败，转为内存存储', e2 && e2.message);
+        console.warn('[storage] 清理后仍写入失败，转为内存存储', e2 && e2.message);
         memoryStore.set(key, str);
         degradeToMemory('quota');
         return false;
+      } finally {
+        pruneInFlight = false;
       }
     }
     // 非配额错误（隐私模式、键名非法等）：同样不能只写内存就完事，
@@ -197,6 +216,12 @@ export function writeRaw(key, value) {
     return false;
   }
 }
+
+/**
+ * 配额重试守卫：true 表示当前调用链已经在做「清理后重试」，
+ * 嵌套的写入不得再次触发清理（否则清理自己触发的写入会无限递归）。
+ */
+let pruneInFlight = false;
 
 function isQuotaError(err) {
   if (!err) return false;
@@ -1086,11 +1111,13 @@ export function importAll(payload) {
       writeJSON(KEYS.daily, cur);
     }
 
-    // 易错字词：count / correct 是累计「次数」，与历史一样属于可加量，
-    // 所以这里用**相加**而不是取较大值 —— 两台设备各自记过同一个字，
-    // 合并后应该反映两边的总错误次数，取较大值会少算。
-    // 重复导入同一份备份的场景交给上面的 history 去重兜底：只要能对上
-    // 时间戳/ID，就不会被重复累加。
+    // 易错字词：count / correct 是累计「次数」，跨设备合并时**相加**
+    // （两台设备各自记过同一个字，合并后应反映总次数）。
+    // 但必须先做**同一记录**判定：lastTs、count、correct 三者完全一致，
+    // 说明是同一份记录（典型场景：同一备份导入两次、或导出后原样导回），
+    // 此时相加会把 1 次错误变成 2 次、3 次……污染复习权重。
+    // 时间戳精确到毫秒，「不同设备在同一毫秒记了同样多次错误」实际不可能发生，
+    // 所以这个判定不会误伤真正的跨设备合并。
     //
     // 复习调度字段（streak / ease / due）**不累加**，只取「更靠后的那次复习」：
     // 调度是状态而不是计数，两台设备各自排过期的，以进度更超前的一方为准，
@@ -1100,12 +1127,15 @@ export function importAll(payload) {
       for (const [k, v] of Object.entries(payload.weak)) {
         if (!v || typeof v !== 'object') continue;
         if (!cur[k]) { cur[k] = Object.assign({}, v); continue; }
-        cur[k].count = (cur[k].count || 0) + (v.count || 0);
-        cur[k].correct = (cur[k].correct || 0) + (v.correct || 0);
-        cur[k].lastTs = Math.max(cur[k].lastTs || 0, v.lastTs || 0);
-
         const a = normalizeWeakEntry(cur[k], k);
         const b = normalizeWeakEntry(v, k);
+        const sameRecord = a.lastTs > 0 && a.lastTs === b.lastTs &&
+                           a.count === b.count && a.correct === b.correct;
+        if (!sameRecord) {
+          cur[k].count = a.count + b.count;
+          cur[k].correct = a.correct + b.correct;
+          cur[k].lastTs = Math.max(a.lastTs, b.lastTs);
+        }
         // 取「间隔更长 / 进度更靠前」的调度状态，其余字段保留本地
         const ahead = (b.interval || 0) > (a.interval || 0) ? b : a;
         cur[k].streak = ahead.streak;
@@ -1120,32 +1150,64 @@ export function importAll(payload) {
       n++;
     }
 
-    // 键位错误：与现有累计值相加；明细按 ts 去重合并
+    // 键位错误：明细（recent）按会话时间戳去重合并；累计值（all）只接受
+    // **新会话**带来的增量。
+    //
+    // 为什么不直接把备份里的 all 相加：all 是「全历史累计」，没有可判重的身份。
+    // 同一份备份导两次，V 键 2 次会变成 4 次、6 次……热力图整体失真。
+    // 而每个会话的 ts 是唯一身份 —— 只把「本地没见过的会话」的按键错误
+    // 并进 all，重复导入时所有会话都已见过，什么都不加，天然幂等。
+    //
+    // 代价：备份里超出 recent 窗口（60 次会话）的更老历史无法参与合并
+    // （宁可少算，不可重复）。老备份只有 all、没有 recent 明细时退回
+    // 「本地为空则采用」的替换语义 —— 替换也是幂等的。
     if (payload.keyErrors && typeof payload.keyErrors === 'object') {
       const cur = loadKeyErrors();
-      const inc = payload.keyErrors.all && typeof payload.keyErrors.all === 'object'
+      const incomingAll = payload.keyErrors.all && typeof payload.keyErrors.all === 'object'
         ? payload.keyErrors.all : {};
-      for (const [k, v] of Object.entries(inc)) {
-        const key = String(k).toUpperCase();
-        if (!/^[A-Z]$/.test(key)) continue;
-        const num = Math.floor(Number(v)) || 0;
-        if (num <= 0) continue;
-        cur.all[key] = (Number(cur.all[key]) || 0) + num;
-      }
-      if (Array.isArray(payload.keyErrors.recent)) {
-        const seenTs = new Set(cur.recent.map(s => s && s.ts));
-        for (const s of payload.keyErrors.recent) {
-          if (!s || typeof s !== 'object' || seenTs.has(s.ts)) continue;
+      const incomingRecent = Array.isArray(payload.keyErrors.recent)
+        ? payload.keyErrors.recent.filter(s => s && typeof s === 'object')
+        : [];
+
+      const seenTs = new Set(cur.recent.map(s => s && s.ts));
+      const fresh = incomingRecent.filter(s => s && Number(s.ts) > 0 && !seenTs.has(s.ts));
+
+      if (fresh.length) {
+        for (const s of fresh) {
+          const keys = (s.keys && typeof s.keys === 'object') ? s.keys : {};
+          for (const [k, v] of Object.entries(keys)) {
+            const key = String(k).toUpperCase();
+            if (!/^[A-Z]$/.test(key)) continue;
+            const num = Math.floor(Number(v)) || 0;
+            if (num <= 0) continue;
+            cur.all[key] = (Number(cur.all[key]) || 0) + num;
+          }
           cur.recent.push(s);
           seenTs.add(s.ts);
         }
+      } else if (!incomingRecent.length &&
+                 Object.keys(incomingAll).length &&
+                 !Object.keys(cur.all).length) {
+        // 老备份只有累计没有明细，且本地也为空：直接采用（替换，幂等）
+        for (const [k, v] of Object.entries(incomingAll)) {
+          const key = String(k).toUpperCase();
+          if (!/^[A-Z]$/.test(key)) continue;
+          const num = Math.floor(Number(v)) || 0;
+          if (num > 0) cur.all[key] = num;
+        }
+      }
+
+      if (fresh.length) {
         cur.recent.sort((a, b) => (a.ts || 0) - (b.ts || 0));
         if (cur.recent.length > KEY_ERROR_RECENT_MAX) {
           cur.recent = cur.recent.slice(cur.recent.length - KEY_ERROR_RECENT_MAX);
         }
+        writeJSON(KEYS.keyErrors, cur);
+        n++;
+      } else if (Object.keys(cur.all).length) {
+        // 没有新会话但可能有「老备份初始化」的写入
+        writeJSON(KEYS.keyErrors, cur);
       }
-      writeJSON(KEYS.keyErrors, cur);
-      n++;
     }
 
     return { ok: true, message: `导入完成（合并 ${n} 项）` };

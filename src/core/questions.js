@@ -615,8 +615,11 @@ export function generateReviewQuestions(items, limit = 20) {
   const used = new Set();
   const list = Array.isArray(items) ? items.slice() : [];
 
-  // 按权重降序
-  list.sort((a, b) => (b.weight || 0) - (a.weight || 0));
+  // ★ 不在这里按权重重排 —— 调用方传入的顺序就是**出题范围与优先级**。
+  // 历史 bug：复习页「只练今天到期的 1 项」时，按钮把到期项排在最前传入，
+  // 这里一按权重重排，低权重的到期项被沉底，配合截断后 20 道题
+  // 可能全部变成未到期内容 —— 按钮承诺的范围被悄悄换掉。
+  // 权重排序是调用方（storage.getWeakList）已经做过的事，这里保持原序。
 
   for (const it of list) {
     if (out.length >= limit) break;
@@ -640,12 +643,16 @@ export function generateReviewQuestions(items, limit = 20) {
     }
   }
 
-  // 不足时用高频字补齐
-  let guard = 0;
-  while (out.length < Math.min(limit, 10) && guard < 60) {
-    guard++;
-    const q = makeCharQuestion(1 + Math.floor(Math.random() * 2), used);
-    out.push(q);
+  // 只有**一条都出不来**时才用高频字兜底，保证按钮永远有内容可练。
+  // 不能「不足 10 就补」—— 那会把随机高频字掺进「只练到期项」的范围里，
+  // 用户明确圈定的练习范围不该被悄悄稀释。
+  if (out.length === 0) {
+    let guard = 0;
+    while (out.length < Math.min(limit, 10) && guard < 60) {
+      guard++;
+      const q = makeCharQuestion(1 + Math.floor(Math.random() * 2), used);
+      out.push(q);
+    }
   }
   return out;
 }

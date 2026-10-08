@@ -98,6 +98,30 @@ export const DEFAULT_SHORTCUTS = {
 /** 这些键不允许被占用：占掉会让页面基本不可用 */
 export const RESERVED_KEYS = ['f5', 'f11', 'f12'];
 
+/**
+ * 判断一个键是否**禁止**被设为快捷键。
+ *
+ * 两类：
+ *   1. 浏览器保留键（F5/F11/F12）—— 占掉影响基本操作；
+ *   2. **单个字母 A–Z** —— 练习作答就靠字母键！把「看答案」绑到 A 上，
+ *      练习里的 A 会被快捷键截走，「安」的第一键永远打不出来。
+ *      快捷键和作答共享同一次按键，这是本应用特有的约束，
+ *      通用的快捷键组件不会替你想到。
+ *
+ * 数字键、符号键不与作答冲突，允许绑定。
+ */
+export function isForbiddenShortcutKey(nk) {
+  return RESERVED_KEYS.includes(nk) || /^[a-z]$/.test(nk);
+}
+
+/** 保留键 / 字母键被拒时的可读原因 */
+function forbiddenReason(nk) {
+  if (RESERVED_KEYS.includes(nk)) {
+    return `${prettyKey(nk)} 是浏览器保留键，不能占用`;
+  }
+  return `${prettyKey(nk)} 是作答键，练习时要用来打字，不能当快捷键`;
+}
+
 /** 展示用的键名（把 'tab' → 'Tab'、'backspace' → 'Backspace'） */
 export function prettyKey(name) {
   if (!name) return '未设置';
@@ -137,8 +161,8 @@ export function validateShortcuts(map) {
   for (const [action, key] of Object.entries(map || {})) {
     if (!key) continue;                       // 未绑定是合法的
     const nk = normalizeShortcutKey(key);
-    if (RESERVED_KEYS.includes(nk)) {
-      return { ok: false, reason: `${prettyKey(nk)} 是浏览器保留键，不能占用` };
+    if (isForbiddenShortcutKey(nk)) {
+      return { ok: false, reason: forbiddenReason(nk) };
     }
     if (used.has(nk)) {
       return { ok: false, reason: `${prettyKey(nk)} 被多个动作占用（${used.get(nk)} 与 ${action}）` };
@@ -159,7 +183,12 @@ export function mergeShortcuts(saved) {
     const v = saved[action];
     if (v === undefined) continue;
     if (v === '' || v === null) { out[action] = ''; continue; }  // 显式解绑
-    if (typeof v === 'string' && v.length <= 12) out[action] = normalizeShortcutKey(v);
+    if (typeof v === 'string' && v.length <= 12) {
+      const nk = normalizeShortcutKey(v);
+      // 单项非法（保留键 / 字母键）→ 该项回落默认，**不**整体作废：
+      // 用户只是其中一项存了脏数据，不该连其它自定义好的键一起丢。
+      out[action] = isForbiddenShortcutKey(nk) ? DEFAULT_SHORTCUTS[action] : nk;
+    }
   }
   // 合并后仍要保证不冲突；冲突就整体退回默认，避免留下一个半坏的状态
   const check = validateShortcuts(out);

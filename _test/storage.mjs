@@ -732,6 +732,102 @@ console.log('\n【14】存储状态命名');
   ok(S.storageModeName() === n0, '★ 复位后回到初始状态名');
 }
 
+/* ============================================================
+   【15】回归：内存副本 / 递归重试 / 导入幂等（第九轮实测事故）
+   ============================================================ */
+console.log('\n【15】回归：恢复后旧值、递归重试、重复导入');
+
+{
+  /* ---- 15a. 恢复落盘后不得读到内存里的旧值 ---- */
+  const ls = makeLocalStorage();
+  ls.state.limit = 200;
+  installWindow(ls);
+  const S = await freshStorage();
+  S.isStorageAvailable();
+
+  // 模拟「题量 10」写入时配额满 → 落进内存
+  const okSmall = S.writeJSON('k.count', JSON.stringify({ v: 10 }));
+  const wroteBig = S.writeJSON('k.huge', { big: 'z'.repeat(2000) });
+  ok(S.isDegradedToMemory() === true, '15a 配额满后进入降级');
+  ok(S.readJSON('k.huge', null) !== null, '15a 失败写入的数据在内存里可读');
+
+  // 用户腾出空间 → 下一次写入触发恢复，随后同键成功写入新值
+  ls.state.limit = Infinity;
+  S.writeJSON('k.other', { x: 1 });           // 触发 recoverStorage
+  ok(S.isStorageAvailable() === true, '15a 空间释放后恢复落盘');
+  const wrote = S.writeJSON('k.count', JSON.stringify({ v: 50 }));
+  ok(wrote === true, '15a 同键后续写入成功');
+  ok(S.readJSON('k.count', null) === JSON.stringify({ v: 50 }),
+    '★ 15a 成功落盘后读取到新值 50，而不是内存里的旧值 10');
+  // 再写一次，读路径依然走 localStorage
+  S.writeJSON('k.count', JSON.stringify({ v: 99 }));
+  ok(S.readJSON('k.count', null) === JSON.stringify({ v: 99 }), '15a 后续写入持续生效');
+}
+
+{
+  /* ---- 15b. 持续配额不足时，清理+重试最多一轮，不得递归 ---- */
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+  S.isStorageAvailable();                      // 正常探测
+
+  // 预置 400 条历史（超过裁剪线 200，让 pruneHistory 有得做）
+  const hist = Array.from({ length: 400 }, (_, i) =>
+    S.makeRecord({ ts: 1700000000000 + i, mode: 'char', totalChars: 10, durationSec: 5, speed: 100, accuracy: 100 }));
+  S.writeJSON(S.KEYS.history, hist);
+  const callsBefore = ls.state.setCalls;
+
+  // 从现在起**所有**应用键（NS 前缀）的写入都失败（__probe 除外，否则恢复探测也会挂）
+  ls.state.blockPrefix = 'shuangpin.v1.';
+  // 必须写一个 NS 前缀的应用键才会触发配额路径（k.* 这类测试键不在拦截范围）
+  S.writeJSON(S.KEYS.settings, { note: 'x'.repeat(3000) });   // 旧实现：这里会递归 ~4800 次
+
+  const delta = ls.state.setCalls - callsBefore;
+  ok(delta < 40,
+    `★ 15b 一次保存的写入尝试有界（实际 ${delta} 次；递归实现约 4800 次）`);
+  ok(S.isDegradedToMemory() === true, '15b 最终转入内存存储');
+  const mem = JSON.parse(S.readRaw(S.KEYS.history) || 'null');
+  ok(Array.isArray(mem) && mem.length <= 200,
+    `★ 15b 裁剪后的历史保存在内存里（${Array.isArray(mem) ? mem.length : 0} 条）`);
+  ok(S.readRaw(S.KEYS.settings) !== null, '15b 触发保存的那条数据也在内存里，没有丢');
+}
+
+{
+  /* ---- 15c. 同一备份重复导入：易错计数与键位错误必须幂等 ---- */
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  // 本地真实用出来的数据：错 1 次「测」、V 键错 2 次
+  S.recordWeak({ char: '测', pinyin: 'ce' });
+  S.recordKeyErrors({ v: 2 });
+  const backup = JSON.parse(JSON.stringify(S.exportAll()));
+
+  const w1 = S.getWeakList({ limit: 10, minCount: 1 })[0];
+  S.importAll(backup);
+  S.importAll(backup);                         // 又导一次
+  const w2 = S.getWeakList({ limit: 10, minCount: 1 })[0];
+  ok(w2 && w1 && w2.count === w1.count,
+    `★ 15c 重复导入不重复累计错误次数（${w1 && w1.count} → ${w2 && w2.count}）`);
+  ok(w2 && w1 && w2.correct === w1.correct, `15c correct 同样不变（${w2 && w2.correct}）`);
+
+  const ke1 = S.loadKeyErrors();
+  ok(ke1.all.V === 2, `★ 15c 重复导入后键位错误不膨胀（V=${ke1.all.V}）`);
+  const sessions = ke1.recent.length;
+  S.importAll(backup);
+  ok(S.loadKeyErrors().recent.length === sessions,
+    `15c 会话明细按 ts 去重（${sessions} 条不变）`);
+
+  // 跨设备合并语义保持：不同记录（时间戳/次数不同）仍然相加
+  const other = JSON.parse(JSON.stringify(backup));
+  other.weak['测'].count = 2;                   // 另一台设备错了 2 次
+  other.weak['测'].lastTs = (backup.weak['测'].lastTs || 0) + 5;
+  S.importAll(other);
+  const w3 = S.getWeakList({ limit: 10, minCount: 1 })[0];
+  ok(w3.count === w1.count + 2,
+    `15c 真正的跨设备记录仍相加（${w1.count} + 2 = ${w3.count}）`);
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 存储层自检全部通过'
   : `❌ 存储层自检共 ${fail} 项未通过`));
