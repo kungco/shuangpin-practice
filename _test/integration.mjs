@@ -1335,6 +1335,70 @@ console.log('\n【新增】页面生命周期与续练');
   app.engine.destroy(); app.engine = null;
 }
 
+console.log('【新增】题量设置与自动续题接线');
+{
+  const cleanup = () => {
+    if (app.engine) app.engine.destroy(); app.engine = null;
+    q('#overlay').hidden = true; q('#sessionPanel').hidden = true; q('#setupPanel').hidden = false;
+  };
+  cleanup();
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'phrase'), 'click');
+  q('#selCount').value = 'custom'; fire(q('#selCount'), 'change');
+  ok(!q('#customCount').hidden, '选择自定义显示数字输入');
+  q('#customCount').value = '137'; fire(q('#customCount'), 'input');
+  fire(q('#btnStart'), 'click');
+  ok(app.engine.questions.length === 137, '自定义输入未失焦就开始也使用新题量');
+  cleanup();
+  fire(q('#customCount'), 'change');
+  ok(app.settings.count === 137 && q('#setCount').value === 'custom' && q('#setCustomCount').value === '137',
+    '自定义题量与设置页同步');
+  fire(q('#btnStart'), 'click');
+  ok(app.engine.questions.length === 137 && !app.engine.unlimited, '自定义数值决定实际题量');
+  cleanup();
+  q('#setCount').value = '500'; fire(q('#setCount'), 'change');
+  ok(app.settings.count === 500 && q('#selCount').value === '500' && q('#customCount').hidden,
+    '设置页预设题量同步回首页');
+  q('#selCount').value = '0'; fire(q('#selCount'), 'change');
+  app.settings.weakBoost = false;
+  fire(q('#btnStart'), 'click');
+  const eng = app.engine;
+  const first = eng.currentQuestion().text;
+  ok(sMod.loadRecent('phrase').includes(first), '首题实际展示后进入近期记录');
+  ok(!eng.questions.slice(1).some(x => sMod.loadRecent('phrase').includes(x.text)),
+    '尚未展示的题目不写入近期记录');
+  while (eng.summary().doneQuestions < 45) {
+    const t = eng.currentTarget(); eng.pressKey(t.keys[t.pos]);
+  }
+  ok(eng.state === 'running' && eng.questions.length === 20 && eng.questionOffset === 40,
+    '首页不限量超过两批后仍在运行且队列大小不变');
+  ok(q('#hudProgress').textContent.includes('45'), '累计题数显示在页面');
+  fire(q('#btnPause'), 'click');
+  const saved = sMod.loadResume();
+  ok(saved.unlimited && saved.questionOffset === 40, '暂停保存不限量累计进度');
+  cleanup();
+  q('#selCharTier').value = '7'; fire(q('#selCharTier'), 'change');
+  fire(q('#btnResume'), 'click');
+  ok(app.engine.unlimited && app.engine.summary().doneQuestions === 45, '页面续练保留累计题数');
+  while (app.engine.summary().doneQuestions < 61) {
+    const t = app.engine.currentTarget(); app.engine.pressKey(t.keys[t.pos]);
+  }
+  ok(app.engine.state === 'running' && app.engine.questionOffset === 60, '续练重建出题源后仍自动补充');
+  cleanup();
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'passage'), 'click');
+  q('#selCount').value = '20'; fire(q('#selCount'), 'change');
+  fire(q('#btnStart'), 'click');
+  ok(app.engine.questions.length === 20 && q('[data-count="passage"]').textContent === '20 段',
+    '短文实际题量与卡片一致，不再截断为八段');
+  cleanup();
+  q('#selCount').value = '0'; fire(q('#selCount'), 'change');
+  app.settings.weakBoost = true;
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'exam'), 'click');
+  fire(q('#btnStart'), 'click');
+  ok(!app.engine.unlimited && app.engine.questions.length === 50 && app.engine.questions.every(q => q.meta?.examPart),
+    '易错强化和不限量不能改变测验的有限混合卷');
+  cleanup();
+}
+
 /* ---------- 收尾 ---------- */
 console.log('\n【13】最终检查');
 ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);

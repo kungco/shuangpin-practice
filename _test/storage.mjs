@@ -883,6 +883,24 @@ console.log('\n【新增】备份幂等、排期与历史身份');
   ok(S.loadSettings().charTier === '1', '非法难度回退到高频字');
 }
 
+console.log('【新增】题量边界与近期内容');
+{
+  installWindow(makeLocalStorage());
+  const S = await freshStorage();
+  for (const [input, expected] of [[0, 0], [137, 137], [-2, 0], [5001, 5000], [12.9, 12], ['invalid', 20]]) {
+    S.saveSettings({ count: input });
+    ok(S.loadSettings().count === expected, `题量 ${input} 规范为 ${expected}`);
+  }
+  for (let i = 0; i < 210; i++) S.recordRecent('phrase', `词${i}`);
+  S.recordRecent('phrase', '词209');
+  ok(S.loadRecent('phrase').length === 200 && S.loadRecent('phrase')[0] === '词10',
+    '近期记录有界且重复展示不增加条目');
+  S.saveResume({ questions: [{ kind: 'word' }], index: 1, unlimited: true, questionOffset: 40,
+    generation: { mode: 'phrase', count: 20, charTier: '3' } });
+  ok(S.loadResume()?.questionOffset === 40 && S.loadResume()?.generation?.charTier === '3',
+    '续练存储保留累计题量和生成设置');
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 存储层自检全部通过'
   : `❌ 存储层自检共 ${fail} 项未通过`));

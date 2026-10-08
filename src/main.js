@@ -265,14 +265,7 @@ function initSetupPanel() {
       saveSettingsDebounced();
     });
   }
-  if (selCount) {
-    selCount.value = String(app.settings.count);
-    selCount.addEventListener('change', () => {
-      app.settings.count = Number(selCount.value) || 0;
-      saveSettingsDebounced();
-      updateModeCounts();
-    });
-  }
+  bindCountControl('selCount', 'customCount');
   if (chkWeak) {
     chkWeak.checked = !!app.settings.weakBoost;
     chkWeak.addEventListener('change', () => {
@@ -307,18 +300,12 @@ function selectMode(mode, silent) {
   $$('#modeGrid .mode-card').forEach(c =>
     c.classList.toggle('is-active', c.getAttribute('data-mode') === m));
 
-  // 短文模式的默认题量与其它不同
-  const selCount = $('#selCount');
-  if (selCount && !silent) {
-    // 若当前题量对短文不合适，给一个建议值（仅当用户没手动改过）
-    const cur = Number(selCount.value);
-    if (m === 'passage' && cur > 10) selCount.value = '3';
-    if (m !== 'passage' && cur > 0 && cur < 10 && cur === 3) selCount.value = '20';
-    // 测验需要足够的样本量分数才可信（见 score.js 的可信度因子），
-    // 题量过小时给一个下限建议，但不强制——用户仍可自行调小。
-    if (m === 'exam' && (cur === 0 || cur < 30)) selCount.value = '50';
-    app.settings.count = Number(selCount.value) || 0;
+  // 测验保持有限题量，短文也允许用户选择较长轮次。
+  if (!silent && m === 'exam' && app.settings.count < 30) {
+    app.settings.count = 50;
+    syncCountControls();
   }
+  updateModeCounts();
   const tip = LEVEL_MAP[m] ? LEVEL_MAP[m].tip : '';
   const stageTip = $('#stageTip');
   if (stageTip) stageTip.textContent = tip;
@@ -338,23 +325,77 @@ function toggleExamNote(mode) {
   note.hidden = mode !== 'exam';
 }
 
+function syncCountControls() {
+  for (const [selectId, inputId] of [['selCount', 'customCount'], ['setCount', 'setCustomCount']]) {
+    const select = $('#' + selectId), input = $('#' + inputId);
+    if (!select || !input) continue;
+    const value = String(app.settings.count);
+    const preset = Array.from(select.options).some(o => o.value === value);
+    select.value = preset ? value : 'custom';
+    input.hidden = preset;
+    if (!preset) input.value = value;
+  }
+}
+
+function bindCountControl(selectId, inputId) {
+  const select = $('#' + selectId), input = $('#' + inputId);
+  if (!select || !input) return;
+  syncCountControls();
+  select.addEventListener('change', () => {
+    if (select.value === 'custom') {
+      input.hidden = false;
+      app.settings.count = Math.max(1, S.normalizeCount(input.value));
+      // 保持当前控件的自定义输入可见，即使数值恰好等于预设。
+      syncCountControls();
+      select.value = 'custom'; input.hidden = false; input.focus();
+    } else {
+      app.settings.count = S.normalizeCount(select.value);
+      syncCountControls();
+    }
+    saveSettingsDebounced(); updateModeCounts();
+  });
+  input.addEventListener('input', () => {
+    // 数字输入尚未失焦时也应生效，避免立即开始仍使用旧题量。
+    if (!input.value || !Number.isFinite(Number(input.value))) return;
+    app.settings.count = Math.max(1, S.normalizeCount(input.value));
+    saveSettingsDebounced(); updateModeCounts();
+  });
+  input.addEventListener('change', () => {
+    app.settings.count = Math.max(1, S.normalizeCount(input.value));
+    syncCountControls();
+    select.value = 'custom'; input.hidden = false; input.value = String(app.settings.count);
+    saveSettingsDebounced(); updateModeCounts();
+  });
+}
+
 function updateModeCounts() {
-  const count = Number($('#selCount') ? $('#selCount').value : 20) || 0;
+  const count = app.settings.count;
   $$('#modeGrid .mode-count').forEach(el => {
     const mode = el.getAttribute('data-count');
-    if (mode === 'passage') {
-      el.textContent = count > 0 ? `${Math.min(count, 5)} 段` : '3 段';
-    } else if (mode === 'keymap') {
-      el.textContent = count > 0 ? `${count} 题` : '40 题';
-    } else if (mode === 'sheng' || mode === 'yun') {
-      // 单键题，一轮可以用更少的题量就覆盖全部键位
-      el.textContent = count > 0 ? `${count} 题` : '30 题';
-    } else if (mode === 'exam') {
-      el.textContent = count > 0 ? `${count} 题` : '50 题';
-    } else {
-      el.textContent = count > 0 ? `${count} 题` : '20 题';
-    }
+    el.textContent = count > 0 ? `${count} ${mode === 'passage' ? '段' : '题'}`
+      : (mode === 'exam' ? '50 题' : '不限量');
   });
+}
+
+// 生成器保留去重集合，不限量时按小批次补充，避免续练数据无限膨胀。
+function createQuestionSource(config, initial = []) {
+  const recent = S.loadRecent(config.mode);
+  const context = { used: new Set(recent), usedPinyin: new Set(recent), usedPhrase: new Set(recent) };
+  for (const q of initial) {
+    context.used.add(q.text || q.promptText);
+    context.usedPhrase.add(q.text || q.promptText);
+    const py = q.pinyin || q.chars?.[0]?.pinyin;
+    if (py) context.usedPinyin.add(q.kind === 'part' ? `${q.part}:${py}` : py);
+  }
+  return () => {
+    const weak = config.weakBoost && ['char', 'phrase'].includes(config.mode) ? weakRanking(60) : [];
+    const review = weak.length ? generateReviewQuestions(weak, Math.floor(config.count / 5)) : [];
+    const fresh = generateQuestions({ ...config, count: config.count - review.length, context });
+    const out = fresh.slice();
+    // 每五题最多一题易错复习，避免新内容被挤走。
+    review.forEach((q, i) => out.splice(Math.min(out.length, i * 5 + 4), 0, q));
+    return out;
+  };
 }
 
 function saveSettingsDebounced() {
@@ -405,23 +446,13 @@ function startSession(questionsOverride, modeOverride) {
     const durationSec = Number(app.settings.duration) || 0;
     const count = Number(app.settings.count) || 0;
 
-    let questions = preset;
-
-    if (!questions) {
-      if (app.settings.weakBoost) {
-        // 侧重易错：一半易错题 + 一半常规题
-        const weak = weakRanking(60);
-        const half = Math.max(1, Math.floor((count || 20) / 2));
-        const fromWeak = generateReviewQuestions(weak, half);
-        const rest = generateQuestions({ mode, count: Math.max(1, (count || 20) - fromWeak.length), charTier: app.settings.charTier });
-        questions = fromWeak.concat(rest);
-        if (!questions.length) questions = generateQuestions({ mode, count: count || 20, charTier: app.settings.charTier });
-      } else {
-        const effectiveCount = count > 0
-          ? (mode === 'passage' ? Math.min(count, 8) : count)
-          : (mode === 'passage' ? 3 : (mode === 'keymap' ? 40 : 20));
-        questions = generateQuestions({ mode, count: effectiveCount, charTier: app.settings.charTier });
-      }    }
+    const unlimited = !preset && count === 0 && mode !== 'exam';
+    const generation = {
+      mode, count: unlimited ? (mode === 'passage' ? 3 : 20) : (count || 50),
+      charTier: app.settings.charTier, weakBoost: app.settings.weakBoost
+    };
+    const questionSource = preset ? null : createQuestionSource(generation);
+    const questions = preset || questionSource();
 
     if (!Array.isArray(questions) || !questions.length) {
       toast('题目生成失败，请重试', 'err');
@@ -438,6 +469,7 @@ function startSession(questionsOverride, modeOverride) {
 
     app.engine = new PracticeEngine({
       questions,
+      unlimited, questionSource, generation,
       mode,
       modeName: LEVEL_MAP[mode] ? LEVEL_MAP[mode].name : mode,
       durationSec,
@@ -456,6 +488,7 @@ function startSession(questionsOverride, modeOverride) {
 
     app.lastResumeSave = 0;
     app.engine.start();
+    rememberCurrentQuestion(app.engine);
 
     // 隐藏续练提示
     const hint = $('#resumeHint');
@@ -472,7 +505,9 @@ function resumeSession() {
   const saved = S.loadResume();
   if (!saved) { toast('没有可继续的进度', 'err'); return; }
   try {
-    const eng = PracticeEngine.restore(saved);
+    const generation = saved.generation || { mode: saved.mode, count: saved.mode === 'passage' ? 3 : 20, charTier: app.settings.charTier };
+    const source = saved.unlimited ? createQuestionSource(generation, saved.questions) : null;
+    const eng = PracticeEngine.restore(saved, source);
     if (!eng) { toast('进度已损坏，无法恢复', 'err'); S.clearResume(); return; }
     if (app.engine) app.engine.destroy();
     app.engine = eng;
@@ -482,6 +517,7 @@ function resumeSession() {
     ensureMiniKeymap();
     renderSession();
     eng.start();
+    rememberCurrentQuestion(eng);
     const hint = $('#resumeHint');
     if (hint) hint.hidden = true;
     toast('已恢复上次进度');
@@ -491,9 +527,18 @@ function resumeSession() {
   }
 }
 
+function rememberCurrentQuestion(eng) {
+  const q = eng.currentQuestion();
+  if (q && q.meta?.from !== 'review') {
+    S.recordRecent(eng.mode, q.kind === 'part' ? `${q.part}:${q.pinyin}` : (q.text || q.promptText));
+  }
+}
+
 function bindEngineEvents() {
   const eng = app.engine;
   if (!eng) return;
+
+  eng.on('question', ({ done }) => { if (!done) rememberCurrentQuestion(eng); });
 
   eng.on('change', () => {
     renderSession();
@@ -1501,9 +1546,9 @@ function showResumeHint() {
     if (!saved) { hint.hidden = true; return; }
 
     const lv = LEVEL_MAP[saved.mode];
-    const done = saved.index || 0;
+    const done = (saved.questionOffset || 0) + (saved.index || 0);
     const total = (saved.questions || []).length;
-    text.textContent = `上次「${lv ? lv.name : saved.mode}」进行到 ${done + 1}/${total} 题`;
+    text.textContent = `上次「${lv ? lv.name : saved.mode}」进行到 ${saved.unlimited ? `${done + 1}/∞` : `${done + 1}/${total}`} 题`;
     hint.hidden = false;
   } catch (err) {
     console.warn('[resume] 读取失败', err);
@@ -2176,15 +2221,7 @@ function initSettingsView() {
       saveSettingsDebounced();
     });
   }
-  if (setCount) {
-    setCount.value = String(app.settings.count);
-    setCount.addEventListener('change', () => {
-      app.settings.count = Number(setCount.value) || 0;
-      if ($('#selCount')) $('#selCount').value = String(app.settings.count);
-      saveSettingsDebounced();
-      updateModeCounts();
-    });
-  }
+  bindCountControl('setCount', 'setCustomCount');
 
   const bindToggle = (el, key, after) => {
     if (!el) return;
@@ -2528,9 +2565,9 @@ function applyHintSettingsToEngine() {
 
 /** 把 settings 同步到所有相关 UI */
 function syncSettingsUI() {
+  syncCountControls();
   const selects = [
     ['#selDuration', 'duration'], ['#setDuration', 'duration'],
-    ['#selCount', 'count'], ['#setCount', 'count'],
     ['#selCharTier', 'charTier'],
     ['#setHintDelay', 'hintDelay'], ['#setRevealDelay', 'revealDelay'],
     ['#setReduceMotion', 'reduceMotion']

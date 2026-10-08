@@ -76,14 +76,20 @@
 
           <label class="field">
             <span>题目数量</span>
-            <select id="selCount">
+            <select id="selCount" aria-label="题目数量">
               <option value="0">不限量</option>
+              <option value="3">3 题</option>
+              <option value="5">5 题</option>
               <option value="10">10 题</option>
               <option value="20" selected>20 题</option>
               <option value="30">30 题</option>
               <option value="50">50 题</option>
               <option value="100">100 题</option>
+              <option value="200">200 题</option>
+              <option value="500">500 题</option>
+              <option value="custom">自定义</option>
             </select>
+            <input id="customCount" type="number" min="1" max="5000" step="1" value="20" aria-label="自定义题量（1 至 5000）" hidden />
           </label>
 
           <label class="field" id="charTierField">
@@ -516,7 +522,8 @@
           </label>
           <label class="field">
             <span>默认题量</span>
-            <select id="setCount"></select>
+            <select id="setCount" aria-label="默认题量"></select>
+            <input id="setCustomCount" type="number" min="1" max="5000" step="1" value="20" aria-label="自定义默认题量（1 至 5000）" hidden />
           </label>
         </div>
 

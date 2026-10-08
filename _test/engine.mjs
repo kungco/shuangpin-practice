@@ -434,5 +434,53 @@ for (const mode of ['sheng', 'yun']) {
   eng.destroy();
 }
 
+console.log('【新增】不限量续题、统计与恢复');
+{
+  const batch = () => generateQuestions({ mode: 'char', count: 2, charTier: '1' });
+  const eng = new PracticeEngine({ questions: batch(), mode: 'char', unlimited: true,
+    questionSource: batch, generation: { mode: 'char', count: 2, charTier: '1' },
+    hintDelayMs: 0, revealDelayMs: 0 });
+  eng.start();
+  eng.pressKey('x' === eng.currentTarget().keys[0].toLowerCase() ? 'z' : 'x');
+  eng.requestHint('reveal');
+  for (let i = 0; i < 25; i++) {
+    const t = eng.currentTarget();
+    for (const key of t.keys) eng.pressKey(key);
+  }
+  ok(eng.state === STATE.RUNNING && eng.summary().doneQuestions === 25, '完成多批后继续运行并累计题数');
+  ok(eng.questions.length === 2 && eng.questionOffset === 24 && eng._erroredChars.size <= 2,
+    '只保留当前批次及标记，不无限追加题目');
+  ok(eng.stats.totalChars === 25 && eng.stats.wrongChars === 1 && eng.stats.hintedChars === 1,
+    '换批后不复用错误和提示标记，累计统计正确');
+  ok(eng.visibleStats().progress.includes('25') && eng.visibleStats().progress.includes('∞'), '不限量进度显示累计数');
+  eng.pressKey(eng.currentTarget().keys[0]);
+  eng.pause();
+  const saved = eng.exportResume(); eng.destroy();
+  const restored = PracticeEngine.restore(saved, batch);
+  ok(restored.questionOffset === 24 && restored.keyIndex === 1 && restored.unlimited,
+    '恢复累计题号、不限量模式和当前半个音节');
+  restored.start();
+  restored.pressKey(restored.currentTarget().keys[1]);
+  ok(restored.summary().doneQuestions === 26 && restored.state === STATE.RUNNING,
+    '恢复后跨批次仍自动续题');
+  const summary = restored.finish('user');
+  ok(summary.doneQuestions === 26 && !summary.completed && summary.questionCount === 0,
+    '主动结束保留实际完成量，不把一批题数当成总题数');
+  restored.destroy();
+  const empty = new PracticeEngine({ questions: batch(), unlimited: true, questionSource: () => [] });
+  empty.start();
+  for (let i = 0; i < 2; i++) for (const key of empty.currentTarget().keys) empty.pressKey(key);
+  ok(empty.state === STATE.FINISHED && empty.summary().doneQuestions === 2, '续题源失效时安全结束');
+  empty.destroy();
+  const timed = new PracticeEngine({ questions: batch(), unlimited: true, questionSource: batch,
+    durationSec: 1, hintEnabled: false });
+  let reason;
+  timed.on('finish', s => { reason = s.reason; }); timed.start();
+  timed._lastTickAt -= 1500;
+  await new Promise(resolve => setTimeout(resolve, 280));
+  ok(timed.state === STATE.FINISHED && reason === 'timeup', '不限量仍受倒计时限制');
+  timed.destroy();
+}
+
 console.log('\n' + (fail === 0 ? '✅ 引擎全部自检通过' : `❌ 引擎共 ${fail} 项未通过`));
 process.exit(fail === 0 ? 0 : 1);

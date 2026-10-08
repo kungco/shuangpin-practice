@@ -7,11 +7,12 @@
  *   3. 短文段落（含标点）
  *   4. 声母表 / 韵母表 / 合法音节表
  *
- * 数据规模刻意保持精简（1107 字 / 299 词 / 45 段短文），
- * 既保证练习内容覆盖高频用字，又让整个应用保持「单文件可离线」。
+ * 内置静态字词及原创短文，应用运行时不需要依赖或网络。
  * 其中第 7 组字表专门用于补齐词组语料——确保词组里出现的每个字
  * 都能在单字模式下单独练到。
  */
+
+import { EXTRA_CHARS, EXTRA_PHRASES, EXTRA_PASSAGES } from './practice-extra.js';
 
 /* ============================================================
    一、单字拼音表
@@ -199,6 +200,9 @@ export const CHARS_TIER7 = {
   "庭": "ting", "鼓": "gu", "松": "song", "温": "wen", "仔": "zi", "营": "ying", "夺": "duo", "换": "huan"
 };
 
+// 扩充语料所需字收入第七档，不改变前六档的学习范围。
+Object.assign(CHARS_TIER7, EXTRA_CHARS);
+
 /* 合并后的全量单字表 */
 export const ALL_CHARS = Object.assign({}, CHARS_TIER1, CHARS_TIER2, CHARS_TIER3, CHARS_TIER4, CHARS_TIER5, CHARS_TIER6, CHARS_TIER7);
 
@@ -220,6 +224,7 @@ export const CHAR_TIERS = [
    ============================================================ */
 
 export const PHRASES = [
+  ...EXTRA_PHRASES,
   // ---- 双字常用词（难度低） ----
   { w: "工作", p: ["gong", "zuo"] }, { w: "时间", p: ["shi", "jian"] },
   { w: "问题", p: ["wen", "ti"] },   { w: "开始", p: ["kai", "shi"] },
@@ -486,6 +491,7 @@ export const PHRASES = [
    ============================================================ */
 
 export const PASSAGES = [
+  ...EXTRA_PASSAGES,
   {
     t: "双拼是一种汉字输入方法，它把每个音节拆成声母和韵母两部分，分别对应键盘上的两个键。相比全拼，双拼的按键次数更少，长期使用可以明显提高打字速度。",
     d: 1

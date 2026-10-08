@@ -23,7 +23,7 @@
  *   把声母、韵母单独抽出来问，诊断粒度立刻从「音节」细到「成分」，
  *   错在哪一半一目了然。
  *
- * 题库规模（见 data/pinyin.js）：1107 单字（7 档） / 299 词组 / 45 短文，
+ * 题库规模（见 data/pinyin.js）：1787 单字（7 档） / 2247 词组 / 100 短文，
  * 合计 1451 个可出题项，另加键位图、声母/韵母专项、音节拆分四个无限题库。
  *
  * 每道题的统一结构（Question）：
@@ -226,19 +226,24 @@ function makeKeymapQuestion() {
 /**
  * L2：拆分训练 —— 单音节，按完整编码
  */
+// 先随机抽取尚未出过的候选；候选耗尽后才开始下一轮。
+// used 可跨批次复用，并以近期实际见过的内容初始化。
+function pickUnused(pool, used, key = x => x) {
+  let available = pool.filter(x => !used.has(key(x)));
+  if (!available.length) {
+    for (const x of pool) used.delete(key(x));
+    available = pool.filter(x => key(x) !== used.last);
+    if (!available.length) available = pool;
+  }
+  const pick = available[Math.floor(Math.random() * available.length)];
+  if (pick !== undefined) { used.add(key(pick)); used.last = key(pick); }
+  return pick;
+}
+
 function makeSplitQuestion(usedPinyin) {
   // 从常用字中抽音节，避免重复
-  const pool = Object.values(CHARS_TIER1).concat(Object.values(CHARS_TIER2));
-  let tries = 0;
-  let py = '';
-  while (tries < 40) {
-    py = pool[Math.floor(Math.random() * pool.length)];
-    if (!usedPinyin.has(py) && splitSyllable(py).length) break;
-    tries++;
-  }
-  if (!py || !splitSyllable(py).length) py = 'zhang';
-
-  usedPinyin.add(py);
+  const pool = [...new Set(Object.values(CHARS_TIER1).concat(Object.values(CHARS_TIER2)))].filter(py => splitSyllable(py).length);
+  const py = pickUnused(pool, usedPinyin) || 'zhang';
   return buildSyllableQuestion(py, 2);
 }
 
@@ -275,32 +280,13 @@ function makePartQuestion(part, usedPinyin) {
   const wantSheng = part !== 'yun';
 
   // 优先从高频字里抽，保证练习的是真正会遇到的音节
-  const pool = Object.values(CHARS_TIER1).concat(Object.values(CHARS_TIER2));
-  let py = '';
-  let picked = null;
-
-  for (let i = 0; i < 60; i++) {
-    const cand = pool[Math.floor(Math.random() * pool.length)];
-    if (!cand || usedPinyin.has(`${part}:${cand}`)) continue;
-    const sp = primarySplit(cand);
-    if (!sp) continue;
-    // 零声母音节没有独立声母键，练「只听声母」时应跳过
-    if (wantSheng && sp.zero) continue;
-    picked = sp;
-    py = cand;
-    break;
-  }
-
-  // 极端兜底：字表里挑不到（不该发生）时用手写样例
-  if (!picked || !py) {
-    py = wantSheng ? 'zhang' : 'zhuang';
-    picked = primarySplit(py);
-  }
-  if (!picked) {
-    return makeFallbackCharQuestion();
-  }
-
-  usedPinyin.add(`${part}:${py}`);
+  const pool = [...new Set(Object.values(CHARS_TIER1).concat(Object.values(CHARS_TIER2)))].filter(py => {
+    const sp = primarySplit(py);
+    return sp && (!wantSheng || !sp.zero);
+  });
+  const py = pickUnused(pool, usedPinyin, py => `${part}:${py}`);
+  const picked = primarySplit(py);
+  if (!picked) return makeFallbackCharQuestion();
 
   const stepIndex = wantSheng ? 0 : (picked.zero ? 1 : 1);
   const step = picked.steps[stepIndex] || picked.steps[0] || {};
@@ -337,15 +323,7 @@ function makeCharQuestion(tier, usedSet) {
   if (!entries.length) entries = Object.entries(ALL_CHARS).filter(([, py]) => splitSyllable(py).length);
   if (!entries.length) return makeFallbackCharQuestion();
 
-  // 尽量避开最近出过的字
-  let pick = null;
-  for (let i = 0; i < 30; i++) {
-    const cand = entries[Math.floor(Math.random() * entries.length)];
-    if (!usedSet.has(cand[0])) { pick = cand; break; }
-  }
-  if (!pick) pick = entries[Math.floor(Math.random() * entries.length)];
-
-  usedSet.add(pick[0]);
+  const pick = pickUnused(entries, usedSet, x => x[0]);
   return buildWordQuestion(pick[0], [pick[1]], 3, { tierName: tierName(tier) });
 }
 
@@ -383,13 +361,7 @@ function makePhraseQuestion(usedSet) {
     p.p.every(py => splitSyllable(py).length));
   if (!pool.length) return makeFallbackCharQuestion();
 
-  let pick = null;
-  for (let i = 0; i < 30; i++) {
-    const cand = pool[Math.floor(Math.random() * pool.length)];
-    if (!usedSet.has(cand.w)) { pick = cand; break; }
-  }
-  if (!pick) pick = pool[Math.floor(Math.random() * pool.length)];
-  usedSet.add(pick.w);
+  const pick = pickUnused(pool, usedSet, x => x.w);
 
   return buildWordQuestion(pick.w, pick.p, 4);
 }
@@ -401,21 +373,20 @@ function makePhraseQuestion(usedSet) {
  */
 function makePassageQuestion(diff, usedSet) {
   let pool = PASSAGES.filter(p => !diff || p.d <= diff);
+  // 简单短文已练完时，引入尚未见过的较难段落，再考虑重复。
+  if (pool.length && pool.every(p => usedSet.has(p.t))) {
+    const unseen = PASSAGES.filter(p => !usedSet.has(p.t));
+    if (unseen.length) pool = unseen;
+  }
   if (!pool.length) pool = PASSAGES.slice();
   if (!pool.length) {
     // 兜底：用高频词组拼一段
     return buildWordQuestion('双拼练习', ['shuang', 'pin', 'lian', 'xi'], 5);
   }
-  let pick = null;
-  for (let i = 0; i < 20; i++) {
-    const cand = pool[Math.floor(Math.random() * pool.length)];
-    if (!usedSet.has(cand.t)) { pick = cand; break; }
-  }
-  if (!pick) pick = pool[Math.floor(Math.random() * pool.length)];
-  usedSet.add(pick.t);
+  const pick = pickUnused(pool, usedSet, x => x.t);
 
   const text = pick.t;
-  const raw = annotatePassage(text);
+  const raw = annotatePassage(text, pick.p);
   return {
     id: nextId(),
     level: 5,
@@ -485,14 +456,15 @@ function makeExamQuestion(i, target, ctx) {
  * 为短文逐字标注：标点 / 拼音 / 音节拆分
  * 未收录拼音的字标记为 unknown，练习时会被自动跳过而不会导致卡死。
  */
-export function annotatePassage(text) {
+export function annotatePassage(text, vettedReadings = null) {
   const arr = Array.from(String(text || ''));
   const readings = tokenizeWithPinyin(text).flatMap(block => block.chars);
   return arr.map((ch, i) => {
     if (isPunct(ch)) {
       return { ch, pinyin: '', syl: null, punct: true, unknown: false };
     }
-    const py = readings[i] ? readings[i].pinyin : '';
+    const py = Array.isArray(vettedReadings) && vettedReadings.length === arr.length
+      ? vettedReadings[i] : (readings[i] ? readings[i].pinyin : '');
     if (!py || !splitSyllable(py).length) {
       // 未收录或无法拆分：标记为 unknown，引擎会跳过
       return { ch, pinyin: py, syl: null, punct: false, unknown: true };
@@ -530,7 +502,7 @@ export { ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS };
  * @param {object} opts
  *   - mode:      'keymap' | 'sheng' | 'yun' | 'split' | 'char' | 'phrase' | 'passage'
  *   - tier:      1–7（仅 char 模式有效，表示起始字表分层）
- *   - count:     题目数量（0 = 不限，默认 20）
+ *   - count:     当前批次题数（0 时返回 20 题；不限量由引擎持续获取批次）
  *   - adaptive:  是否启用自适应难度（根据正确率升降）
  * @returns {Array<Question>}
  */
@@ -538,12 +510,14 @@ export function generateQuestions(opts = {}) {
   const mode = opts.mode || 'char';
   const count = Math.max(0, Number(opts.count) || 0);
   const target = count > 0 ? count : 20;
-  const used = new Set();
-  const usedPinyin = new Set();
+  const ctx = opts.context || {};
+  const recent = Array.isArray(opts.recent) ? opts.recent : [];
+  const used = ctx.used ||= new Set(recent);
+  const usedPinyin = ctx.usedPinyin ||= new Set(recent);
   const out = [];
 
   // 测验模式的「去重集合」按题型分开，否则三类题会互相挤占候选
-  const examCtx = { usedChar: used, usedPhrase: new Set(), usedPinyin };
+  const examCtx = { usedChar: used, usedPhrase: (ctx.usedPhrase ||= new Set(recent)), usedPinyin };
 
   try {
     for (let i = 0; i < target; i++) {

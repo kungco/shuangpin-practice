@@ -18,6 +18,7 @@ export const KEYS = {
   keyErrors: `${NS}.keyErrors`, // 键维度错误次数（错误热力图用）
   resume: `${NS}.resume`,       // 未完成的练习现场
   device: `${NS}.device`,       // 错题计数的设备来源（不随备份覆盖）
+  recent: `${NS}.recent`,       // 最近实际展示的练习内容
   version: `${NS}.version`
 };
 
@@ -336,12 +337,14 @@ export function loadSettings() {
       }
     }
   }
+  merged.count = normalizeCount(merged.count);
   return merged;
 }
 
 export function saveSettings(settings) {
   const safe = Object.assign({}, DEFAULT_SETTINGS);
   if (settings && typeof settings === 'object') Object.assign(safe, settings);
+  safe.count = normalizeCount(safe.count);
   return writeJSON(KEYS.settings, safe);
 }
 
@@ -1015,6 +1018,9 @@ export function saveResume(state) {
     modeName: state.modeName,
     questions: state.questions,
     index: state.index,
+    questionOffset: state.questionOffset,
+    unlimited: state.unlimited,
+    generation: state.generation,
     charIndex: state.charIndex,
     keyIndex: state.keyIndex,
     typed: state.typed,
@@ -1298,4 +1304,25 @@ export function storageUsage() {
     }
   } catch (_) {}
   return bytes;
+}
+
+/** 题量输入、导入与旧设置共用边界，0 表示不限。 */
+export function normalizeCount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(5000, Math.floor(n))) : 20;
+}
+
+export function loadRecent(mode) {
+  const data = readJSON(KEYS.recent, {});
+  const list = data && data[mode];
+  return Array.isArray(list) ? list.filter(x => typeof x === 'string').slice(-200) : [];
+}
+
+export function recordRecent(mode, text) {
+  if (!text || typeof text !== 'string') return;
+  const raw = readJSON(KEYS.recent, {});
+  const data = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const limit = mode === 'passage' ? 30 : mode === 'phrase' ? 200 : 80;
+  data[mode] = [...loadRecent(mode).filter(x => x !== text), text].slice(-limit);
+  writeJSON(KEYS.recent, data);
 }

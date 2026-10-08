@@ -57,8 +57,8 @@ console.log(`  词组 ${PHRASES.length} 个，全部可拆分`);
 
 console.log('【2b】题量下限与唯一性');
 ok(Object.keys(ALL_CHARS).length >= 900, `单字应 ≥900，实际 ${Object.keys(ALL_CHARS).length}`);
-ok(PHRASES.length >= 250, `词组应 ≥250，实际 ${PHRASES.length}`);
-ok(PASSAGES.length >= 30, `短文应 ≥30，实际 ${PASSAGES.length}`);
+ok(PHRASES.length >= 1000, `词组应 ≥1000，实际 ${PHRASES.length}`);
+ok(PASSAGES.length >= 100, `短文应 ≥100，实际 ${PASSAGES.length}`);
 console.log(`  单字 ${Object.keys(ALL_CHARS).length} / 词组 ${PHRASES.length} / 短文 ${PASSAGES.length}`);
 
 console.log('【2c】词组语料覆盖闭合性（词组里的每个字都要能单独练到）');
@@ -526,6 +526,42 @@ ok(emptyExam.score === 0 && !emptyExam.valid && emptyExam.badge === '',
 const shortExam = scoreExam({ totalChars: 3, correctChars: 3, independentAccuracy: 100,
   speed: 120, doneQuestions: 3, questionCount: 3 });
 ok(!shortExam.valid && shortExam.badge === '', '小样本即使全部答对也不评等级');
+
+console.log('【新增】候选耗尽、近期避重与语境读音');
+{
+  // 用最不利随机数检验：不能靠多次随机重试碰巧避免重复。
+  const random = Math.random;
+  Math.random = () => 0;
+  try {
+    const phrases = generateQuestions({ mode: 'phrase', count: 500 });
+    ok(new Set(phrases.map(q => q.text)).size === 500, '500 个词组候选未耗尽时不重复');
+    const passages = generateQuestions({ mode: 'passage', count: PASSAGES.length });
+    ok(new Set(passages.map(q => q.text)).size === PASSAGES.length, '100 段短文覆盖全库后才重复');
+    const context = {};
+    const recent = PHRASES.slice(0, 100).map(p => p.w);
+    const first = generateQuestions({ mode: 'phrase', count: 20, context, recent });
+    const second = generateQuestions({ mode: 'phrase', count: 20, context, recent });
+    ok([...first, ...second].every(q => !recent.includes(q.text)), '续题优先避开近期已见词组');
+    ok(new Set([...first, ...second].map(q => q.text)).size === 40, '去重集合跨批次保留');
+    const tier = CHAR_TIERS[0];
+    const n = Object.keys(tier.data).length;
+    const chars = generateQuestions({ mode: 'char', count: n + 2, charTier: '1' });
+    ok(new Set(chars.slice(0, n).map(q => q.text)).size === n && chars.length === n + 2,
+      '固定档位完整覆盖后仍可继续出题');
+    const splits = generateQuestions({ mode: 'split', count: 500 });
+    const poolSize = new Set([...Object.values(CHAR_TIERS[0].data), ...Object.values(CHAR_TIERS[1].data)]).size;
+    ok(new Set(splits.slice(0, poolSize).map(q => q.text)).size === poolSize, '拆分音节用完前不重复');
+  } finally { Math.random = random; }
+  for (const p of PASSAGES) {
+    if (p.p) ok(p.p.length === Array.from(p.t).length, '逐字短文读音与标点对齐');
+    ok(annotatePassage(p.t, p.p).every(c => c.punct || (c.pinyin && c.syl)), '全部短文可逐字输入');
+  }
+  for (const [word, reading] of Object.entries({ 重做:'chong zuo', 银行:'yin hang', 行走:'xing zou',
+    长大:'zhang da', 调查:'diao cha', 调整:'tiao zheng', 薄饼:'bao bing', 角色:'jue se',
+    便宜:'pian yi', 睡觉:'shui jiao', 着凉:'zhao liang', 盛饭:'cheng fan', 择菜:'zhai cai' })) {
+    ok(PHRASES.find(p => p.w === word)?.p.join(' ') === reading, `${word} 使用语境读音`);
+  }
+}
 
 console.log('\n' + (fail === 0
   ? '✅ 全部自检通过'

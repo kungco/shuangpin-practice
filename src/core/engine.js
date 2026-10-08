@@ -103,6 +103,10 @@ export class PracticeEngine {
       throw new Error(' PracticeEngine 需要至少一道题目');
     }
 
+    this.questionSource = typeof cfg.questionSource === 'function' ? cfg.questionSource : null;
+    this.unlimited = cfg.unlimited === true && cfg.examMode !== true;
+    this.questionOffset = Math.max(0, Math.floor(Number(cfg.questionOffset) || 0));
+    this.generation = cfg.generation || null;
     this.mode = String(cfg.mode || 'char');
     this.durationSec = Math.max(0, Number(cfg.durationSec) || 0);
     this.strict = cfg.strict !== false;
@@ -557,6 +561,8 @@ export class PracticeEngine {
       state: this.state,
       index: this.index,
       total: this.questions.length,
+      questionOffset: this.questionOffset,
+      unlimited: this.unlimited,
       charIndex: this.charIndex,
       keyIndex: this.keyIndex,
       typed: this.typed,
@@ -609,7 +615,7 @@ export class PracticeEngine {
       accuracy: Math.round(Math.max(0, Math.min(100, accuracy)) * 10) / 10,
       combo: s.combo,
       maxCombo: s.maxCombo,
-      progress: `${Math.min(this.index + 1, this.questions.length)}/${this.questions.length}`
+      progress: this.unlimited ? `已完成 ${this.questionOffset + this.index} 题 · ∞` : `${Math.min(this.index + 1, this.questions.length)}/${this.questions.length}`
     };
   }
 
@@ -919,6 +925,21 @@ export class PracticeEngine {
 
     this.index += 1;
 
+    if (this.index >= this.questions.length && this.unlimited) {
+      let next = null;
+      try { next = this.questionSource?.(); } catch (err) { console.error('[engine] 续题失败', err); }
+      if (Array.isArray(next) && next.length) {
+        this.questionOffset += this.questions.length;
+        this.questions = next.slice();
+        this.index = 0;
+        // 统计已累计；释放上一批的位置标记，防止编号重用污染统计。
+        this._erroredChars.clear();
+        this._hintedChars.clear();
+      } else {
+        this.finish('source-empty');
+        return;
+      }
+    }
     if (this.index >= this.questions.length) {
       this.emit('question', { index: this.index, done: true, reason });
       this.finish('completed');
@@ -1075,11 +1096,12 @@ export class PracticeEngine {
       independentAccuracy: s.independentAccuracy,
       maxCombo: this.stats.maxCombo,
       skipped: this._skippedCount || 0,
-      questionCount: this.questions.length,
-      doneQuestions: Math.min(this.index, this.questions.length),
+      questionCount: this.unlimited ? 0 : this.questions.length,
+      doneQuestions: this.questionOffset + Math.min(this.index, this.questions.length),
       perCharErrors: Object.assign({}, this.stats.perCharErrors),
       keyErrors: Object.assign({}, this.stats.keyErrors || {}),
-      completed: this.index >= this.questions.length,
+      completed: !this.unlimited && this.index >= this.questions.length,
+      unlimited: this.unlimited,
       examMode: this.examMode,
       unfinishedQuestion: q ? { index: this.index, charIndex: this.charIndex } : null
     };
@@ -1089,6 +1111,9 @@ export class PracticeEngine {
   exportResume() {
     return {
       createdAt: Date.now(),
+      questionOffset: this.questionOffset,
+      unlimited: this.unlimited,
+      generation: this.generation,
       mode: this.mode,
       modeName: this.modeName,
       questions: this.questions,
@@ -1125,11 +1150,15 @@ export class PracticeEngine {
   }
 
   /** 从续练现场恢复 */
-  static restore(saved) {
+  static restore(saved, questionSource = null) {
     if (!saved || !Array.isArray(saved.questions) || !saved.questions.length) return null;
     try {
       const eng = new PracticeEngine({
         questions: saved.questions,
+        unlimited: saved.unlimited === true,
+        questionOffset: saved.questionOffset,
+        generation: saved.generation,
+        questionSource,
         mode: saved.mode,
         modeName: saved.modeName,
         durationSec: saved.settings ? saved.settings.durationSec : 0,
