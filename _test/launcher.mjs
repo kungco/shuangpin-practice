@@ -203,7 +203,7 @@ console.log('\n【G】模块类型声明（src/ 必须在 ESM 语境下被 Node 
 
 console.log('\n【I】工作流必须真的能在三版本上跑通');
 {
-  /* README 与 _test/README.md 都在讲「Node 18/20/22 各跑一遍七套自检」，
+  /* README 与 _test/README.md 都在讲「Node 18/20/22 各跑一遍自检」，
      但 .github/workflows/ 曾经根本不存在 —— 文档在描述一件没发生的事。
      文档承诺的东西要么兑现，要么删掉；这里选择兑现。 */
   const wfPath = resolve(ROOT, '.github/workflows/tests.yml');

@@ -280,11 +280,22 @@ export class PracticeEngine {
     return this;
   }
 
-  emit(event, payload) {
+  /**
+   * 派发事件。
+   * @param {string} event
+   * @param {*} payload
+   * @param {...*} extra 透传给监听器的附加参数。
+   *   目前只用于 change：第三个参数是重绘粒度（'key' | 'char' | 'question'），
+   *   让 UI 能按粒度走增量路径。用 rest 而不是固定第三参，
+   *   是为了将来加别的元信息时不必再改签名、也不必改所有监听器。
+   *   （曾漏掉这一层 —— emit 只声明了两个形参，引擎里标好的粒度
+   *   走到这里就被静默丢掉了，UI 永远收到 undefined。）
+   */
+  emit(event, payload, ...extra) {
     const list = this._handlers[String(event)];
     if (!list || !list.length) return;
     for (const h of list.slice()) {
-      try { h(payload, this); } catch (err) { console.error('[engine] 事件处理异常', event, err); }
+      try { h(payload, ...extra); } catch (err) { console.error('[engine] 事件处理异常', event, err); }
     }
   }
 
@@ -302,7 +313,7 @@ export class PracticeEngine {
     this._resetHintTimer();
     this._armKeyWait();
     this.emit('state', { state: this.state });
-    this.emit('change', this.snapshot());
+    this.emit('change', this.snapshot(), 'question');
     return this;
   }
 
@@ -471,7 +482,8 @@ export class PracticeEngine {
 
     this.emit('hint', payload);
     if (want === 'reveal') this.emit('reveal', payload);
-    this.emit('change', this.snapshot());
+    // 提示只影响高亮/键位，不改变字符集 → 标为 'key'
+    this.emit('change', this.snapshot(), 'key');
   }
 
   /** 当前作答目标对应的「字符标记」（与 _erroredChars 同一套键） */
@@ -530,7 +542,8 @@ export class PracticeEngine {
     this._taintKeyWait();
     this.emit('hint', payload);
     if (want === 'reveal') this.emit('reveal', payload);
-    this.emit('change', this.snapshot());
+    // 同上：手动求助也是只改高亮
+    this.emit('change', this.snapshot(), 'key');
     return true;
   }
 
@@ -907,7 +920,10 @@ export class PracticeEngine {
     this.keyIndex += 1;
     // 期望键变了，重新开一个测量窗口（此时 pos ≥ 1，属「纯运动时间」）
     this._armKeyWait();
-    this.emit('change', this.snapshot());
+    // 同一个音节里推进到下一键：字符集、题干都不变，只是高亮位移。
+    // 这是打字场景里**最频繁**的一次 change（8–15 次/秒），标为 'key'
+    // 让 UI 走增量路径，不重建题干。
+    this.emit('change', this.snapshot(), 'key');
     return {
       handled: true,
       correct: true,
@@ -1007,7 +1023,10 @@ export class PracticeEngine {
       this._countSkippedCharAsWrong(target);
       this._advanceChar();
     }
-    this.emit('change', this.snapshot());
+    /* 粒度看有没有真的走字：严格模式停在原处（字符集不变 → 'key'），
+       非严格模式上面已 _advanceChar()（字符集变了 → 'char'）。
+       标错会导致 UI 少刷一次题干，眼睛看到的字和实际要求对不上。 */
+    this.emit('change', this.snapshot(), skipOnWrong ? 'char' : 'key');
     return { handled: true, correct: false, advanced: !!skipOnWrong, feedback };
   }
 
@@ -1134,7 +1153,7 @@ export class PracticeEngine {
         return;
       }
       this._armKeyWait();
-      this.emit('change', this.snapshot());
+      this.emit('change', this.snapshot(), 'char');
       return;
     }
 
@@ -1149,7 +1168,7 @@ export class PracticeEngine {
       this._advanceQuestion('question-done');
     } else {
       this._armKeyWait();
-      this.emit('change', this.snapshot());
+      this.emit('change', this.snapshot(), 'char');
     }
   }
 
@@ -1247,7 +1266,7 @@ export class PracticeEngine {
     // 提前 return 的两条路径（续题源枯竭 / 题量走完）由 finish() 里的
     // _disarmKeyWait() 兜底，state 已不是 RUNNING，arm 本身也会自动让开。
     this._armKeyWait();
-    this.emit('change', this.snapshot());
+    this.emit('change', this.snapshot(), 'question');
   }
 
   /* ==========================================================

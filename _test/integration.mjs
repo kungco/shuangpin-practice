@@ -2672,6 +2672,119 @@ console.log('\n【12b】DOM 缓存：命中且不返回陈旧引用');
   }
 }
 
+/* ------------------------------------------------------------------
+   【12c】change 事件的「重绘粒度」契约
+
+   背景：打字场景里 change 是最频繁的事件（8–15 次/秒），
+   全量重绘每键都会重写 #prompt 的 HTML。于是引擎在 change 上多带
+   一个粒度参数，UI 据此走增量路径：
+     'key'      音节内推进 —— 题干不变，不得重写 #prompt
+     'char'     换字       —— 允许更新题干
+     'question' 换题       —— 允许全量重绘
+
+   为什么要在这里锁：这条契约横跨 engine 与 main 两个文件，
+   而且**极易被静默破坏** ——
+     · engine.emit 若只声明两个形参，第三个参数会被直接丢掉
+       （本项目真踩过：粒度标好了，走到 emit 就蒸发，UI 永远收到
+        undefined，于是静默退回全量重绘 —— 功能没坏，优化白做）；
+     · renderSession 若把未知值当 'key' 处理，会漏画整个题干。
+   两种情况都不会报错，只会「看起来一切正常但白干」或「界面少一块」。
+   ------------------------------------------------------------------ */
+console.log('\n【12c】change 重绘粒度：key 不重写题干，char/question 要更新');
+{
+  const navPractice = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
+  if (navPractice) { fire(navPractice, 'click'); await new Promise(r => setTimeout(r, 20)); }
+
+  // 干净起一局（词组模式：保证有 2 键音节，才有「音节内推进」）
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  q('#overlay').hidden = true;
+  q('#sessionPanel').hidden = true;
+  q('#setupPanel').hidden = false;
+  const phraseCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'phrase');
+  if (phraseCard) fire(phraseCard, 'click');
+  fire(q('#btnStart'), 'click');
+  await new Promise(r => setTimeout(r, 20));
+
+  const engG = app.engine;
+  ok(!!engG, '（前置）练习已启动');
+
+  /* ① 直接验 emit 的透传：这是最根本的一条 —— 参数丢了，后面全白搭。
+     用独立引擎发一次事件，检查监听器收到的第三个参数。
+     （引擎要求至少一道题，借当前这局的题面用一下，只为构造实例。） */
+  const probeQs = engG ? engG.questions.slice(0, 1) : [];
+  const probe = probeQs.length
+    ? new engineMod.PracticeEngine({ questions: probeQs, mode: 'phrase', modeName: '词组' })
+    : null;
+  if (probe) {
+    const seen = [];
+    probe.on('change', (snap, level) => { seen.push(level); });
+    probe.emit('change', { fake: true }, 'key');
+    probe.emit('change', { fake: true }, 'char');
+    probe.emit('change', { fake: true }, undefined);
+    ok(seen.length === 3, `监听器收到全部 3 次 change（实际 ${seen.length} 次）`);
+    ok(seen[0] === 'key' && seen[1] === 'char',
+      `第三个参数被透传（收到 「${seen[0]}」「${seen[1]}」）—— emit 漏参这个坑会在这里变红`);
+    ok(seen[2] === undefined, '不传粒度时监听器收到 undefined（由 UI 兜底成全量）');
+    probe.destroy();
+  } else {
+    ok(false, '未能构造探针引擎（拿不到题面）');
+  }
+
+  /* ② 真实按键：走到「音节内推进」那一步，题干不得被重写。
+     判据用**节点身份**而不是 innerHTML 文本 —— 文本可能恰好相同，
+     那就测不出「重写但内容没变」这种浪费。 */
+  if (engG) {
+    let guard = 0;
+    // 推进到需要 2 键的目标
+    while (guard++ < 400) {
+      const t = engG.currentTarget();
+      if (!t || !t.keys || !t.keys.length) break;
+      if (t.keys.length >= 2 && t.pos === 0) break;
+      engG.pressKey(String(t.keys[t.pos] ?? t.keys[0]).toLowerCase());
+    }
+    const tgt = engG.currentTarget();
+    ok(!!tgt && tgt.keys && tgt.keys.length >= 2 && tgt.pos === 0,
+      `（前置）已停在 2 键音节的首键（${tgt ? (tgt.char || '') + ' ' + tgt.keys.join('+') : '无'}）`);
+
+    if (tgt && tgt.keys && tgt.keys.length >= 2) {
+      /* innerHTML 赋值必然重建子节点，所以只要**当前**那个字符 span
+         还是同一个对象，就证明没有走「重建题干」这条路。 */
+      const promptEl = q('#prompt');
+      const beforeInner = promptEl.innerHTML;
+      const beforeChild = promptEl.firstElementChild;
+
+      // 走真实的按键链路（fireKey 会经过 onKeyDown → handleKeyInput → pressKey）
+      const key1 = String(tgt.keys[0]).toLowerCase();
+      fireKey(key1);
+      await new Promise(r => setTimeout(r, 10));
+
+      const afterChild = q('#prompt').firstElementChild;
+      ok(q('#prompt').innerHTML === beforeInner,
+        '音节内推进：题干 HTML 逐字未变');
+      ok(afterChild === beforeChild && !!beforeChild,
+        '音节内推进：题干子节点仍是同一个对象（证明没有重建，而非「重建后内容恰好相同」）');
+
+      /* ③ 反向护栏：完成这个音节后题干**必须**更新。
+         只测 ②会纵容「干脆永不更新题干」这种过度优化。 */
+      const t2 = engG.currentTarget();
+      if (t2 && t2.keys && t2.keys.length >= 2) {
+        const lastKey = String(t2.keys[t2.keys.length - 1]).toLowerCase();
+        const beforeDone = q('#prompt').innerHTML;
+        const beforeDoneChild = q('#prompt').firstElementChild;
+        fireKey(lastKey);
+        await new Promise(r => setTimeout(r, 10));
+        const moved = q('#prompt').innerHTML !== beforeDone
+          || q('#prompt').firstElementChild !== beforeDoneChild;
+        ok(moved, '完成音节后题干确实被更新了（没有「永不重绘」的过度优化）');
+      }
+    }
+    engG.destroy();
+    app.engine = null;
+    q('#sessionPanel').hidden = true;
+    q('#setupPanel').hidden = false;
+  }
+}
+
 /* ---------- 收尾 ---------- */
 console.log('\n【13】最终检查');
 ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);

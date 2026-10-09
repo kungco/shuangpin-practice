@@ -1,7 +1,10 @@
 name: tests
 
-# README 与 _test/README.md 里描述了「Node 18 / 20 / 22 各跑一遍七套自检」，
+# README 与 _test/README.md 里描述了「Node 18 / 20 / 22 各跑一遍自检」，
 # 但这个文件之前并不存在 —— 文档在讲一件没有发生的事。这里补上。
+# 注意：别在注释里写死套件数量。早先这里和 README、launcher.mjs 的注释里
+# 都写着「七套」，实际只有六套 —— 加一套（如 bench.mjs）就得同时改好几处，
+# 而且很容易漏。现在数量只在 _test/package.json 的 test 链里体现。
 on:
   push:
     branches: [main]
@@ -32,7 +35,7 @@ jobs:
         working-directory: _test
         run: npm ci
 
-      - name: Run all seven self-check suites
+      - name: Run all self-check suites
         working-directory: _test
         run: npm test
 

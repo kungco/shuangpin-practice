@@ -1,6 +1,6 @@
 # 自检脚本
 
-七个互相独立的测试套件，**只用于开发期自检，不影响应用运行**。
+六个互相独立的测试套件 + 一份性能基准，**只用于开发期自检，不影响应用运行**。
 （应用本身零依赖，但**不能直接双击 `index.html`** —— 浏览器禁止在 `file://`
 协议下加载 ES 模块，必须经由本地 HTTP 服务打开。见文末说明。）
 
@@ -12,7 +12,23 @@
 | `a11y.mjs` | **减少动态效果**、**快捷键规范化与冲突校验**、**物理键位映射（Dvorak / AZERTY）**、**屏幕阅读器播报**、**WebAudio 音效合成与连错降音** | 无 |
 | `launcher.mjs` | **启动脚本静态自检**：编码前提（BOM / CRLF / chcp 顺序）、引用的文件是否存在、标签配对、三级回退链、与服务端脚本的接口一致性、危险写法扫描、**模块类型声明**、**CI 工作流确实存在** | 无 |
 | `training.mjs` | 提示撤除、滑动窗口与决策节奏续练、自适应档位、键位覆盖与强化上限、人工注音长度告警、词组筛选、续练、加权统计与降级、曲线均值口径、日报回落、计时同源、**测验成绩曲线只取有效分数**、500 / 5,000 题性能 | 无 |
-| `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**、**辅助功能接线层**、**提示依赖度可见性**、**存储降级时的界面告知**、**词组易错归组**、**完成音效**、**测验成绩曲线**、**键位图开关**、**热力图跟随模式筛选**） | `linkedom` |
+| `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**、**辅助功能接线层**、**提示依赖度可见性**、**存储降级时的界面告知**、**词组易错归组**、**完成音效**、**测验成绩曲线**、**键位图开关**、**热力图跟随模式筛选**、**change 重绘粒度契约**） | `linkedom` |
+| `bench.mjs` | **性能基准（护栏，非功能测试）**：统计「一次按键引发的 DOM 写入量」，钉死 `renderSession` 的分级重绘不被改回全量 —— 音节内推进不得重建题干。详见下方说明 | `linkedom` |
+
+> `bench.mjs` 为什么和其他套件长得不一样：它**测的不是对错，而是性能不回退**。
+> 打字场景里 `change` 是最频繁的事件（8–15 次/秒），而 `renderSession` 曾经
+> 每键都重写一遍 `#prompt` 的 HTML。改成分级重绘后必须有个东西拦住
+> 「下次改动又把它变回全量」——否则优化会在某次重构里静默消失。
+> 指标选 **DOM 写入次数**而不是墙钟毫秒：CI 是共享 runner，毫秒抖动大，
+> 写入次数是确定性的结构指标，既是优化目标本身，也不会因机器快慢给出相反结论
+> （毫秒仍会打印，只作参考、不设阈值）。
+>
+> 它守着两条**方向相反**的约束，缺一条都会坏事：
+> - 音节内推进**不得**重建题干（否则优化白做）；
+> - 完成音节**必须**重绘解码区（否则就是把功能砍了冒充快）。
+>
+> 反向验证过：把分级粒度改回「永远全量」，前一条变红；把解码区重绘也跳过，后一条变红。
+
 
 > `storage.mjs` / `a11y.mjs` / `launcher.mjs` 都是「零依赖 + 毫秒级」的套件，
 > 且不引入 linkedom —— 它们测的模块本身不碰 DOM（`announce` 查不到节点会安全返回，
@@ -58,12 +74,12 @@
 
 ## 运行
 
-**推荐（一次装依赖，之后跑全部七套）：**
+**推荐（一次装依赖，之后跑全部六套 + 基准）：**
 
 ```bash
 cd _test
 npm ci            # 按 package-lock.json 精确还原依赖（首次或换环境时执行）
-npm test          # 依次跑 verify → engine → storage → a11y → launcher → training → integration
+npm test          # 依次跑 verify → engine → storage → a11y → launcher → training → integration → bench
 ```
 
 也可以单独跑：
@@ -76,6 +92,7 @@ node _test/a11y.mjs
 node _test/launcher.mjs
 node _test/training.mjs
 node _test/integration.mjs
+node _test/bench.mjs     # 性能基准：每键 DOM 写入量
 ```
 
 > Windows 下若 `node` 不在 PATH，可用 WorkBuddy 内置运行时：
@@ -83,7 +100,7 @@ node _test/integration.mjs
 
 ### 依赖可复现性（为什么要用 `npm ci`）
 
-`integration.mjs` 需要 `linkedom` 来模拟 DOM，其余六套**零依赖**。
+`integration.mjs` 与 `bench.mjs` 需要 `linkedom` 来模拟 DOM，其余六套**零依赖**。
 为了「换个环境/换个人跑结果都一样」，`_test/` 下提交了两个文件：
 
 | 文件 | 作用 |
@@ -99,7 +116,7 @@ node _test/integration.mjs
 ### CI
 
 `.github/workflows/tests.yml` 会在 push / PR 时用 **Node 18 / 20 / 22** 三个版本
-各跑一遍七套测试（`fail-fast: false`，任一版本失败都能看到全部结果）：
+各跑一遍全部测试（`fail-fast: false`，任一版本失败都能看到全部结果）：
 `actions/checkout` → `setup-node` → `cd _test && npm ci` → `npm test`。
 这样「检出目录没有 linkedom、集成测试跑不起来」的情况不会再出现 ——
 依赖由锁文件保证，runner 每次都是干净且一致的。

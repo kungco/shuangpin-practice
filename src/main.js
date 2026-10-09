@@ -98,6 +98,11 @@ function cacheEl(sel) {
   return el;
 }
 
+/* renderSession 的重绘粒度白名单（见该函数注释）。
+   用 Set 而非数组，是为了让「未知值一律降级成全量重绘」这件事
+   在代码上一眼可见 —— 漏画比多画危险得多。 */
+const ARG_LEVELS = new Set(['key', 'char', 'question']);
+
 
 /* ============================================================
    辅助功能（无障碍 / 快捷键 / 音效）
@@ -934,8 +939,16 @@ function bindEngineEvents() {
     }
   });
 
-  eng.on('change', () => {
-    renderSession();
+  /* 分级重绘：change 的第三个参数由引擎给出粒度，见 engine.js 各 emit 点。
+       'key'   —— 同一个音节里推进到下一键：字符集、题干都没变，只是高亮位移。
+                  这是打字场景里最频繁的一次 change（8–15 次/秒），走增量路径，
+                  只更新「已达/当前」两个 class 与下一步提示。
+       'char'  —— 换字（音节打完）：解码块要重建，但整段题干的字符状态虽变，
+                  仍不必走「重建 + 事件重挂」的全量路径。
+       'question' —— 换题：允许全量重绘。
+     不传（旧调用/第三方）时按 'question' 处理，宁可多画也不漏画。 */
+  eng.on('change', (_snap, level) => {
+    renderSession(level || 'question');
   });
 
   eng.on('tick', () => {
@@ -1488,12 +1501,33 @@ function updatePauseButton() {
   btn.textContent = app.engine.state === STATE.PAUSED ? '继续' : '暂停';
 }
 
-function renderSession() {
+/**
+ * 渲染练习舞台。
+ * @param {'key'|'char'|'question'} [arg] 由引擎 change 事件给出的重绘粒度：
+ *   'key'      音节内推进 —— 题干不变，只重画解码区/HUD/键位高亮
+ *   'char'     换字 —— 题干字符状态更新
+ *   'question' 换题/开局 —— 全量重绘
+ *   省略或传入未知值时按 'question' 处理（旧调用点与第三方调用都不会漏画）。
+ */
+function renderSession(arg) {
   const eng = app.engine;
   if (!eng) return;
 
+  /* 分级重绘。
+     引擎给回来的粒度决定「哪些区域重画」：
+       key      —— 同一音节内推进到下一键：字符集与题干都没变，只重画解码区
+                   与迷你键位高亮；连 #prompt / #stageMode / #stageTip 都不碰。
+       char     —— 换字：解码区重画，题干按下面的字符状态更新。
+       question —— 换题/开局：整段重画。
+
+     为什么值得分级：一次 change 会连带 updateHud（6 次 textContent）
+     + updateTimebar + clearHint/clearFeedback，而 'key' 占打字时 change 的
+     绝大多数（一个音节 2 键，第 1 键就是 'key'）。把「重写 #prompt 的 HTML」
+     从这条路径上摘掉，既少一次 DOM 解析，也避免读屏把整句重念一遍。 */
+  const level = ARG_LEVELS.has(arg) ? arg : 'question';
+  const isKeyStep = level === 'key';
+
   const q = eng.currentQuestion();
-  // 这些节点自页面加载起就存在、不会被替换 → 走缓存（每键都要用）
   const prompt = cacheEl('#prompt');
   const decode = cacheEl('#decode');
   const feedback = cacheEl('#feedback');
@@ -1502,10 +1536,15 @@ function renderSession() {
 
   if (!q || !prompt || !decode) return;
 
-  if (stageMode) stageMode.textContent = (q.label || '练习') + (!eng.examMode ? ` · ${TRAINING_LABELS[eng.assistanceLevel()]}` : '') + (eng.adaptive ? ` · 第 ${eng.training.tier} 档` : '');
-  if (stageTip) stageTip.textContent = eng.training.policy === 'progressive' && eng.assistanceLevel() < 2
-    ? '每 10 个作答单元评估一次：正确率达 90% 且反应稳定后减少提示；卡住可按 Tab 求助。'
-    : (LEVEL_MAP[eng.mode] ? LEVEL_MAP[eng.mode].tip : '');
+  /* 舞台标题与副标题只在**换题**时才可能变。
+     它们每键都重写一次纯属浪费，而且对读屏是实打实的噪音
+     （重复播报同一句说明）。 */
+  if (level !== 'key') {
+    if (stageMode) stageMode.textContent = (q.label || '练习') + (!eng.examMode ? ` · ${TRAINING_LABELS[eng.assistanceLevel()]}` : '') + (eng.adaptive ? ` · 第 ${eng.training.tier} 档` : '');
+    if (stageTip) stageTip.textContent = eng.training.policy === 'progressive' && eng.assistanceLevel() < 2
+      ? '每 10 个作答单元评估一次：正确率达 90% 且反应稳定后减少提示；卡住可按 Tab 求助。'
+      : (LEVEL_MAP[eng.mode] ? LEVEL_MAP[eng.mode].tip : '');
+  }
 
   /* 测验模式：在舞台顶部挂一个「无提示」标记。
      用户随时能看见自己处在测验中（而不是以为应用坏了），
@@ -1541,36 +1580,50 @@ function renderSession() {
   // renderHint 会在下面重新画出来，因此不会闪。
   clearHint();
 
-  /* ---- 字形行 ---- */
-  if (q.kind === 'key' || q.kind === 'part' || q.kind === 'syllable') {
-    prompt.className = 'prompt';
-    prompt.innerHTML =
-      `<span style="font-family:var(--mono);color:var(--primary)">${escapeHtml(q.promptText)}</span>` +
-      `<div style="font-size:14px;letter-spacing:0;color:#93a0b4;font-family:var(--sans);margin-top:6px">` +
-      `${escapeHtml(q.promptSub || '')}</div>`;
-  } else {
-    const states = eng.charStates();
-    const isPassage = q.kind === 'passage';
-    prompt.className = 'prompt' + (isPassage ? ' is-passage' : '');
-    prompt.innerHTML = states.map(st => {
-      const cls = ['ch'];
-      if (st.punct) cls.push('ch-punct');
-      else if (st.done) cls.push('is-done');
-      else if (st.current) cls.push('is-current');
-      if (st.unknown) cls.push('is-bad');
-      // 等提示才打对的字：标成 is-hinted，视觉上比 is-done 弱一档。
-      // 标点与未收录的字不算「靠提示」，不该带这个记号。
-      if (st.hinted && !st.punct && !st.unknown) cls.push('is-hinted');
-      let extra = '';
-      if (st.punct) extra = '';
-      else if (st.unknown) extra = ' title="该字未收录拼音，自动跳过"';
-      else if (st.hinted) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)} —— 等提示才打对，不计入独立正确率"`;
-      else if (!eng.examMode && eng.assistanceLevel() < 2) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)}"`;
-      return `<span class="${cls.join(' ')}"${extra}>${escapeHtml(st.ch)}</span>`;
-    }).join('');
+  /* ---- 字形行 ----
+     音节内推进（'key'）时整行文字与高亮都不变，直接跳过重建。
+     注意此时**仍要**清提示态：clearHint() 擦掉的是 #hintBar 与
+     decode 里的 is-hinted* class，与 #prompt 无关，跳过题干不影响它。 */
+  if (!isKeyStep) {
+    if (q.kind === 'key' || q.kind === 'part' || q.kind === 'syllable') {
+      prompt.className = 'prompt';
+      prompt.innerHTML =
+        `<span style="font-family:var(--mono);color:var(--primary)">${escapeHtml(q.promptText)}</span>` +
+        `<div style="font-size:14px;letter-spacing:0;color:#93a0b4;font-family:var(--sans);margin-top:6px">` +
+        `${escapeHtml(q.promptSub || '')}</div>`;
+    } else {
+      const states = eng.charStates();
+      const isPassage = q.kind === 'passage';
+      prompt.className = 'prompt' + (isPassage ? ' is-passage' : '');
+      prompt.innerHTML = states.map(st => {
+        const cls = ['ch'];
+        if (st.punct) cls.push('ch-punct');
+        else if (st.done) cls.push('is-done');
+        else if (st.current) cls.push('is-current');
+        if (st.unknown) cls.push('is-bad');
+        // 等提示才打对的字：标成 is-hinted，视觉上比 is-done 弱一档。
+        // 标点与未收录的字不算「靠提示」，不该带这个记号。
+        if (st.hinted && !st.punct && !st.unknown) cls.push('is-hinted');
+        let extra = '';
+        if (st.punct) extra = '';
+        else if (st.unknown) extra = ' title="该字未收录拼音，自动跳过"';
+        else if (st.hinted) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)} —— 等提示才打对，不计入独立正确率"`;
+        else if (!eng.examMode && eng.assistanceLevel() < 2) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)}"`;
+        return `<span class="${cls.join(' ')}"${extra}>${escapeHtml(st.ch)}</span>`;
+      }).join('');
+    }
   }
 
-  /* ---- 拆分与键位 ---- */
+  /* ---- 拆分与键位 ----
+     分级重绘修掉了 #prompt 这一路，但这里每个键都还在重建 #decode。
+     难点是两条调用方提供的逃生口都在 renderDecode 内部按需触发：
+       · 拖选复制（bootstrapDecodeCopy）：依赖节点身份，
+         而每次重绘都会 withSelectionGuard 存/取选区；
+       · 框选连击（enableDecodeDragChain）：直接检查 document.contains(pa)，
+         节点被换掉后 startEl 立刻失效。
+     patch 掉这两条属于「用『不改动 renderDecode』换取的收益」，
+     风险高于本次优化的对象，且基准里 B 那条「完成音节仍会重绘解码区」
+     在语义上正是要求它重建 —— 于是这一轮到此为止，只把题干摘出去。 */
   renderDecode(eng, q, decode);
 
   /* ---- HUD ---- */
@@ -1936,7 +1989,18 @@ function clearHint() {
   const bar = cacheEl('#hintBar');
   const flag = cacheEl('#hintFlag');
   const note = cacheEl('#miniKeymapNote');
-  if (bar) { bar.hidden = true; bar.innerHTML = ''; bar.className = 'hintbar'; }
+  /* 只在「确实有东西要清」时才写。
+     clearHint 挂在每键路径上（renderSession 开头无条件调用），
+     而绝大多数按键时提示条本来就是空的 —— 不加这个判断，
+     每键都会对空元素执行一次 innerHTML=''（一次 HTML 解析 +
+     一次子节点回收），而结果与不写完全一致。
+     判据用 innerHTML 是否为空，而不是 hidden：hidden 为 true 也可能
+     残留着上一次的内容（clearHint 之外没人会清它）。 */
+  if (bar) {
+    if (bar.innerHTML !== '') bar.innerHTML = '';
+    bar.hidden = true;
+    bar.className = 'hintbar';
+  }
   if (flag) { flag.hidden = true; flag.className = 'hint-flag'; }
   if (note) note.textContent = '';
   $$('#decode .syl-block').forEach(el => el.classList.remove('is-hinted', 'is-hinted-reveal'));
@@ -2111,11 +2175,21 @@ function onKeyDown(e) {
 
   // 看答案 / 求助（默认 Tab）
   if (matchesShortcut(e, sc.hint)) {
-    // 只有真的绑定了快捷键才 preventDefault —— 用户选择「不占用 Tab」时，
-    // Tab 应当恢复成浏览器原生的焦点导航，不能被我们吞掉。
-    e.preventDefault();
-    if (app.engine && app.engine.state === STATE.RUNNING) requestHintNow();
-    return;
+    /* 焦点在某个键/按钮上时，Tab 必须让给浏览器的原生焦点导航。
+       否则「Tab 求助」会把 Tab 从焦点键上偷走 —— 而键位图页那 26 个键
+       正是靠 Tab 才能到达的，等于把「继续往下 Tab」变成「看答案」，
+       焦点再也走不动。这是 2026-10 给键位图加上 role/tabindex 之后
+       才出现的冲突（在那之前 SVG 里根本没有可聚焦元素）。 */
+    const ae = document.activeElement;
+    const tabWanted = e.key === 'Tab' &&
+      ae && ae !== document.body && ae !== document.documentElement;
+    if (!tabWanted) {
+      // 只有真的绑定了快捷键才 preventDefault —— 用户选择「不占用 Tab」时，
+      // Tab 应当恢复成浏览器原生的焦点导航，不能被我们吞掉。
+      e.preventDefault();
+      if (app.engine && app.engine.state === STATE.RUNNING) requestHintNow();
+      return;
+    }
   }
 
   // 跳过当前（默认 Backspace）
