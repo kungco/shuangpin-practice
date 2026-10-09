@@ -965,6 +965,143 @@ console.log('\n【16】键位错误按模式取数（统计页的模式筛选要
   ok(mergedChar.counts.V === 5, `单字模式独立计数（V=${mergedChar.counts.V}，应为 5）`);
 }
 
+/* ============================================================
+   键维度按键耗时（慢键诊断）
+   ============================================================ */
+console.log('\n【新增】按键耗时：样本池、按模式、范围切换与导入合并');
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+  const raw = (k) => { const v = ls.getItem(k); return v ? JSON.parse(v) : null; };
+  const KEY = 'shuangpin.v1.keyTimings';
+  const samp = (n, from, step) => Array.from({ length: n }, (_, i) => from + i * (step || 0));
+
+  /* ---------- median ---------- */
+  ok(S.median([]) === 0 && S.median(null) === 0, 'median 对空输入返回 0');
+  ok(S.median([5]) === 5, 'median 单样本');
+  ok(S.median([3, 1, 2]) === 2, 'median 奇数个取正中');
+  ok(S.median([10, 20, 30, 40]) === 25, 'median 偶数个取中间两数的平均');
+  ok(S.median(['100', 200, 'x', NaN]) === 150, 'median 跳过非数字项');
+
+  /* ---------- recordKeyTimings 基本合并 ---------- */
+  ok(S.recordKeyTimings({ A: { lead: [100, 200], follow: [300] } }, 'char') !== false, '写入一次会话的样本');
+  const t1 = S.getKeyTimings('all');
+  const a1 = t1.items.find(i => i.key === 'A');
+  ok(!!a1, 'A 键出现在汇总里');
+  ok(a1.leadMs === 150 && a1.followMs === 300, `两个桶各自取中位数（lead=${a1.leadMs} follow=${a1.followMs}）`);
+  ok(a1.samples === 3, `样本数正确（${a1.samples}）`);
+
+  // 再写一次：样本**并入**，中位数重算 —— 不是把中位数相加
+  S.recordKeyTimings({ A: { lead: [400], follow: [] } }, 'char');
+  const a2 = S.getKeyTimings('all').items.find(i => i.key === 'A');
+  ok(a2.leadMs === 200, `并入后重算中位数而非相加（${[100, 200, 400]} → ${a2.leadMs}）`);
+
+  /* ---------- 脏输入被清洗 ---------- */
+  S.recordKeyTimings({ B: { lead: [150, 99999, -1, 'x', 0, null], follow: 'oops' } }, 'char');
+  const b1 = S.getKeyTimings('all').items.find(i => i.key === 'B');
+  ok(b1 && b1.leadMs === 150 && b1.samples === 1,
+    `脏样本被剔除：超范围/非正/非数字/非数组（实际 leadMs=${b1 && b1.leadMs}, n=${b1 && b1.samples}）`);
+  S.recordKeyTimings({ 'bad-key': { lead: [100] } }, 'char');
+  ok(!S.getKeyTimings('all').items.some(i => i.key === 'bad-key'), '非法键名被丢弃');
+  ok(S.recordKeyTimings({}) === false && S.recordKeyTimings(null) === false, '空输入不写入');
+  ok(S.recordKeyTimings({ C: { lead: [], follow: [] } }) === false, '空桶不算一次有效会话');
+
+  /* ---------- 样本池有界（FIFO） ---------- */
+  S.recordKeyTimings({ D: { lead: samp(80, 100, 1), follow: [] } }, 'char');
+  const d1 = S.getKeyTimings('all').items.find(i => i.key === 'D');
+  ok(d1.samples === 60, `单桶样本池有界（写入 80 条后保留 ${d1.samples} 条，FIFO）`);
+  ok(d1.leadMs === 150, `保留的是**最近**的 60 条（80 条 100…179 → 留下 120…179，中位数 150）`);
+
+  /* ---------- 按模式筛选 ---------- */
+  S.recordKeyTimings({ A: { lead: [900], follow: [] } }, 'phrase');
+  const phraseA = S.getKeyTimings('all', 'phrase').items.find(i => i.key === 'A');
+  ok(phraseA && phraseA.leadMs === 900,
+    `按模式取到该模式自己的样本（phrase 只记了 [900]，全量是 [100,200,400,900]）`);
+  const allA = S.getKeyTimings('all').items.find(i => i.key === 'A');
+  ok(allA.leadMs === 300, `全量仍含全部模式（→ ${allA.leadMs}）`);
+  ok(S.getKeyTimings('all', 'phrase').byMode === true, '该模式有专属数据时 byMode=true');
+
+  /* 老数据没有 byMode 层 → 退回全量并如实标记 */
+  ls.setItem(KEY, JSON.stringify({
+    all: { A: { lead: [100, 300], follow: [] } }, byMode: {}, recent: []
+  }));
+  const legacy = S.getKeyTimings('all', 'phrase');
+  ok(legacy.byMode === false && legacy.items.some(i => i.key === 'A'),
+    '老记录无模式层时退回全量，并用 byMode=false 如实标记（UI 据此说明）');
+  ok(S.getKeyTimings('all', 'all').byMode === false, '不筛模式时不做回退标记');
+
+  /* ---------- 范围切换（最近 N 次） ---------- */
+  ls.removeItem(KEY);
+  S.recordKeyTimings({ H: { lead: [100], follow: [] } }, 'char');   // 老
+  S.recordKeyTimings({ H: { lead: [200], follow: [] } }, 'char');
+  S.recordKeyTimings({ H: { lead: [800], follow: [] } }, 'char');   // 新
+  const r10 = S.getKeyTimings('10').items.find(i => i.key === 'H');
+  ok(r10.samples === 3, `最近 10 次含全部 3 次会话（${r10.samples}）`);
+  const rAll = S.getKeyTimings('all').items.find(i => i.key === 'H');
+  ok(rAll.leadMs === 200, `全量读累计样本池的真中位数（[100,200,800] → ${rAll.leadMs}）`);
+  const rAllFast = S.getKeyTimings('all', 'char');
+  ok(rAllFast.byMode === true, '范围=all 且指定模式时 byMode=true');
+
+  // 攒够 12 条才能测「最近 10 次」真的截断
+  for (let i = 0; i < 9; i++) S.recordKeyTimings({ H: { lead: [1000], follow: [] } }, 'char');
+  const r10b = S.getKeyTimings('10');
+  const h10b = r10b.items.find(i => i.key === 'H');
+  ok(r10b.sessions === 10, `最近 10 次只取 10 条会话（${r10b.sessions}）`);
+  ok(h10b.leadMs === 1000,
+    `被截掉的是最早那次（保留的全是 1000 → ${h10b.leadMs}，若误取最早会是 100）`);
+
+  /* ---------- 导出 / 导入合并 ---------- */
+  const backup = S.exportAll();
+  ok(backup.keyTimings && backup.keyTimings.all && backup.keyTimings.all.H,
+    'exportAll 带出 keyTimings');
+
+  ls.removeItem(KEY);
+  ok(S.getKeyTimings('all').items.length === 0, '清空后无数据');
+  const imp1 = S.importAll(backup);
+  ok(imp1.ok, '导入成功');
+  const afterImp = S.getKeyTimings('all').items.find(i => i.key === 'H');
+  ok(afterImp && afterImp.samples >= 1, `导入后样本恢复（${afterImp && afterImp.samples} 条）`);
+
+  // 幂等：同一份备份导入两次，样本数不应翻倍
+  const n1 = S.getKeyTimings('all').items.find(i => i.key === 'H').samples;
+  S.importAll(backup);
+  const n2 = S.getKeyTimings('all').items.find(i => i.key === 'H').samples;
+  ok(n1 === n2, `重复导入不使样本翻倍（${n1} → ${n2}）`);
+
+  // 再导入一份**不同**的备份：样本应并集增加
+  const other = { app: 'shuangpin-practice', version: 3,
+                  keyTimings: { all: { Z: { lead: [321], follow: [] } }, byMode: {}, recent: [] } };
+  S.importAll(other);
+  ok(S.getKeyTimings('all').items.some(i => i.key === 'Z'), '另一份备份的键被并入');
+
+  /* ---------- slowestKeys（结算面板用） ---------- */
+  const plenty = {
+    Q: { lead: [], follow: [100, 110, 105, 120, 115] },
+    W: { lead: [], follow: [900, 880, 950, 910, 890] },
+    E: { lead: [], follow: [300, 310] }            // 只有 2 个样本
+  };
+  const slow = S.slowestKeys(plenty, { min: 5, top: 5 });
+  ok(slow.items.length === 2, `样本达标的键进入排名（${slow.items.length} 个）`);
+  ok(slow.items[0].key === 'W', '最慢的键排第一');
+  ok(slow.items[0].medianMs === 900, `中位数正确（[880,890,900,910,950] → ${slow.items[0].medianMs}）`);
+  ok(!slow.items.some(i => i.key === 'E'), '样本不足 5 次的键不进排名');
+  ok(slow.thin === 1 && slow.total === 3,
+    `如实报告被门槛挡下的键数（thin=${slow.thin}, total=${slow.total}）`);
+
+  const ordered = S.slowestKeys({
+    A: { lead: [], follow: [500, 500, 500, 500, 500] },
+    B: { lead: [], follow: [100, 100, 100, 100, 100] },
+    C: { lead: [], follow: [300, 300, 300, 300, 300] }
+  }, { min: 3, top: 2 });
+  ok(ordered.items.map(i => i.key).join(',') === 'A,C',
+    '按中位数降序排序并受 top 限制（A,C）');
+
+  ok(S.slowestKeys({}).total === 0 && S.slowestKeys(null).items.length === 0, '空输入安全回落');
+  ok(S.slowestKeys({ A: { lead: [700, 700, 700], follow: [] } }, { min: 3, top: 5 }).items.length === 1,
+    'lead 桶同样参与排名');
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 存储层自检全部通过'
   : `❌ 存储层自检共 ${fail} 项未通过`));

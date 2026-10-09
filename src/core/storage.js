@@ -16,6 +16,7 @@ export const KEYS = {
   daily: `${NS}.daily`,         // 按日期聚合
   weak: `${NS}.weak`,           // 易错字词
   keyErrors: `${NS}.keyErrors`, // 键维度错误次数（错误热力图用）
+  keyTimings: `${NS}.keyTimings`, // 键维度按键耗时样本（慢键诊断用）
   resume: `${NS}.resume`,       // 未完成的练习现场
   device: `${NS}.device`,       // 错题计数的设备来源（不随备份覆盖）
   recent: `${NS}.recent`,       // 最近实际展示的练习内容
@@ -1070,6 +1071,275 @@ export function clearKeyErrors() {
 }
 
 /* ============================================================
+   键维度按键耗时（反应时间）
+   ------------------------------------------------------------
+   与 keyErrors 同构但**分开存**，因为两者回答的是不同问题：
+     keyErrors  = 哪些键按错（错得出来）
+     keyTimings = 哪些键按得慢（对但犹豫，且早于错误出现）
+   混在一张表里就分不清「这个键我不会」和「这个键我还不熟」。
+
+   存的是**每键每桶的有界样本池**（FIFO，最近 N 次），不是均值也不是
+   累加秒数：中位数必须由原始样本算，累加值算不出中位数，而均值会被
+   偶尔的走神彻底带偏。有界是为了不让 localStorage 无限增长。
+   ============================================================ */
+
+/** 单桶样本上限（与 KEY_TIMING.storedPerBucket 对应，此处独立一份避免循环依赖） */
+const KEY_TIMING_STORED_MAX = 60;
+/** 最近 N 次会话的中位数明细上限，用于范围切换 */
+const KEY_TIMING_RECENT_MAX = 30;
+/** 单键名的合法形态：单个大写字母 */
+const KEY_TIMING_KEY_RE = /^[A-Z]$/;
+/** 记住最近若干份备份的指纹，用来识别「同一份备份又导了一次」 */
+const KEY_TIMING_SIG_MAX = 5;
+
+/** 32 位 FNV-1a：给一段样本池算个短指纹。只用于判重，不做安全用途。 */
+function sampleSignature(src) {
+  let h = 0x811c9dc5;
+  const s = JSON.stringify(src || {});
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
+
+/**
+ * 中位数。
+ *
+ * 放在 storage 而不是 stats：stats.js 依赖 storage.js，反向依赖会成环。
+ * 它本身就是数据层的归约操作，归约样本池时要用，两边都得用。
+ *
+ * @param {number[]} list 已排序或未排序均可；空数组返回 0
+ * @returns {number} 偶数个样本取中间两数的平均（向上取整到整毫秒）
+ */
+export function median(list) {
+  if (!Array.isArray(list) || !list.length) return 0;
+  const nums = [];
+  for (const v of list) {
+    const n = Number(v);
+    if (Number.isFinite(n)) nums.push(n);
+  }
+  if (!nums.length) return 0;
+  nums.sort((a, b) => a - b);
+  const mid = nums.length >> 1;
+  if (nums.length % 2 === 1) return Math.round(nums[mid]);
+  return Math.round((nums[mid - 1] + nums[mid]) / 2);
+}
+
+/** 把任意输入压成 { K: { lead:[], follow:[] } }，逐样本清洗 */
+function normalizeKeyTimings(src) {
+  const out = {};
+  if (!src || typeof src !== 'object' || Array.isArray(src)) return out;
+  for (const [k, rec] of Object.entries(src)) {
+    const key = String(k || '').toUpperCase();
+    if (!KEY_TIMING_KEY_RE.test(key)) continue;
+    if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue;
+    const lead = sanitizeMsList(rec.lead);
+    const follow = sanitizeMsList(rec.follow);
+    if (lead.length || follow.length) out[key] = { lead, follow };
+  }
+  return out;
+}
+
+/** 清洗 + FIFO 截断到上限（升序返回，便于直接取中位数） */
+function sanitizeMsList(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const v of list) {
+    const n = Math.round(Number(v));
+    // 上限与引擎的 KEY_TIMING.maxMs 一致：超过 5 秒的等待不是「犹豫」，
+    // 是「人不在」，留着只会污染中位数。
+    if (!Number.isFinite(n) || n <= 0 || n > 5000) continue;
+    out.push(n);
+  }
+  if (out.length > KEY_TIMING_STORED_MAX) out.splice(0, out.length - KEY_TIMING_STORED_MAX);
+  out.sort((a, b) => a - b);
+  return out;
+}
+
+/** byMode 的键是**模式 id**（char/phrase/…），不是单字母键 ——
+ *  所以不能直接套 normalizeKeyTimings（那会按单字母正则校验模式名，
+ *  把整层 byMode 悄悄抹掉 —— 按模式筛选于是永远退回全量）。
+ *  这里逐个模式各自清洗内层。 */
+function normalizeKeyTimingsByMode(src) {
+  const out = {};
+  if (!src || typeof src !== 'object' || Array.isArray(src)) return out;
+  for (const [mode, rec] of Object.entries(src)) {
+    const m = String(mode || '').trim();
+    if (!m) continue;
+    const inner = normalizeKeyTimings(rec);
+    if (Object.keys(inner).length) out[m] = inner;
+  }
+  return out;
+}
+
+export function loadKeyTimings() {
+  const obj = readJSON(KEYS.keyTimings, null);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { all: {}, byMode: {}, recent: [], sigs: [] };
+  }
+  return {
+    all: normalizeKeyTimings(obj.all),
+    byMode: normalizeKeyTimingsByMode(obj.byMode),
+    recent: Array.isArray(obj.recent)
+      ? obj.recent.filter(s => s && typeof s === 'object').slice(-KEY_TIMING_RECENT_MAX)
+      : [],
+    sigs: Array.isArray(obj.sigs) ? obj.sigs.filter(x => typeof x === 'string') : []
+  };
+}
+
+/**
+ * 合并一次会话的按键耗时样本
+ * @param {object} keyTimings { K: { lead:[ms], follow:[ms] } }
+ * @param {string} [mode] 本次练习的模式
+ * @returns {boolean} 是否写入成功
+ */
+export function recordKeyTimings(keyTimings, mode = '') {
+  const clean = normalizeKeyTimings(keyTimings);
+  let total = 0;
+  for (const rec of Object.values(clean)) total += rec.lead.length + rec.follow.length;
+  if (!total) return false;
+
+  try {
+    const data = loadKeyTimings();
+    const merge = (bucket) => {
+      for (const [k, rec] of Object.entries(clean)) {
+        const dst = bucket[k] || (bucket[k] = { lead: [], follow: [] });
+        for (const b of ['lead', 'follow']) {
+          if (!rec[b].length) continue;
+          dst[b] = sanitizeMsList(dst[b].concat(rec[b]));
+        }
+      }
+    };
+    merge(data.all);
+    // 与 keyErrors 一致地带上模式：统计页的模式筛选必须同时覆盖
+    // 「错得多」和「按得慢」两层，否则筛选看着生效了其实只筛了一半。
+    const modeKey = String(mode || '').trim();
+    if (modeKey) {
+      const bucket = (data.byMode[modeKey] && typeof data.byMode[modeKey] === 'object')
+        ? data.byMode[modeKey] : {};
+      merge(bucket);
+      data.byMode[modeKey] = bucket;
+      const names = Object.keys(data.byMode);
+      if (names.length > 12) {
+        names.filter(nm => nm !== modeKey).slice(0, names.length - 12).forEach(nm => delete data.byMode[nm]);
+      }
+    }
+    /* 范围切换用的明细：**只存中位数**，不存原始样本。
+     * 「最近 N 次」要的是这 N 次里这个键有多慢，中位数的中位数已经够用，
+     * 而原始样本 × 30 次会让这块数据比累计池还大，得不偿失。 */
+    const snapshot = {};
+    for (const [k, rec] of Object.entries(clean)) {
+      const leadM = median(rec.lead);
+      const followM = median(rec.follow);
+      snapshot[k] = { lead: leadM || 0, follow: followM || 0 };
+    }
+    data.recent.push({ ts: Date.now(), mode: modeKey, keys: snapshot });
+    if (data.recent.length > KEY_TIMING_RECENT_MAX) {
+      data.recent = data.recent.slice(data.recent.length - KEY_TIMING_RECENT_MAX);
+    }
+    return writeJSON(KEYS.keyTimings, data);
+  } catch (err) {
+    console.warn('[storage] 按键耗时记录失败', err && err.message);
+    return false;
+  }
+}
+
+/**
+ * 取按键耗时汇总（供统计页的「慢键」层与结算面板使用）
+ *
+ * range='all' 时读累计样本池（真中位数）；range='30'/'10' 时读最近 N 次的
+ * 中位数明细（中位数的中位数）。后者不是严格的合并中位数，但对「谁更慢」
+ * 的排序结论一致，且省一个数量级的存储 —— 这个取舍写在这里是为了让后来人
+ * 知道它是**有意的近似**，而不是偷懒。
+ *
+ * @param {string} range 'all' | '30' | '10'
+ * @param {string} [mode] 'all' 或省略 = 不限
+ * @returns {{items:Array, sessions:number, byMode:boolean}}
+ */
+export function getKeyTimings(range = 'all', mode = 'all') {
+  const data = loadKeyTimings();
+  const wantMode = mode && mode !== 'all' ? String(mode) : '';
+  let byMode = false;
+
+  if (range === 'all') {
+    let src = data.all;
+    if (wantMode) {
+      const bucket = data.byMode[wantMode];
+      // 老数据没有这层 → 退回全量，但 byMode 保持 false 供 UI 如实说明，
+      // 与 getKeyErrorTotals 的处理一致。
+      if (bucket && Object.keys(bucket).length) { src = bucket; byMode = true; }
+    }
+    const items = [];
+    for (const [k, rec] of Object.entries(src)) {
+      const lead = sanitizeMsList(rec.lead);
+      const follow = sanitizeMsList(rec.follow);
+      const samples = lead.length + follow.length;
+      if (!samples) continue;
+      items.push({ key: k, samples, leadMs: median(lead), followMs: median(follow), medianMs: median(lead.concat(follow)) });
+    }
+    return { items, sessions: data.recent.length, byMode };
+  }
+
+  const n = Math.max(1, parseInt(range, 10) || 10);
+  let slice = data.recent.slice(Math.max(0, data.recent.length - n));
+  if (wantMode) {
+    const filtered = slice.filter(s => s.mode === wantMode);
+    if (filtered.length) { slice = filtered; byMode = true; }
+    // 该范围内没有该模式的记录 → 保留这 N 次的全量，但 byMode 仍为 false
+  }
+  const acc = {};
+  for (const s of slice) {
+    for (const [k, rec] of Object.entries((s && s.keys) || {})) {
+      const dst = acc[k] || (acc[k] = { lead: [], follow: [], n: 0 });
+      for (const b of ['lead', 'follow']) {
+        const m = Math.round(Number(rec && rec[b]));
+        if (!Number.isFinite(m) || m <= 0 || m > 5000) continue;
+        dst[b].push(m);
+      }
+      dst.n += 1;
+    }
+  }
+  const items = [];
+  for (const [k, rec] of Object.entries(acc)) {
+    if (!rec.lead.length && !rec.follow.length) continue;
+    items.push({ key: k, samples: rec.n, leadMs: median(rec.lead), followMs: median(rec.follow), medianMs: median(rec.lead.concat(rec.follow)) });
+  }
+  return { items, sessions: slice.length, byMode };
+}
+
+export function clearKeyTimings() {
+  writeJSON(KEYS.keyTimings, { all: {}, byMode: {}, recent: [], sigs: [] });
+}
+
+/** 单次会话内最慢的若干个键（结算面板用，纯内存计算，不落盘） */
+export function slowestKeys(keyTimings, opts = {}) {
+  const min = Math.max(1, Math.floor(Number(opts.min)) || 5);
+  const top = Math.max(1, Math.floor(Number(opts.top)) || 5);
+  const src = normalizeKeyTimings(keyTimings);
+  const rows = [];
+  for (const [key, rec] of Object.entries(src)) {
+    const lead = sanitizeMsList(rec.lead);
+    const follow = sanitizeMsList(rec.follow);
+    const samples = lead.length + follow.length;
+    if (!samples) continue;
+    rows.push({ key, samples, medianMs: median(lead.concat(follow)), leadMs: median(lead), followMs: median(follow) });
+  }
+  // 样本不足的键不参与排序：中位数在 2 个样本上完全不可靠，
+  // 排进来只会让「最慢的键」变成「碰巧只按过两次的键」。
+  const eligible = rows.filter(r => r.samples >= min).sort((a, b) => b.medianMs - a.medianMs);
+  return {
+    items: eligible.slice(0, top),
+    eligible: eligible.length,
+    // 被门槛挡下的键：如实告知有几个样本太少，免得用户以为「只有这几个慢」
+    thin: rows.filter(r => r.samples < min).length,
+    total: rows.length,
+    min,
+    all: rows
+  };
+}
+
+/* ============================================================
    中断续练（练习现场）
    ============================================================ */
 
@@ -1141,7 +1411,8 @@ export function exportAll() {
     history: loadHistory(),
     daily: loadDaily(),
     weak: loadWeak(),
-    keyErrors: loadKeyErrors()
+    keyErrors: loadKeyErrors(),
+    keyTimings: loadKeyTimings()
   };
 }
 
@@ -1334,6 +1605,57 @@ export function importAll(payload) {
         // 没有新会话但可能有「老备份初始化」的写入
         writeJSON(KEYS.keyErrors, cur);
       }
+    }
+
+    /* 按键耗时：按 (ts, mode) 去重后并入样本池。
+       样本是**可加的集合**（取并集后重算中位数），不像计数那样相加 ——
+       把两份备份的同一次练习各加一遍，中位数不会翻倍，但会把
+       「最近 N 次」的条数算错。所以仍然按时间戳去重。 */
+    if (payload.keyTimings && typeof payload.keyTimings === 'object' && !Array.isArray(payload.keyTimings)) {
+      const cur = loadKeyTimings();
+      const incomingAll = normalizeKeyTimings(payload.keyTimings.all);
+      const incomingRecent = Array.isArray(payload.keyTimings.recent)
+        ? payload.keyTimings.recent.filter(s => s && typeof s === 'object') : [];
+      const seenTs = new Set(cur.recent.map(s => `${s.ts}::${s.mode || ''}`));
+      const fresh = incomingRecent.filter(s => {
+        const id = `${s.ts}::${s.mode || ''}`;
+        if (seenTs.has(id)) return false;
+        seenTs.add(id);
+        return true;
+      });
+
+      const merge = (bucket, src) => {
+        for (const [k, rec] of Object.entries(src)) {
+          const dst = bucket[k] || (bucket[k] = { lead: [], follow: [] });
+          for (const b of ['lead', 'follow']) if (rec[b].length) dst[b] = sanitizeMsList(dst[b].concat(rec[b]));
+        }
+      };
+      /* 累计样本池是**并集**，不能无条件并入 —— 同一份备份导两次会把
+         样本数翻倍（中位数不变，但样本数会骗人）。
+         判据用**备份指纹**：样本池内容和之前导入过的那几份完全相同，就是
+         重复导入。只用「本地非空就跳过」会把另一份**不同**备份的数据也丢掉；
+         只用「有新明细就并入」则对没有明细的老备份完全失效。 */
+      const sig = sampleSignature(incomingAll);
+      const alreadyMerged = cur.sigs.includes(sig);
+      if (!alreadyMerged && (fresh.length > 0 || Object.keys(incomingAll).length)) {
+        merge(cur.all, incomingAll);
+        for (const [mode, src] of Object.entries(payload.keyTimings.byMode || {})) {
+          const b = (cur.byMode[mode] && typeof cur.byMode[mode] === 'object') ? cur.byMode[mode] : {};
+          merge(b, normalizeKeyTimings(src));
+          cur.byMode[mode] = b;
+        }
+        cur.sigs.push(sig);
+        if (cur.sigs.length > KEY_TIMING_SIG_MAX) {
+          cur.sigs = cur.sigs.slice(cur.sigs.length - KEY_TIMING_SIG_MAX);
+        }
+      }
+      for (const s of fresh) cur.recent.push(s);
+      cur.recent.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      if (cur.recent.length > KEY_TIMING_RECENT_MAX) {
+        cur.recent = cur.recent.slice(cur.recent.length - KEY_TIMING_RECENT_MAX);
+      }
+      writeJSON(KEYS.keyTimings, cur);
+      n++;
     }
 
     return { ok: true, message: `导入完成（合并 ${n} 项）` };

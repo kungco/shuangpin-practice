@@ -124,6 +124,11 @@
   --heat-text:      #5a3410;   /* 热力键上的文字（深色）*/
   --heat-text-2:    #8a5a24;
 
+  /* 慢键（按键耗时）。刻意用蓝而非热力的橙：橙色在这个界面里专表「错」，
+     再拿来表「慢」会把两个诊断信号混成一个，读者无从分辨。 */
+  --slow:           #2455c8;
+  --slow-soft:      #e8f0ff;
+
   --radius:        14px;
   --radius-sm:     9px;
   --shadow:        0 1px 2px rgba(29,36,51,.05), 0 8px 24px -12px rgba(29,36,51,.14);
@@ -197,6 +202,8 @@
   --heat-stroke-4: #b06a22;
   --heat-text:     #f7dcc0;
   --heat-text-2:   #d8b287;
+  --slow:          #7aa3ff;
+  --slow-soft:     #1b2740;
 
   --warn:          #e8ac52;
   --warn-2:        #e79b36;
@@ -864,6 +871,36 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 .kb-error { color: var(--text-3); font-size: 13px; padding: 16px; }
 .kb-heat-layer { pointer-events: none; }
 
+/* ---------------- 慢键（按得慢，而不是按错）----------------
+
+   与错误热力刻意用**两个不同的视觉通道**：
+     热力 = .kb-body 的**填充**（暖橙，实心）
+     慢键 = 键内侧的**虚线描边环**（蓝，空心）
+   若让慢键也去改 .kb-body 的 fill/stroke，两个指标会互相覆盖 ——
+   而「又错又慢」的键恰恰是最该被看见的那个，现在只能二选一。
+
+   环用蓝色而不是复用热力的橙：橙色在这个界面里已经专表「错」，
+   再拿来表「慢」等于把两个诊断信号混成一个，读者无从分辨。 */
+.kb-slow-ring {
+  fill: none;
+  stroke: var(--slow);
+  stroke-linejoin: round;
+  /* 层级越高线越粗，虚线段越密 —— 不依赖颜色也能读出强弱 */
+  stroke-width: 1.8;
+  stroke-dasharray: 5 4;
+}
+.kb-key.is-slow[style*="--slow-level: 2"] .kb-slow-ring { stroke-width: 2.2; stroke-dasharray: 6 4; }
+.kb-key.is-slow[style*="--slow-level: 3"] .kb-slow-ring { stroke-width: 2.8; stroke-dasharray: 7 4; }
+.kb-key.is-slow[style*="--slow-level: 4"] .kb-slow-ring {
+  stroke-width: 3.4;
+  stroke-dasharray: 8 3;
+  /* 最慢的键再加一层极淡的底色，保证在深色键面上也一眼可见 */
+  fill: var(--slow-soft);
+  fill-opacity: .5;
+}
+/* 慢键环不参与点击（键位图页可点，标记不该抢事件） */
+.kb-slow-ring { pointer-events: none; }
+
 .kb-main { font-family: var(--mono); font-weight: 700; }
 .kb-sub  { font-family: var(--sans); }
 .kb-pinyin { font-family: var(--mono); }
@@ -1005,6 +1042,69 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 .heat-chip-k { font-size: 16px; font-weight: 700; color: var(--heat-stroke-4); }
 .heat-chip-c { font-size: 12px; color: var(--text-3); }
 .heat-chip-m { font-size: 11.5px; color: var(--text-3); font-family: var(--sans); }
+
+/* ---------------- 慢键（按得慢，而不是按错）---------------- */
+
+.slow-box { margin-top: 14px; }
+
+.slow-legend {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.slow-legend-title {
+  font-size: 12.5px; font-weight: 700; color: var(--slow);
+  margin-right: 2px;
+}
+.slow-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--mono); font-size: 13px;
+  /* 用虚线边框呼应键盘图上那个环，让两处读起来是同一个东西 */
+  border: 1.5px dashed var(--slow);
+  background: var(--slow-soft);
+  border-radius: var(--radius-sm);
+  padding: 5px 11px;
+}
+.slow-chip-k { font-size: 16px; font-weight: 700; color: var(--slow); }
+.slow-chip-c { font-size: 12px; color: var(--text-2); }
+
+.slow-legend-note {
+  margin-top: 8px;
+  font-size: 11.5px; line-height: 1.6; color: var(--text-3);
+}
+.slow-legend-note b { color: var(--text-2); }
+
+/* ---------------- 结算面板：反应最慢的键 ---------------- */
+
+.slow-block { margin-top: 20px; }
+.slow-block .sub-title { margin-bottom: 10px; }
+.slow-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.slow-row {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 8px 13px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--slow);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.slow-key {
+  font-family: var(--mono); font-size: 17px; font-weight: 700;
+  color: var(--slow);
+  background: var(--slow-soft);
+  border-radius: 5px; padding: 1px 9px;
+  min-width: 34px; text-align: center;
+}
+.slow-ms {
+  font-family: var(--mono); font-size: 14px; font-weight: 700;
+  color: var(--text);
+}
+.slow-meta { font-size: 11.5px; color: var(--text-3); margin-left: auto; }
+.slow-block-note {
+  margin-top: 10px;
+  font-size: 11.5px; line-height: 1.65; color: var(--text-3);
+}
+.slow-block-note strong, .slow-block-note b { color: var(--text-2); }
 
 .chart-wrap {
   border: 1px solid var(--border);

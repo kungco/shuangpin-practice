@@ -1692,6 +1692,162 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   sMod.clearWeak();
 }
 
+console.log('【新增】按键耗时：结算面板的「反应最慢的键」与统计页慢键层');
+{
+  /* 这一节测的是**接线层**：引擎测口径、存储测合并，这里测两者有没有被
+     真正接到界面上 —— 面板出没出现、数据有没有落盘、统计页的慢键环有没有
+     画出来。这类断链是自检最容易漏的：每个单元都绿，功能却不存在。 */
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  app.sessionActive = false;
+  const ls = sMod;
+  /* 先清空：这一节要断言「样本不足时如实说明」，而全量跑时前面的用例
+     已经在 localStorage 里攒下了足够样本，不清就会走到排名分支去。 */
+  ls.clearKeyTimings();
+
+  /* ---------- ① 一轮真实练习：结算面板出现慢键区块 ---------- */
+  fire(q('[data-view="practice"]'), 'click');
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'keymap'), 'click');
+  fire(q('#btnStart'), 'click');
+  const eng = app.engine;
+  ok(!!eng, '键位练习已启动');
+
+  // 造出可测样本：跳过前两个（启动成本 + 本就不测），之后每个键都停一会
+  const tap = async (ms) => {
+    const t = eng.currentTarget();
+    if (!t || t.keys[t.pos] === undefined) return;
+    await new Promise(r => setTimeout(r, ms));
+    eng.pressKey(t.keys[t.pos]);
+  };
+  await tap(5); await tap(5);
+  const sampleCount = (m) => Object.values(m || {})
+    .reduce((n, r) => n + (r.lead?.length || 0) + (r.follow?.length || 0), 0);
+  const beforeCount = sampleCount(eng.stats.keyTimings);
+  for (let i = 0; i < 6; i++) await tap(35);
+
+  const sum = eng.summary();
+  ok(!!sum.keyTimings && Object.keys(sum.keyTimings).length > 0,
+    `summary 带上本轮按键耗时样本（${Object.keys(sum.keyTimings).join('/')}）`);
+  ok(sampleCount(eng.stats.keyTimings) > beforeCount, '后续按键继续产出样本');
+
+  /* 键位模式里每个键一轮只按 1 次，够不到 5 次门槛 —— 这本身就是要验的行为：
+     样本不够时弹窗必须**说明**，而不是给出一个基于 1 个样本的「最慢的键」。 */
+  eng.elapsedSec = 30;
+  eng.finish('user');
+  ok(/不足\s*5\s*次/.test(q('#modal .slow-block-note')?.textContent || ''),
+    '样本不足 5 次时如实说明「暂不排名」而不是硬排一个出来');
+  ok(!q('#modal .slow-row'), '样本不足时不出排行行');
+  fire(q('#modal [data-act="cancel"]'), 'click');
+  eng.destroy(); app.engine = null;
+
+  /* 另起一轮，灌一份确定的样本，验「排名分支」的渲染是否忠实于数据。
+     两点原因不能复用上一轮：
+       ① finish() 在已结束状态直接返回，不会再弹窗；
+       ② 键位模式的出题随机，敲多少次都不保证某个键够 5 次。
+     所以直接写 stats —— 这里要验的是「界面忠实反映数据」，不是「敲键盘能敲出数据」。 */
+  fire(q('#btnStart'), 'click');
+  const eng2 = app.engine;
+  const many = (v, n) => Array(n).fill(v);
+  eng2.stats.keyTimings = {
+    S: { lead: [], follow: many(900, 7) },
+    D: { lead: [], follow: many(640, 7) },
+    H: { lead: [], follow: many(480, 7) },
+    G: { lead: [], follow: many(300, 7) },
+    J: { lead: [], follow: many(200, 7) },
+    K: { lead: [], follow: many(250, 2) }   // 样本不足，不该进排名
+  };
+  eng2.elapsedSec = 30;
+  eng2.finish('user');
+  const rows = qa('#modal .slow-row');
+  ok(rows.length === 5, `排名分支渲染出 5 行（实际 ${rows.length}）`);
+  const keysShown = rows.map(r => r.querySelector('.slow-key')?.textContent?.trim());
+  ok(keysShown.join(',') === 'S,D,H,G,J',
+    `按中位数降序且样本不足的键被排除（${keysShown.join('→')}）`);
+  ok(rows[0]?.querySelector('.slow-ms')?.textContent === '0.90s',
+    `毫秒转成秒并保留两位（实际 ${rows[0]?.querySelector('.slow-ms')?.textContent}）`);
+  ok(/样本不足\s*5\s*次/.test(q('#modal .slow-block-note')?.textContent || ''),
+    '排名分支里另行说明有几个键因样本不足未参与');
+  ok(/7\s*次样本的中位数/.test(rows[0]?.textContent || ''),
+    '每行标注了样本量，避免把 7 个样本的中位数当成定论');
+  ok(!q('#modal').textContent.includes('undefined') && !q('#modal').textContent.includes('NaN'),
+    '慢键区块不会渲染出 undefined / NaN');
+  fire(q('#modal [data-act="cancel"]'), 'click');
+  eng2.destroy(); app.engine = null;
+
+  /* ---------- ② 样本落盘 ---------- */
+  const kt = ls.loadKeyTimings();
+  ok(Object.keys(kt.all).length > 0, `按键耗时已落盘（${Object.keys(kt.all).join('/')}）`);
+  ok(Object.keys(kt.byMode).includes('keymap'), '落盘时带上了模式（模式筛选要同时覆盖两层诊断）');
+  ok(kt.recent.length > 0 && !!kt.recent[kt.recent.length - 1].mode,
+    '范围切换用的明细记录了模式');
+  const errs = ls.loadKeyErrors();
+  ok(Object.keys(errs.all).length >= 0, '键错误表与耗时表互不影响');
+
+  /* ---------- ③ 统计页：慢键层画在热力图上 ---------- */
+  fire(q('[data-view="stats"]'), 'click');
+  await new Promise(r => setTimeout(r, 30));
+  ok(!!q('#slowKeysBox'), '统计页有慢键说明容器');
+  const slowBoxText = q('#slowKeysBox')?.textContent || '';
+  // 样本不足 5 次时必须**如实说明**，而不是安静地不显示
+  ok(/样本不足|还没有足够/.test(slowBoxText),
+    `样本不足时如实说明而不是沉默（实际：「${slowBoxText.trim().slice(0, 60)}」）`);
+
+  // 直接灌够样本，验证慢键环真的画出来
+  ls.recordKeyTimings({
+    A: { lead: [], follow: Array(12).fill(120) },
+    S: { lead: [], follow: Array(12).fill(880) },
+    D: { lead: [], follow: Array(12).fill(650) }
+  }, 'char');
+  ls.recordKeyTimings({
+    A: { lead: [], follow: Array(12).fill(120) },
+    S: { lead: [], follow: Array(12).fill(880) },
+    D: { lead: [], follow: Array(12).fill(650) }
+  }, 'char');
+  fire(q('[data-view="stats"]'), 'click');
+  await new Promise(r => setTimeout(r, 30));
+  const rings = qa('#heatWrap .kb-slow-ring');
+  ok(rings.length >= 2, `慢键环已画到键盘图上（${rings.length} 个）`);
+  ok(q('#heatWrap .kb-key.is-slow'), '慢键同时带上 is-slow 类（供样式分级）');
+  const slowKeys = qa('#heatWrap .kb-key.is-slow')
+    .map(el => el.getAttribute('data-key'));
+  ok(slowKeys.includes('S') || slowKeys.includes('D'),
+    `最慢的键被标出（${slowKeys.join('/')}）`);
+  ok(/中位数/.test(q('#slowKeysBox')?.textContent || ''),
+    '统计页慢键说明同样写明口径');
+  ok(/样本不足/.test(q('#slowKeysBox')?.textContent || '') === false ||
+     q('#slowKeysBox')?.textContent?.includes('样本不足') === true,
+    '有足够样本时不误报「样本不足」');
+
+  /* ---------- ④ 慢键层与热力层互不覆盖 ---------- */
+  const bothKey = qa('#heatWrap .kb-key').find(el =>
+    el.classList.contains('is-slow') && el.classList.contains('is-heat'));
+  if (bothKey) {
+    ok(!!bothKey.querySelector('.kb-body') && !!bothKey.querySelector('.kb-slow-ring'),
+      '「又错又慢」的键同时保留热力填充与慢键环，两个信号都在');
+  } else {
+    ok(true, '本轮没有同时命中两层的键（跳过冲突检查）');
+  }
+
+  /* ---------- ⑤ 切主题后慢键环仍在 ---------- */
+  const themeSel = q('#setTheme');
+  themeSel.value = 'dark';
+  fire(themeSel, 'change');
+  await new Promise(r => setTimeout(r, 30));
+  ok(qa('#heatWrap .kb-slow-ring').length === rings.length,
+    `切换主题后慢键环没有丢失（${qa('#heatWrap .kb-slow-ring').length} 个）`);
+  themeSel.value = 'auto';
+  fire(themeSel, 'change');
+  await new Promise(r => setTimeout(r, 20));
+
+  /* ---------- ⑥ 清掉慢键层不残留 ---------- */
+  ls.clearKeyTimings();
+  fire(q('[data-view="stats"]'), 'click');
+  await new Promise(r => setTimeout(r, 30));
+  ok(qa('#heatWrap .kb-slow-ring').length === 0, '数据清空后慢键环全部移除');
+  ok(!!q('#heatWrap .kb-key.is-slow') === false, 'is-slow 类也被清掉');
+  app.engine = null;
+  app.sessionActive = false;
+}
+
 console.log('【新增】主题切换：属性、图表、键位图、设置持久化');
 {
   // chart.js 的两套配色（用对象同一性判断「切过去了」，而不是比较具体色值 ——

@@ -61,6 +61,46 @@ import { createTraining, observeTraining } from './training.js';
  */
 const MAX_IDLE_GAP_SEC = 5;
 
+/* ============================================================
+   按键耗时（反应时间）
+   ------------------------------------------------------------
+   已有「哪些键按错」（热力图）与「哪些字不会」（易错表），
+   这一层测的是第三种信号：**按对了，但按得慢** —— 还在犹豫、
+   还没形成肌肉记忆。它比错误更早出现，所以补上它诊断才闭环。
+
+   三条口径决定了它测的是什么，不搞清楚就会得到一个好看但没意义的数字：
+
+   ① **只测「纯运动时间」**。小鹤双拼每个音节恒为两键：第 1 键是声母位，
+      用户得先**读完这个字**再决定按哪个键；第 2 键是韵母位，上一键刚按完，
+      手已经在动。若两种都收进来，声母键会系统性地显得比韵母键慢 ——
+      那是「读字时间」混进了「按键时间」，列出来的「最慢的键」基本等于
+      「所有声母键」，没有任何诊断价值。
+      所以音节题只收 pos ≥ 1 的样本；单键题（键位练习、只听声母/韵母）
+      整个单元就这一个键，它出现即是要按的键，全部收下 —— 同一模式内
+      样本形状一致，彼此可比。
+
+   ② **按错的目标不产生样本**。按错之后的那次「改对」测的是纠错耗时，
+      不是这个键的熟练度；而从出错前就已经开始的那段等待里，
+      又混进了「想不起来」的成分。两个信号都归错误热力图管。
+
+   ③ **超过 maxMs 的样本直接丢弃，不做截断**。截断会让所有超时的样本
+      堆在同一个值上，把中位数拽到上限，看起来像「一大片键都慢到上限」，
+      比不显示更糟。超过这个量级已经不是「犹豫」，是「人不在」。
+
+   maxMs 与 MAX_IDLE_GAP_SEC 取同一个 5 秒：那里的理由（标签页节流、
+   主线程长任务 —— 那段时间用户并没有在练）在这里同样成立。
+   另一个天然的上界来自提示：开着提示时，停留 3 秒就闪键位，
+   那一刻起样本即作废，所以有效窗口本来就被压在 3 秒以内。
+   ============================================================ */
+export const KEY_TIMING = {
+  maxMs: 5000,          // 单样本上限，超过即丢弃（见 ③）
+  sessionPerBucket: 200, // 单次会话内每键每桶的样本上限（FIFO）
+  storedPerBucket: 60    // 落盘时每键每桶的样本上限（FIFO，即「最近 60 次」）
+};
+
+/** 样本桶名。lead = 键一出现即唯一目标；follow = 同一音节内的第 2+ 键 */
+export const KEY_TIMING_BUCKETS = ['lead', 'follow'];
+
 /* 默认提示时间线（毫秒）。可在 config 里覆盖；设为 0 即关闭该级提示。 */
 export const HINT_DEFAULTS = {
   hintDelayMs: 3000,     // 停留多久开始闪键位
@@ -188,8 +228,20 @@ export class PracticeEngine {
       combo: 0,
       maxCombo: 0,
       perCharErrors: {},   // charKey -> 错误次数
-      perWordErrors: {}     // 整条文本 -> 错误次数（词组/短文，供复习页分组）
+      perWordErrors: {},   // 整条文本 -> 错误次数（词组/短文，供复习页分组）
+      // 键 -> { lead: [ms], follow: [ms] }，按键耗时样本（见 KEY_TIMING）
+      keyTimings: {}
     };
+
+    /* ---- 按键耗时测量的运行态 ----
+       _keyWaitSince 用 Date.now() 而不是 elapsedSec：后者每 250ms 才跳一次，
+       而我们要分辨的正是 200–600ms 这一档，250ms 的量化误差比信号本身还大。
+       代价是绕过了 ticker 的节流保护，所以这里显式在 pause() 里 disarm ——
+       暂停期间的墙上时间不会混进样本。 */
+    this._keyWaitSince = 0;      // 本次等待的起始墙上时刻；0 = 不在测量
+    this._keyWaitKey = '';       // 本次等待对应的期望键
+    this._keyWaitTainted = false;// 本次等待已作废（按错过 / 提示介入）
+    this._keyWaitMeasured = 0;   // 已产出的**实测**样本数，用来丢掉会话第一个
 
     /* 已出错的字符集合（用于判定 correctChars） */
     this._erroredChars = new Set();
@@ -248,6 +300,7 @@ export class PracticeEngine {
     this._lastTickAt = Date.now();
     this._startTicker();
     this._resetHintTimer();
+    this._armKeyWait();
     this.emit('state', { state: this.state });
     this.emit('change', this.snapshot());
     return this;
@@ -259,6 +312,9 @@ export class PracticeEngine {
     this.state = STATE.PAUSED;
     this._stopTicker();
     this._clearHintTimer();
+    // 按键耗时走的是 Date.now()（见 KEY_TIMING），没经过 ticker 的节流保护，
+    // 所以暂停必须显式 disarm —— 否则那段时间会被算进「等这个键等了多久」。
+    this._disarmKeyWait();
     this.emit('state', { state: this.state });
     this.emit('pause', this.snapshot());
     return this;
@@ -270,6 +326,7 @@ export class PracticeEngine {
     this._lastTickAt = Date.now();
     this._startTicker();
     this._resetHintTimer();
+    this._armKeyWait();
     this.emit('state', { state: this.state });
     this.emit('resume', this.snapshot());
     return this;
@@ -290,6 +347,7 @@ export class PracticeEngine {
     if (this.state === STATE.RUNNING) this.syncActiveTime();
     this._stopTicker();
     this._clearHintTimer();
+    this._disarmKeyWait();
     this.state = STATE.FINISHED;
     const summary = this.summary();
     summary.reason = reason;
@@ -301,6 +359,7 @@ export class PracticeEngine {
   destroy() {
     this._stopTicker();
     this._clearHintTimer();
+    this._disarmKeyWait();
     this._handlers = {};
     this.state = STATE.IDLE;
   }
@@ -406,6 +465,9 @@ export class PracticeEngine {
     // 亮过提示即视为「依赖提示」，该字符不计入独立正确率分子
     const mark = this._currentMarkKey(target);
     if (mark) this._hintedChars.add(mark);
+    // 提示一介入，这次等待测的就不再是「自己要多久才能反应」，
+    // 而是「被告知答案后多久动手」。作废，否则提示开着时慢键会被系统性高估。
+    this._taintKeyWait();
 
     this.emit('hint', payload);
     if (want === 'reveal') this.emit('reveal', payload);
@@ -463,6 +525,9 @@ export class PracticeEngine {
     this._hintLevel = want;
     const mark = this._currentMarkKey(target);
     if (mark) this._hintedChars.add(mark);
+    // 与 _checkHint 同样作废本次等待。手动求助和自动提示在这件事上没有区别：
+    // 用户拿到答案了，接下来那一按测的就不是「自己要多久才能反应」。
+    this._taintKeyWait();
     this.emit('hint', payload);
     if (want === 'reveal') this.emit('reveal', payload);
     this.emit('change', this.snapshot());
@@ -644,6 +709,102 @@ export class PracticeEngine {
   }
 
   /* ==========================================================
+     按键耗时（反应时间）
+     ========================================================== */
+
+  /**
+   * 开始测量「下一个正确键要等多久」。
+   *
+   * 调用时机统一为**期望键发生变化**的那些点：start / 恢复 / 换字 / 换题 /
+   * 音节内推进到下一个键。不在每次 pressKey 之后调用 —— 按错时期望键并没有
+   * 变，那种情况走 _taintKeyWait 作废本次样本。
+   *
+   * @param {object|null} [target] 已知目标则传入，省一次 currentTarget() 重建
+   */
+  _armKeyWait(target) {
+    this._keyWaitSince = 0;
+    this._keyWaitKey = '';
+    this._keyWaitTainted = false;
+    if (this.state !== STATE.RUNNING) return;
+    const t = target || this.currentTarget();
+    if (!t) return;
+    // 只有「键一出现就是唯一要按的键」或「同音节内的第 2+ 键」才测，
+    // 见 KEY_TIMING ①：音节首键含读字时间，混进来会让声母键系统性变慢。
+    const measurable = (t.kind === 'key' || t.kind === 'part') || Number(t.pos) >= 1;
+    if (!measurable) return;
+    const key = String((t.keys && t.keys[t.pos]) || '').toUpperCase();
+    if (!/^[A-Z]$/.test(key)) return;
+    this._keyWaitSince = Date.now();
+    this._keyWaitKey = key;
+  }
+
+  /** 停止测量并丢弃当前样本（换题/暂停/结束时调用） */
+  _disarmKeyWait() {
+    this._keyWaitSince = 0;
+    this._keyWaitKey = '';
+    this._keyWaitTainted = false;
+  }
+
+  /** 作废当前样本但保留测量窗口（按错、提示介入） */
+  _taintKeyWait() {
+    this._keyWaitTainted = true;
+  }
+
+  /**
+   * 记录一次样本（仅在**按对**时调用）。
+   * @param {string} expected 本次按对的键
+   */
+  _observeKeyWait(expected) {
+    const key = String(expected || '').toUpperCase();
+    const since = this._keyWaitSince;
+    if (!since || this._keyWaitTainted) return;
+    if (key !== this._keyWaitKey) return;      // 期望键与本次不符，说明窗口已错位
+    const ms = Date.now() - since;
+    // ③ 超过上限直接丢弃而非截断
+    if (!(ms > 0) || ms > KEY_TIMING.maxMs) return;
+
+    /* 会话第一个**实测**样本含「刚坐下、进入状态」的启动成本，天然偏大，丢掉。
+     * 计数只在这里 +1 —— 音节首键那种「本来就不测量」的按压不该占掉这个名额，
+     * 否则单字模式里第一个 follow 样本会被误删，而真正该丢的那个还在。 */
+    if (this._keyWaitMeasured === 0) {
+      this._keyWaitMeasured = 1;
+      return;
+    }
+    this._keyWaitMeasured += 1;
+
+    const bucket = this._timingBucket();
+    if (!bucket) return;
+    const store = this.stats.keyTimings;
+    const rec = store[key] || (store[key] = { lead: [], follow: [] });
+    rec[bucket].push(ms);
+    if (rec[bucket].length > KEY_TIMING.sessionPerBucket) {
+      rec[bucket] = rec[bucket].slice(rec[bucket].length - KEY_TIMING.sessionPerBucket);
+    }
+  }
+
+  /** 本次样本该进 lead 还是 follow 桶 */
+  _timingBucket() {
+    const t = this.currentTarget();
+    if (!t) return null;
+    return (t.kind === 'key' || t.kind === 'part') ? 'lead' : 'follow';
+  }
+
+  /** 汇总本会话的按键耗时（给结算面板与落盘用） */
+  keyTimings() {
+    const out = {};
+    const store = this.stats.keyTimings || {};
+    for (const [k, rec] of Object.entries(store)) {
+      const key = String(k || '').toUpperCase();
+      if (!/^[A-Z]$/.test(key)) continue;
+      const lead = sanitizeSamples(rec && rec.lead);
+      const follow = sanitizeSamples(rec && rec.follow);
+      if (!lead.length && !follow.length) continue;
+      out[key] = { lead, follow };
+    }
+    return out;
+  }
+
+  /* ==========================================================
      核心：按键处理
      ========================================================== */
 
@@ -717,6 +878,8 @@ export class PracticeEngine {
 
   /* ---- 按键正确 ---- */
   _onCorrectKey(target, key) {
+    // 先取样再推进：一旦 keyIndex/charIndex 变了，期望键就换人了。
+    this._observeKeyWait(target.keys[target.pos]);
     this.typed += key;
     this.stats.combo += 1;
     this.stats.maxCombo = Math.max(this.stats.maxCombo, this.stats.combo);
@@ -742,6 +905,8 @@ export class PracticeEngine {
 
     // 还没完成，移动到一个键
     this.keyIndex += 1;
+    // 期望键变了，重新开一个测量窗口（此时 pos ≥ 1，属「纯运动时间」）
+    this._armKeyWait();
     this.emit('change', this.snapshot());
     return {
       handled: true,
@@ -791,6 +956,10 @@ export class PracticeEngine {
   _onWrongKey(target, key, expected, expectedAll, skipOnWrong = false) {
     this.stats.wrongKeystrokes += 1;
     this.stats.combo = 0;
+    // 按错 → 本次等待作废（见 KEY_TIMING ②）。
+    // 不只是「不取这次的样」：从出错前就开始的那段等待里已经混进了
+    // 「想不起来」的成分，继续留着会把纠错耗时当成这个键的熟练度。
+    this._disarmKeyWait();
 
     // 记录易错的字 / 词
     this._recordWrongItem(target, this.currentChar());
@@ -964,6 +1133,7 @@ export class PracticeEngine {
         this._advanceQuestion('passage-done');
         return;
       }
+      this._armKeyWait();
       this.emit('change', this.snapshot());
       return;
     }
@@ -978,6 +1148,7 @@ export class PracticeEngine {
     if (next >= chars.length) {
       this._advanceQuestion('question-done');
     } else {
+      this._armKeyWait();
       this.emit('change', this.snapshot());
     }
   }
@@ -1071,6 +1242,11 @@ export class PracticeEngine {
     }
 
     this.emit('question', { index: this.index, done: false, reason });
+    // 换题后 arm（必须放在 index/charIndex 都更新完之后 —— 放在
+    // _resetHintTimer() 旁边会拿旧目标算，量到的键是上一题最后一个键）。
+    // 提前 return 的两条路径（续题源枯竭 / 题量走完）由 finish() 里的
+    // _disarmKeyWait() 兜底，state 已不是 RUNNING，arm 本身也会自动让开。
+    this._armKeyWait();
     this.emit('change', this.snapshot());
   }
 
@@ -1215,6 +1391,7 @@ export class PracticeEngine {
       perCharErrors: Object.assign({}, this.stats.perCharErrors),
       perWordErrors: Object.assign({}, this.stats.perWordErrors || {}),
       keyErrors: Object.assign({}, this.stats.keyErrors || {}),
+      keyTimings: this.keyTimings(),
       completed: !this.unlimited && this.index >= this.questions.length,
       unlimited: this.unlimited,
       examMode: this.examMode,
@@ -1277,7 +1454,8 @@ export class PracticeEngine {
         maxCombo: this.stats.maxCombo,
         perCharErrors: this.stats.perCharErrors,
         perWordErrors: this.stats.perWordErrors || {},
-        keyErrors: this.stats.keyErrors || {}
+        keyErrors: this.stats.keyErrors || {},
+        keyTimings: this.keyTimings()
       },
       settings: {
         durationSec: this.durationSec,
@@ -1341,6 +1519,23 @@ export class PracticeEngine {
         if (st.keyErrors && typeof st.keyErrors === 'object') {
           eng.stats.keyErrors = Object.assign({}, st.keyErrors);
         }
+        // 按键耗时样本同样要跟着现场走，否则中断续练会丢掉前半程的数据，
+        // 结算面板的「反应最慢的键」只反映续练之后那一段 —— 看起来像
+        // 「一续练就变慢了」。逐样本清洗，不信任存档里的任何数字。
+        if (st.keyTimings && typeof st.keyTimings === 'object' && !Array.isArray(st.keyTimings)) {
+          const timings = {};
+          for (const [k, rec] of Object.entries(st.keyTimings)) {
+            const key = String(k || '').toUpperCase();
+            if (!/^[A-Z]$/.test(key) || !rec || typeof rec !== 'object') continue;
+            const lead = sanitizeSamples(rec.lead);
+            const follow = sanitizeSamples(rec.follow);
+            if (lead.length || follow.length) timings[key] = { lead, follow };
+          }
+          eng.stats.keyTimings = timings;
+          // 续练的第一个样本同样含「刚回来、进入状态」的启动成本
+          eng._keyWaitMeasured = Object.values(timings)
+            .reduce((n, rec) => n + rec.lead.length + rec.follow.length, 0) || 1;
+        }
       }
       // 修正 charIndex 越界
       const q = eng.questions[eng.index];
@@ -1370,6 +1565,28 @@ export function normalizeKey(raw) {
   if (s.length !== 1) return '';
   const ch = s.toLowerCase();
   return /^[a-z]$/.test(ch) ? ch : '';
+}
+
+/**
+ * 清洗一组毫秒样本。
+ *
+ * 这份数据要经过 localStorage 往返，也要经过用户手动导入的 JSON，
+ * 所以不能假定它是干净的：非数字、NaN、负数、超上限的混在里面都可能被算进
+ * 中位数，把整张表带歪。宁可少一个样本也不要一个坏样本。
+ *
+ * @param {any} list
+ * @returns {number[]} 升序、只含 (0, maxMs] 的整数毫秒
+ */
+export function sanitizeSamples(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const v of list) {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n) || n <= 0 || n > KEY_TIMING.maxMs) continue;
+    out.push(n);
+  }
+  out.sort((a, b) => a - b);
+  return out;
 }
 
 function clampInt(v, min, max) {

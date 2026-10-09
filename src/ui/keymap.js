@@ -26,6 +26,26 @@ const PAD = 10;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
+/**
+ * 某个键在 SVG 坐标系里的 translate()。
+ *
+ * 覆盖层（热力数字、慢键环）挂在一个独立的 `<g>` 里，那个 `<g>` 不在
+ * .kb-key 内部，拿不到键自带的 transform，所以必须自己算一遍坐标。
+ * 算式必须与 buildSvg / buildKey 保持一致 —— 两处各写一份必然漂移。
+ */
+function keyTransform(key) {
+  const K = String(key || '').toUpperCase();
+  for (let r = 0; r < ROWS.length; r++) {
+    const row = ROWS[r];
+    const c = row.keys.indexOf(K);
+    if (c < 0) continue;
+    const x = c * (KEY_W + GAP) + row.offset * (KEY_W + GAP);
+    const y = PAD + r * (KEY_H + GAP);
+    return `translate(${x},${y})`;
+  }
+  return 'translate(0,0)';
+}
+
 /* 缓存键位数据，避免重复计算 */
 let KEY_DATA = null;
 function keyData() {
@@ -80,10 +100,14 @@ export function renderKeymap(container, opts = {}) {
   heatLayer.setAttribute('class', 'kb-heat-layer');
   heatLayer.setAttribute('pointer-events', 'none');
 
-  /* 主题切换：SVG 的 fill/stroke 是**属性**而不是 CSS 声明，
-     属性优先级高于样式表里的 class 规则，所以换主题后必须重写一遍，
-     单纯改 CSS 变量是刷新不到它们的。这里记住上次的热力数据，重画时复用。 */
+  /* 慢键标记：直接挂在各自键元素的**内部**（而不是另起一层）。
+     之所以能共用同一个 .kb-key 容器却不冲突：热力图改的是 `.kb-body` 这一个
+     元素的 fill/stroke，慢键环是**另一个** rect，两者互不影响 ——
+     「又错又慢」的键上两个信号能同时看见。
+     挂在键内部还有个实际好处：--slow-level 设在 .kb-key 上即可层叠到环上，
+     不用给每个环单独塞一遍样式变量。 */
   let lastHeat = null;
+  let lastSlow = null;
   let lastHighlight = null;
 
   /**
@@ -100,6 +124,7 @@ export function renderKeymap(container, opts = {}) {
    */
   function repaint() {
     if (lastHeat) this.setHeat(lastHeat);
+    if (lastSlow) this.setSlow(lastSlow);
     if (lastHighlight) this.setHighlight(lastHighlight);
     else clearHighlight();
   }
@@ -186,6 +211,49 @@ export function renderKeymap(container, opts = {}) {
       if (heatLayer.parentNode) heatLayer.parentNode.removeChild(heatLayer);
     },
 
+    /**
+     * 应用「按得慢」标记。传入空数组 = 清除。
+     *
+     * 用**独立的描边环**而不是改 .kb-body 的 fill/stroke：热力图已经把
+     * fill+stroke 用在「按错」上了。两个指标若共用一个元素，「又错又慢」的键
+     * 只能显示其中一个 —— 而那恰恰是最该被看见的键。环挂在键内部但是另一个
+     * 元素，所以两个信号并存。
+     *
+     * @param {Array<{key:string, level?:number, medianMs?:number, samples?:number}>} list
+     */
+    setSlow(list) {
+      this.clearSlow();
+      lastSlow = Array.isArray(list) && list.length ? list.slice() : null;
+      if (!lastSlow) return;
+      const maxLevel = Math.max(...list.map(x => Number(x && x.level) || 1));
+      for (const item of list) {
+        if (!item || !item.key) continue;
+        const K = String(item.key).toUpperCase();
+        const el = keyEls[K];
+        if (!el) continue;
+        const lv = Math.max(1, Math.min(4, Number(item.level) || 1));
+        // 层级走 CSS 变量 + class，样式表决定颜色（不在 JS 里硬编码）。
+        // 设在 .kb-key 上，环作为它的子元素自然继承。
+        el.style.setProperty('--slow-level', String(lv));
+        el.style.setProperty('--slow-max', String(maxLevel));
+        el.classList.add('is-slow');
+        el.appendChild(slowRing(item));
+      }
+    },
+
+    clearSlow() {
+      Object.values(keyEls).forEach(el => {
+        el.classList.remove('is-slow');
+        if (el.style && el.style.removeProperty) {
+          el.style.removeProperty('--slow-level');
+          el.style.removeProperty('--slow-max');
+        }
+        // 环是直接挂在键里的，清热力层那套逻辑不会碰到它
+        const ring = el.querySelector('.kb-slow-ring');
+        if (ring && ring.parentNode) ring.parentNode.removeChild(ring);
+      });
+    },
+
     clear() { clearHighlight(); lastHighlight = null; },
 
     repaint,
@@ -203,11 +271,27 @@ export function renderKeymap(container, opts = {}) {
     t.setAttribute('font-weight', 700);
     // fill 交给 .kb-heat-num 的 CSS 规则（用 var(--heat-text-2)）
     t.textContent = String(Number(item.count) || 0);
-    // 用 <g> 包一层带上 translate，避免和已有 text 冲突
+    // 用 <g> 包一层并**带上与键相同的 translate**。
+    // 早先这里漏了 transform，所有键的数字都落在同一个坐标上叠成一坨
+    // （浏览器实测 8 个数字只有 1 个不同的 bounding box）—— 等于没显示。
     const g = document.createElementNS(SVG_NS, 'g');
     g.setAttribute('data-heat-for', K);
+    g.setAttribute('transform', keyTransform(K));
     g.appendChild(t);
     return g;
+  }
+
+  /** 慢键标记：键内侧的虚线描边环（不填色，所以热力填充仍可见） */
+  function slowRing(item) {
+    const r = document.createElementNS(SVG_NS, 'rect');
+    r.setAttribute('class', 'kb-slow-ring');
+    r.setAttribute('x', 2.5);
+    r.setAttribute('y', 2.5);
+    r.setAttribute('width', String(KEY_W - 5));
+    r.setAttribute('height', String(KEY_H - 5));
+    r.setAttribute('rx', '7');
+    r.setAttribute('data-slow-ms', String(Math.round(Number(item.medianMs) || 0)));
+    return r;
   }
 
   function clearHighlight() {

@@ -500,6 +500,8 @@
         <p class="panel-sub" style="margin-top:-6px">
           颜色越深表示该键被按错（即「想不起来」）的次数越多。数字为累计次数。
           与「易错字词表」互补：字词表看「哪些字不会」，热力图看「哪些键不熟」。
+          键内侧的<b>蓝色虚线环</b>是另一层诊断：这个键<b>没按错、但按得慢</b>
+          （还在犹豫，尚未形成肌肉记忆）。它比错误更早出现，往往是提前干预的信号。
         </p>
         <div class="chart-tools">
           <div class="chips" id="heatRangeChips">
@@ -518,6 +520,10 @@
           <div><i class="dot heat-dot-4"></i>最集中</div>
         </div>
         <div class="heat-top" id="heatTop"></div>
+
+        <!-- 慢键层：与热力层共用同一张键盘图，但用不同视觉通道（虚线环）。
+             独立成块是为了能单独说明口径 —— 这层数字很容易被误读。 -->
+        <div class="slow-box" id="slowKeysBox"></div>
 
         <!-- 易错表跨模式聚合：一条错误记录只有「哪个字词错了」，
              不带模式维度（同一个字在单字和词组里都算它不熟）。

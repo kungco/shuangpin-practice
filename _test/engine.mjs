@@ -6,7 +6,7 @@ globalThis.window = {
   clearInterval: (id) => clearInterval(id)
 };
 
-const { PracticeEngine, normalizeKey, STATE } = await import('../src/core/engine.js');
+const { PracticeEngine, normalizeKey, STATE, KEY_TIMING, sanitizeSamples } = await import('../src/core/engine.js');
 const { generateQuestions } = await import('../src/core/questions.js');
 const { buildSyllables } = await import('../src/core/scheme.js');
 
@@ -606,6 +606,237 @@ console.log('【新增】不限量续题、统计与恢复');
   await new Promise(resolve => setTimeout(resolve, 280));
   ok(timed.state === STATE.FINISHED && reason === 'timeup', '不限量仍受倒计时限制');
   timed.destroy();
+}
+
+console.log('\n【新增】按键耗时：反应时间测量口径');
+{
+  /* 引擎用 Date.now() 量按键耗时（不能用 elapsedSec —— 那玩意每 250ms
+     才跳一次，量化误差比 200–600ms 的信号本身还大）。
+     所以这里接管 Date.now()，把时间变成**完全确定的**，而不是靠 sleep 赌。
+     顺带说明：墙钟被接管期间 hint 定时器仍走真实时间，但 _checkHint 也读
+     Date.now()，虚拟时钟不走 → 不会意外触发提示，用例因此完全可复现。 */
+  const realNow = Date.now;
+  let T = 1_700_000_000_000;
+  Date.now = () => T;
+  const wait = (ms) => { T += ms; };
+  // 整个 keyTimings 表里的样本总数
+  const total = (map) => Object.values(map || {})
+    .reduce((n, rec) => n + (rec.lead?.length || 0) + (rec.follow?.length || 0), 0);
+
+  /* ---------- ① 音节首键不产样本 ---------- */
+  const eng = new PracticeEngine({ questions: generateQuestions({ mode: 'char', count: 8 }), hintEnabled: false });
+  eng.start();
+  let tgt = eng.currentTarget();
+  ok(tgt.kind === 'syllable' && tgt.pos === 0, '首个目标是音节首键（pos 0）');
+  wait(400);
+  eng.pressKey(tgt.keys[0]);
+  ok(total(eng.stats.keyTimings) === 0,
+    '音节首键不产样本（含读字时间；混进来会让声母键系统性显得比韵母键慢）');
+
+  tgt = eng.currentTarget();
+  ok(tgt.pos === 1, '已推进到该音节的第二个键');
+  wait(320);
+  eng.pressKey(tgt.keys[1]);
+  ok(total(eng.stats.keyTimings) === 0,
+    '会话第一个实测样本被丢弃（含启动成本，天然偏大）');
+
+  /* ---------- ② 之后正常产出，且落在 follow 桶 ---------- */
+  /* 打完整一个字 = 首键（不测量）+ 次键（测量）。
+     所以每个「可测样本」要消耗两个字 —— 这是口径决定的，不是测试凑数。 */
+  const typeChar = (e, followMs) => {
+    const t0 = e.currentTarget();
+    if (!t0 || !t0.keys || !t0.keys.length) return false;
+    e.pressKey(t0.keys[0]);
+    const t1 = e.currentTarget();
+    if (!t1 || t1.keys[t1.pos] === undefined) return false;
+    wait(followMs);
+    e.pressKey(t1.keys[t1.pos]);
+    return true;
+  };
+  typeChar(eng, 280);                 // 实测样本 → 计入（#1 已在 ① 里消耗掉）
+  typeChar(eng, 410);                 // 实测样本 → 计入
+  const kt = eng.stats.keyTimings;
+  ok(Object.keys(kt).length >= 1, `产出了样本（涉及 ${Object.keys(kt).join('/')} 键）`);
+  /* 每个字的次键不同，样本会散在多个键下，所以要跨键聚合后再断言 ——
+     按单个键查会漏掉「换了字就查不到」的样本。 */
+  const allFollow = Object.values(kt).flatMap(r => r.follow).sort((a, b) => a - b);
+  const allLead = Object.values(kt).flatMap(r => r.lead);
+  ok(allFollow.join(',') === '280,410' && allLead.length === 0,
+    `样本全部落在 follow 桶、值与实际等待一致（${JSON.stringify(allFollow)}）`);
+
+  /* ---------- ③ 按错的目标不产样本 ---------- */
+  const before = total(eng.stats.keyTimings);
+  const cur = eng.currentTarget();
+  const wrongKey = cur.keys[0] === 'x' ? 'y' : 'x';
+  wait(500);
+  eng.pressKey(wrongKey);
+  wait(120);
+  eng.pressKey(cur.keys[0]);          // 纠错（首键本身也不产样本）
+  ok(total(eng.stats.keyTimings) === before,
+    '按错之后不产样本（测的应是键的熟练度，不是纠错耗时）');
+
+  /* ---------- ④ 超过上限的样本直接丢弃，不截断 ---------- */
+  const beforeCap = total(eng.stats.keyTimings);
+  typeChar(eng, KEY_TIMING.maxMs + 500);
+  ok(total(eng.stats.keyTimings) === beforeCap,
+    `超过 ${KEY_TIMING.maxMs / 1000}s 的等待被丢弃（截断会让样本堆在上限值上，比不显示更糟）`);
+
+  /* ---------- ⑤ 暂停期间不计入 ---------- */
+  const beforePause = total(eng.stats.keyTimings);
+  const t6 = eng.currentTarget();
+  if (t6 && t6.keys && t6.keys.length >= 2) {
+    eng.pressKey(t6.keys[0]);        // 进入 pos 1，开启一个测量窗口
+    eng.pause();
+    wait(9000);                      // 暂停 9 秒，远超单样本上限
+    eng.resume();
+    wait(260);
+    const t6b = eng.currentTarget();
+    if (t6b && t6b.keys[t6b.pos] !== undefined) eng.pressKey(t6b.keys[t6b.pos]);
+  }
+  const kt2 = eng.stats.keyTimings;
+  const anyBig = Object.values(kt2).some(rec => [...rec.lead, ...rec.follow].some(v => v > KEY_TIMING.maxMs));
+  ok(!anyBig, '暂停 9 秒后没有任何样本超过上限（暂停时段被 disarm 掉了）');
+  typeChar(eng, 350);
+  ok(total(eng.stats.keyTimings) > beforePause, '恢复后仍能正常产出样本');
+
+  /* ---------- ⑥ summary 与 keyTimings() 的形状 ---------- */
+  const sum = eng.summary();
+  ok(sum.keyTimings && typeof sum.keyTimings === 'object', 'summary() 带上 keyTimings');
+  const anyK = Object.keys(sum.keyTimings)[0];
+  ok(anyK && /^[A-Z]$/.test(anyK) && Array.isArray(sum.keyTimings[anyK].follow),
+    `keyTimings 结构为 { 大写单字母: { lead:[], follow:[] } }（实际 ${anyK}）`);
+  eng.destroy();
+
+  /* ---------- ⑦ 键位模式（单键题）产出 lead 桶 ---------- */
+  const keyEng = new PracticeEngine({ questions: generateQuestions({ mode: 'keymap', count: 20 }), hintEnabled: false });
+  keyEng.start();
+  const seq = () => {
+    let t = keyEng.currentTarget();
+    if (!t) return;
+    const k = t.keys[t.pos];
+    wait(260);
+    keyEng.pressKey(k);
+  };
+  seq(); seq(); seq(); seq(); seq();      // 前 4 个丢弃启动成本，第 5 个起计入
+  const kkt = keyEng.stats.keyTimings;
+  const kKey = Object.keys(kkt)[0];
+  ok(kKey && kkt[kKey].lead.length >= 1,
+    `单键题产出 lead 桶（${kKey}: ${JSON.stringify(kkt[kKey])}）`);
+  ok(kKey && kkt[kKey].lead.every(v => v === 260), 'lead 样本值正确');
+  keyEng.destroy();
+
+  /* ---------- ⑧ 提示介入后样本作废 ----------
+     分两条路径各测一次：自动提示（_checkHint）与手动求助（requestHint）。
+     早先只在自动路径上作废，手动按 Tab 求助于是一个漏网 —— 而手动求助
+     在实际使用里并不罕见，那一段等待同样不是「自己能有多快」。 */
+  const hintCase = (setup, label) => {
+    const e = new PracticeEngine(Object.assign({
+      questions: generateQuestions({ mode: 'keymap', count: 30 }),
+      hintEnabled: true
+    }, setup));
+    e.start();
+    // 先打掉「会话第一个实测样本」的名额，让后面的样本都是真的
+    const tap = (ms) => {
+      const t = e.currentTarget();
+      if (!t || t.keys[t.pos] === undefined) return false;
+      wait(ms);
+      e.pressKey(t.keys[t.pos]);
+      return true;
+    };
+    tap(200); tap(200); tap(200);
+    let fired = false;
+    e.on('hint', () => { fired = true; });
+    tap(200);
+    const beforeCount = total(e.stats.keyTimings);
+    const t = e.currentTarget();
+    if (t && t.keys[t.pos] !== undefined) {
+      wait(600);                       // 一段「被卡住」的时间
+      if (e.requestHint('hint')) { fired = true; }
+      wait(40);
+      e.pressKey(t.keys[t.pos]);       // 拿到答案之后的那一按
+    }
+    ok(fired, `${label}：提示确实触发过`);
+    ok(total(e.stats.keyTimings) === beforeCount,
+      `${label}：提示介入后的等待没有进样本（否则慢键会被系统性高估）`);
+    e.destroy();
+  };
+  hintCase({ hintDelayMs: 300, revealDelayMs: 0 }, '手动求助');
+
+  // 自动提示：靠真实定时器触发 —— 把虚拟时钟推过 hintDelayMs 再等真实时间
+  {
+    const e = new PracticeEngine({
+      questions: generateQuestions({ mode: 'keymap', count: 30 }),
+      hintDelayMs: 80, revealDelayMs: 0
+    });
+    e.start();
+    const tap = (ms) => {
+      const t = e.currentTarget();
+      if (!t || t.keys[t.pos] === undefined) return false;
+      wait(ms);
+      e.pressKey(t.keys[t.pos]);
+      return true;
+    };
+    tap(200); tap(200); tap(200); tap(200);
+    const beforeCount = total(e.stats.keyTimings);
+    let autoHint = false;
+    e.on('hint', () => { autoHint = true; });
+    const t = e.currentTarget();
+    if (t && t.keys[t.pos] !== undefined) {
+      wait(400);                       // 越过 hintDelayMs，让真实定时器回调触发
+      await new Promise(res => setTimeout(res, 140));
+      e.pressKey(t.keys[t.pos]);
+    }
+    ok(autoHint, '自动提示：提示确实触发过');
+    ok(total(e.stats.keyTimings) === beforeCount,
+      '自动提示：提示介入后的等待没有进样本');
+    e.destroy();
+  }
+
+  /* ---------- ⑨ sanitizeSamples ---------- */
+  ok(sanitizeSamples(null).length === 0 && sanitizeSamples('x').length === 0, '非数组输入安全回落');
+  ok(sanitizeSamples([100, '200', 300.4, -5, 0, NaN, 999999, null, undefined]).join(',') === '100,200,300',
+    '非数字/超范围/非正数被剔除，合法值向上取整到整毫秒');
+  ok(sanitizeSamples([300, 100, 200]).join(',') === '100,200,300', '返回升序（可直接取中位数）');
+
+  /* ---------- ⑩ 续练现场保留耗时样本 ---------- */
+  const e1 = new PracticeEngine({ questions: generateQuestions({ mode: 'char', count: 8 }), hintEnabled: false });
+  e1.start();
+  for (let i = 0; i < 3; i++) {
+    const a = e1.currentTarget();
+    if (!a) break;
+    e1.pressKey(a.keys[0]);
+    const b = e1.currentTarget();
+    if (!b) break;
+    wait(300);
+    e1.pressKey(b.keys[1]);
+  }
+  const saved = e1.exportResume();
+  const keptBefore = Object.keys(e1.stats.keyTimings).length;
+  const resumed = PracticeEngine.restore(saved);
+  ok(resumed && Object.keys(resumed.stats.keyTimings).length === keptBefore,
+    '续练现场带上按键耗时样本（否则结算只反映续练之后那一段）');
+  ok(resumed._keyWaitMeasured > 1, '恢复后不会把已积累的样本当成「第一个」再丢一次');
+  resumed.destroy();
+  e1.destroy();
+
+  /* ---------- ⑪ 脏存档里的样本会被清洗 ---------- */
+  const e2 = new PracticeEngine({ questions: generateQuestions({ mode: 'char', count: 4 }) });
+  const dirty = e2.exportResume();
+  dirty.stats.keyTimings = {
+    A: { lead: [100, 99999, -3, 'x'], follow: [] },
+    'not-a-key': { lead: [100], follow: [] },
+    B: { lead: 'oops', follow: [250] }
+  };
+  const e3 = PracticeEngine.restore(dirty);
+  const kt3 = e3.stats.keyTimings;
+  ok(kt3.A && kt3.A.lead.join(',') === '100', '超范围与非法的样本被剔除');
+  ok(!kt3['not-a-key'], '非法键名被丢弃');
+  ok(kt3.B && kt3.B.follow.join(',') === '250', '合法的桶仍被保留');
+  e3.destroy(); e2.destroy();
+
+  /* 墙钟一定要在**最后**才交还：前面 ⑩⑪ 两节依赖虚拟时钟才能产出样本
+     （真实时钟下相邻两次 pressKey 的间隔是 0ms，会被 ms > 0 判掉）。 */
+  Date.now = realNow;
 }
 
 console.log('\n' + (fail === 0 ? '✅ 引擎全部自检通过' : `❌ 引擎共 ${fail} 项未通过`));

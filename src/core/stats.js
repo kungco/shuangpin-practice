@@ -9,7 +9,8 @@
  *   - 针对性复习建议
  */
 
-import { loadHistory, loadDaily, getWeakList, dateStr, getKeyErrorTotals } from './storage.js';
+import { loadHistory, loadDaily, getWeakList, dateStr, getKeyErrorTotals,
+         getKeyTimings, median } from './storage.js';
 import { LEVEL_MAP } from './questions.js';
 
 /* ============================================================
@@ -431,6 +432,73 @@ export function keyHeatmap(opts = {}) {
     // UI 必须说明，否则「按模式筛选」看起来生效了其实没有。
     byMode,
     hottest: items.length ? items[0] : null
+  };
+}
+
+/* ============================================================
+   慢键诊断（按得慢，而不是按错）
+   ============================================================ */
+
+/**
+ * 哪些键「按对了但按得慢」。
+ *
+ * 与 keyHeatmap 的关系：那张图量的是**错误次数**（红色填充），这张图量的是
+ * **按键耗时中位数**。两者用不同的视觉通道（见 ui/keymap.js 的 setSlow ——
+ * 独立的描边环，不碰 .kb-body 的 fill），所以同一张键盘图上可以同时看：
+ * 红色填充 = 老按错，蓝环 = 按得慢。
+ *
+ * 归一化沿用 keyHeatmap 的思路，用 **P90** 而非最大值/最小值做分母：
+ * 耗时分布同样长尾（某个键可能因为某次卡壳而极慢），用最大值会让所有键
+ * 都压成同一档、失去分辨力；用最小值又会让一个异常快的键当分母、其余全部饱和。
+ * P90 只让最慢的约 10% 键饱和。
+ *
+ * 样本太少的键会被剔除：2 个样本的中位数毫无意义，把它排进「慢键」等于
+ * 报噪音。门槛与结算面板一致（见 KEY_SLOW_MIN_SAMPLES）。
+ *
+ * @param {object} opts
+ *   - range: 'all' | '30' | '10'
+ *   - mode:  'all' 或具体模式 id
+ * @returns {{items:Array, overall:number, p90:number, thin:number, sessions:number, byMode:boolean}}
+ */
+export const KEY_SLOW_MIN_SAMPLES = 5;
+
+export function keySlowness(opts = {}) {
+  const range = ['all', '30', '10'].includes(String(opts.range)) ? String(opts.range) : 'all';
+  const { items: raw, sessions, byMode } = getKeyTimings(range, opts.mode || 'all');
+
+  const rows = raw
+    .filter(r => r && /^[A-Z]$/.test(r.key) && r.samples >= KEY_SLOW_MIN_SAMPLES)
+    .map(r => ({ key: r.key, samples: r.samples, medianMs: r.medianMs, leadMs: r.leadMs, followMs: r.followMs }));
+
+  const medians = rows.map(r => r.medianMs).filter(n => n > 0).sort((a, b) => a - b);
+  const overall = median(medians);
+  let p90 = medians.length ? medians[medians.length - 1] : 0;
+  if (medians.length) {
+    const idx = Math.min(medians.length - 1, Math.ceil(medians.length * 0.9) - 1);
+    p90 = Math.max(1, medians[Math.max(0, idx)]);
+  }
+  const scale = p90 || 1;
+
+  const items = rows.map(r => {
+    const ratio = r.medianMs / scale;
+    return Object.assign(r, {
+      ratio: Math.round(ratio * 100) / 100,
+      level: r.medianMs >= scale ? 4 : ratio >= 0.6 ? 3 : ratio >= 0.3 ? 2 : 1,
+      // 比整体中位数慢百分之多少。overall 为 0 时给 0 而不是 Infinity/NaN。
+      overOverall: overall > 0 ? Math.round((r.medianMs / overall - 1) * 100) : 0
+    });
+  }).sort((a, b) => b.medianMs - a.medianMs);
+
+  return {
+    items,
+    overall,
+    p90: scale,
+    sessions,
+    byMode,
+    // 样本不足而被剔除的键数：UI 要如实说「另有 N 个键样本太少未参与」，
+    // 否则用户会把「没显示」当成「不慢」。
+    thin: raw.filter(r => r && r.samples > 0 && r.samples < KEY_SLOW_MIN_SAMPLES).length,
+    minSamples: KEY_SLOW_MIN_SAMPLES
   };
 }
 

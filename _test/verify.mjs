@@ -436,7 +436,7 @@ console.log('\n【10b】主题配色的一致性');
     //     WCAG 1.4.11 要求 3:1。这个字是「等提示才打对的」的唯一提示，
     //     对比度不够就等于这个信息没传达出去。
     //   - 纯装饰的强调色：3:1 是底线（AA 图形）。
-    for (const [s, min] of [['primary', 3], ['ok', 3], ['err', 3.5], ['warn', 3], ['exam', 3]]) {
+    for (const [s, min] of [['primary', 3], ['ok', 3], ['err', 3.5], ['warn', 3], ['exam', 3], ['slow', 3]]) {
       const c = varOf(block, s);
       checkedOk(ratio(c, bg) >= min,
         `${label}主题 ${s} 对比度 ${ratio(c, bg).toFixed(2)}:1 ≥ ${min}` +
@@ -444,6 +444,59 @@ console.log('\n【10b】主题配色的一致性');
     }
   }
   console.log(`  已校验 ${checked} 项：图表配色对齐 CSS 变量、深色覆盖完整、无未定义变量、对比度达标`);
+}
+
+console.log('\n【10c】慢键诊断：视觉通道必须与错误热力分离');
+{
+  let checked = 0;
+  const checkedOk = (cond, msg) => { checked++; ok(cond, msg); };
+  const css = readFileSync(resolve(ROOT, 'assets/style.css'), 'utf8');
+  const keymapSrc = readFileSync(resolve(ROOT, 'src/ui/keymap.js'), 'utf8');
+
+  /* 两个指标挂在同一张键盘图上，所以「不互相覆盖」是硬要求：
+     热力用 .kb-body 的填充，慢键若也去改 .kb-body，「又错又慢」的键
+     就只能显示其中一个 —— 而那恰恰是最该被看见的键。 */
+  const slowTouchesBody = /\.kb-key\.is-slow[^{]*\.kb-body\s*\{/.test(css);
+  checkedOk(!slowTouchesBody,
+    '★ 慢键标记不改 .kb-body（否则会盖掉错误热力的填充色）');
+  checkedOk(/\.kb-slow-ring\s*\{[^}]*fill:\s*none/.test(css),
+    '★ 慢键环 fill:none（空心，不遮挡键内文字与热力数字）');
+  checkedOk(/\.kb-slow-ring\s*\{[^}]*stroke:\s*var\(--slow\)/.test(css),
+    '★ 慢键环用独立的 --slow 颜色变量');
+  // 颜色必须与热力梯度区分开，否则两个诊断信号在视觉上混成一个
+  const slowVar = (css.match(/--slow:\s*(#[0-9a-fA-F]{3,8})/) || [])[1];
+  const heatVars = [...css.matchAll(/--heat-\d:\s*(#[0-9a-fA-F]{3,8})/g)].map(m => m[1]);
+  checkedOk(!!slowVar && !heatVars.includes(slowVar),
+    `★ 慢键色与热力色不同（--slow=${slowVar}，热力 ${heatVars.join('/')}）`);
+
+  // 深色主题也必须覆盖 --slow（否则深色下慢键环会沿用浅色的深蓝，几乎不可见）
+  const darkAt = css.indexOf('[data-theme="dark"]');
+  const darkBlock = css.slice(darkAt, css.indexOf('\n}', darkAt));
+  checkedOk(/--slow:/.test(darkBlock), '★ 深色主题覆盖了 --slow');
+
+  /* 覆盖层（热力数字、慢键环）不在 .kb-key 内部，必须自己算坐标。
+     早先 heatLayerText 造 <g> 时漏了 transform，8 个数字全叠在同一处 ——
+     浏览器实测只有 1 个不同的 bounding box，等于从来没显示过。 */
+  checkedOk(/function\s+keyTransform\s*\(/.test(keymapSrc), '★ keymap.js 提供 keyTransform 坐标换算');
+  checkedOk(/data-heat-for[\s\S]{0,120}setAttribute\('transform',\s*keyTransform\(/.test(keymapSrc)
+    || /g\.setAttribute\('transform',\s*keyTransform\(/.test(keymapSrc),
+    '★ 热力数字层带上了 transform（否则所有数字叠在一起）');
+
+  checkedOk(/setSlow\s*\(/.test(keymapSrc) && /clearSlow\s*\(/.test(keymapSrc),
+    '★ 键位图提供 setSlow / clearSlow');
+  checkedOk(/function\s+slowRing\s*\(/.test(keymapSrc), '★ 慢键环由 slowRing 生成');
+
+  // 口径常量必须存在且一致（引擎与存储层各自的副本不能各写一个数）
+  const engineSrc = readFileSync(resolve(ROOT, 'src/core/engine.js'), 'utf8');
+  const storageSrc = readFileSync(resolve(ROOT, 'src/core/storage.js'), 'utf8');
+  const engMax = (engineSrc.match(/maxMs:\s*(\d+)/) || [])[1];
+  checkedOk(!!engMax, `引擎声明了样本上限（${engMax}ms）`);
+  // 存储层的清洗上限必须与引擎一致，否则引擎丢弃的样本会被落盘时重新算进来
+  const storageCaps = [...storageSrc.matchAll(/>\s*(\d{4,5})\s*\)\s*continue/g)].map(m => m[1]);
+  checkedOk(storageCaps.includes(String(engMax)),
+    `★ 存储层的清洗上限与引擎一致（均为 ${engMax}ms）`);
+
+  console.log(`  已校验 ${checked} 项：慢键与热力分属独立视觉通道、覆盖层坐标正确、上下限一致`);
 }
 
 /* ============================================================

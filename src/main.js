@@ -20,7 +20,8 @@ import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
 import { summarize, historySeries, dailySeries, scoreSeries, weakRanking, groupWeakItems,
-         reviewAdvice, formatDuration, formatClock, keyHeatmap } from './core/stats.js';
+         reviewAdvice, formatDuration, formatClock, keyHeatmap, keySlowness,
+         KEY_SLOW_MIN_SAMPLES } from './core/stats.js';
 import { scoreExam, gradeTier, SCORE_CONFIG } from './core/score.js';
 import {
   getKeymapData, splitSyllable, primarySplit, highlightForSplit,
@@ -934,6 +935,13 @@ function persistRecord(summary) {
         // 带上模式：统计页的模式筛选要覆盖热力图，就必须能按模式取数
         S.recordKeyErrors(s.keyErrors, s.mode);
       }
+
+      /* 键维度按键耗时（慢键诊断）。与键错误分开存：一个是「按错」，
+         一个是「按对但犹豫」，混在一张表里就分不清「不会」和「不熟」。
+         同样带上模式，好让统计页的模式筛选同时覆盖两层诊断。 */
+      if (s.keyTimings && Object.keys(s.keyTimings).length) {
+        S.recordKeyTimings(s.keyTimings, s.mode);
+      }
     }
 
     /* 收尾音。playFinish / playSoften 早就写好、index.html 也写着「完成提示音」，
@@ -999,6 +1007,52 @@ function showResultModal(s, recorded) {
     ? `<p class="result-hint-note">其中 <strong>${hinted}</strong> 个字是等提示才打对的，已从独立正确率中剔除。` +
       `表面正确率 ${s.accuracy}%、独立正确率 ${s.independentAccuracy}%，相差 ${gap} 个百分点。</p>`
     : '';
+
+  /* ---------- 按键耗时：反应最慢的键 ----------
+     这是「诊断闭环」的第三维：热力图说哪些键**按错**，这里说哪些键
+     **按对但犹豫**。后者往往更早出现 —— 一个键还没被按错，只是变慢了，
+     那正是该干预的时候。
+
+     口径要点（否则数字会骗人）：
+       - 用**中位数**而非均值：偶尔走神一次就能把均值拽高一倍。
+       - 样本数 < KEY_SLOW_MIN_SAMPLES 的键不进排名：两个样本的中位数
+         毫无意义，报出来的是噪音。
+       - 测的**不是**「读完字到按下」，而是**纯运动时间**：音节首键
+         含读字时间，若一并统计，所有声母键会系统性显得比韵母键慢，
+         排出来的「最慢的键」基本等于「所有声母键」（见 engine.js KEY_TIMING）。
+     达不到门槛时**如实说明**，而不是安静地不显示 —— 沉默会被读成「都不慢」。 */
+  const slow = S.slowestKeys(s.keyTimings, { min: KEY_SLOW_MIN_SAMPLES, top: 5 });
+  const msText = (n) => `${(Math.round(n) / 1000).toFixed(2)}s`;
+  const slowBlock = (() => {
+    if (!slow.total) {
+      return `<div class="slow-block">
+        <h3 class="sub-title">反应最慢的键</h3>
+        <p class="slow-block-note">本轮没有采集到按键耗时样本。</p>
+      </div>`;
+    }
+    if (!slow.items.length) {
+      return `<div class="slow-block">
+        <h3 class="sub-title">反应最慢的键</h3>
+        <p class="slow-block-note">共测到 <strong>${slow.total}</strong> 个键，但每个都不足
+          <strong>${slow.min}</strong> 次样本，暂不排名。样本太少时中位数不可靠，
+          再练几轮就能给出结论。</p>
+      </div>`;
+    }
+    const rows = slow.items.map(it => `
+      <li class="slow-row">
+        <kbd class="slow-key">${it.key}</kbd>
+        <span class="slow-ms">${msText(it.medianMs)}</span>
+        <span class="slow-meta">${it.samples} 次样本的中位数</span>
+      </li>`).join('');
+    const thinNote = slow.thin
+      ? ` 另有 ${slow.thin} 个键样本不足 ${slow.min} 次，未参与排名。` : '';
+    return `<div class="slow-block">
+      <h3 class="sub-title">反应最慢的键</h3>
+      <ul class="slow-list">${rows}</ul>
+      <p class="slow-block-note">口径：该键成为下一个目标后到按下之间的<b>纯运动时间</b>
+        （不含读字时间），取<b>中位数</b>。按错、提示介入与超过 5 秒的等待都不计入。${thinNote}</p>
+    </div>`;
+  })();
 
   /* ---------- 测验：分数区块 ---------- */
   const scoreBlock = sc ? `
@@ -1076,6 +1130,8 @@ function showResultModal(s, recorded) {
       </div>
     </div>
     ${hintedNote}
+
+    ${slowBlock}
 
     ${noteParts.length ? `<div class="result-note">${noteParts.map(escapeHtml).join('<br>')}</div>` : ''}
 
@@ -2253,10 +2309,15 @@ function renderHeatmap() {
           完成练习后，按错的键会以热力色的深浅显示在这里 —— 颜色最深的键就是最该补的地方。
         </div>`;
       }
+      /* 慢键层与热力层**独立**：没有错误数据不代表没有耗时数据，
+         一并 return 会把「按得慢但一直按对」的用户也显示成「什么都没有」。 */
+      app.heatKeymap.clearSlow();
+      renderSlowLayer();
       return;
     }
 
     app.heatKeymap.setHeat(heat.items);
+    renderSlowLayer();
 
     /* 概览文字 */
     const summary = $('#heatSummary');
@@ -2288,6 +2349,48 @@ function renderHeatmap() {
     console.error('[heatmap] 渲染失败', err);
     wrap.innerHTML = '<div class="empty-state">热力图渲染失败</div>';
     app.heatKeymap = null;
+  }
+}
+
+/**
+ * 慢键层：把「按得慢」的键以虚线环叠在同一张键盘图上。
+ *
+ * 与热力层共用一张图但用不同通道（热力=填充、慢键=虚线环），所以两个诊断
+ * 能同时看：「又错又慢」的键既有橙色填充又有蓝色环，那是最该练的键。
+ */
+function renderSlowLayer() {
+  const box = $('#slowKeysBox');
+  if (!box || !app.heatKeymap) return;
+  try {
+    const slow = keySlowness({ range: app.stats.heatRange, mode: app.stats.mode });
+    app.heatKeymap.setSlow(slow.items);
+
+    if (!slow.items.length) {
+      box.innerHTML = slow.thin
+        ? `<div class="slow-legend-note">慢键：另有 ${slow.thin} 个键的样本不足
+             ${KEY_SLOW_MIN_SAMPLES} 次，暂不显示。再练几轮就能标出。</div>`
+        : '<div class="slow-legend-note">慢键：还没有足够的按键耗时数据。完成几轮练习后，'
+          + '「按对但犹豫」的键会用蓝色虚线环标在这里。</div>';
+      return;
+    }
+    const top = slow.items.slice(0, 8);
+    box.innerHTML = `
+      <div class="slow-legend">
+        <span class="slow-legend-title">慢键（按对但犹豫）</span>
+        ${top.map(it => `<span class="slow-chip">
+          <span class="slow-chip-k">${escapeHtml(it.key)}</span>
+          <span class="slow-chip-c">${(Math.round(it.medianMs) / 1000).toFixed(2)}s</span>
+        </span>`).join('')}
+      </div>
+      <div class="slow-legend-note">
+        取<b>中位数</b>，只统计不含读字时间的纯运动按键时间；
+        整体中位数 <b>${(Math.round(slow.overall) / 1000).toFixed(2)}s</b>，
+        环越粗表示越慢。${slow.thin ? `另有 ${slow.thin} 个键样本不足 ${KEY_SLOW_MIN_SAMPLES} 次未显示。` : ''}
+      </div>`;
+  } catch (err) {
+    console.error('[slowkeys] 渲染失败', err);
+    box.innerHTML = '';
+    try { app.heatKeymap.clearSlow(); } catch (_) {}
   }
 }
 
