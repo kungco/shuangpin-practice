@@ -189,13 +189,23 @@ console.log('\n【7】暂停 / 恢复 / 时间统计');
   const qs = generateQuestions({ mode: 'char', count: 5 });
   const eng = new PracticeEngine({ questions: qs, mode: 'char', durationSec: 0 });
   eng.start();
-  await new Promise(r => setTimeout(r, 350));
-  const before = eng.elapsedSec;
-  ok(before > 0.2, `运行中累计用时 ${before.toFixed(2)}s`);
+  // 同样按「引擎自己说的用时」等，而不是固定 sleep —— 慢机上 350ms 可能
+  // 连一个 250ms 的 tick 都跑不完，断言就会在 CI 上间歇失败
+  const w0 = Date.now();
+  while (eng.activeSeconds() < 0.4 && Date.now() - w0 < 2000) {
+    await new Promise(r => setTimeout(r, 50));
+  }
+  ok(eng.elapsedSec > 0.2, `运行中累计用时 ${eng.elapsedSec.toFixed(2)}s`);
+  /* 基准必须在 pause() **之后**取。pause() 会调 syncActiveTime()，把上次
+     tick 之后的零头并进 elapsedSec —— 而 activeSeconds() 早就把这段零头
+     算进去了，所以 pause 前的 elapsedSec 天然偏小、pause 后会「跳」一下。
+     拿 pause 前的值当基准，等于在断言「pause 补时」而不是「暂停期间不计时」，
+     慢机上零头接近上限（5s）就直接判失败。 */
   eng.pause();
-  await new Promise(r => setTimeout(r, 350));
+  const before = eng.elapsedSec;
+  await new Promise(r => setTimeout(r, 400));
   const afterPause = eng.elapsedSec;
-  ok(Math.abs(afterPause - before) < 0.15, `暂停期间不计时（${before.toFixed(2)} → ${afterPause.toFixed(2)}）`);
+  ok(Math.abs(afterPause - before) < 0.02, `暂停期间不计时（${before.toFixed(2)} → ${afterPause.toFixed(2)}）`);
   const r = eng.pressKey('a');
   ok(r.reason === 'paused', '暂停时按键被忽略');
   eng.resume();
@@ -210,7 +220,12 @@ console.log('\n【8】限时模式自动结束');
   let finished = null;
   eng.on('finish', s => { finished = s; });
   eng.start();
-  await new Promise(r => setTimeout(r, 1600));
+  // 等「引擎自己触发完成」而不是等固定 1.6s：慢机上定时器被节流时
+  // 1.6s 可能还不够（timeup 依赖 250ms 的 tick 推进），快机上则是白等
+  const w1 = Date.now();
+  while (!finished && Date.now() - w1 < 4000) {
+    await new Promise(r => setTimeout(r, 50));
+  }
   ok(!!finished, '限时到自动触发完成');
   ok(finished && finished.reason === 'timeup', `结束原因为 timeup（实际 ${finished && finished.reason}）`);
   eng.destroy();
@@ -239,9 +254,15 @@ console.log('\n【9】速度与正确率计算（含 finish 补时）');
       done++;
     }
   }
-  // 先给计时器两个 tick 的机会（250ms × 2），再结束。
-  // 结束时引擎会把最后一次 tick 之后的零头补回用时，因此 durationSec 应 >= 1。
-  await new Promise(r => setTimeout(r, 560));
+  /* 【为什么改成循环等待】打完 10 个字本身要花时间（每次错误往返都带按键），
+     整段用时在 CI 慢机上可能不足 1 秒。下面等的是「引擎自己说的用时 ≥ 1.2s」，
+     而不是拍一个固定 sleep —— 固定 sleep 会在快机上白等、在慢机上不够，
+     表现为「本地过、CI 挂」的间歇性失败（第一次上 CI 时就是这么红的）。
+     2.5s 兜底是防抖：万一引擎一直不到 1.2s，循环退出后断言会给出可读的失败。 */
+  const wallStart = Date.now();
+  while (eng.activeSeconds() < 1.2 && Date.now() - wallStart < 2500) {
+    await new Promise(r => setTimeout(r, 50));
+  }
   const s = eng.summary();
   console.log(`    用时 ${s.durationSec}s，正确字符 ${s.correctChars}，错误字符 ${s.wrongChars}，速度 ${s.speed} 字/分，正确率 ${s.accuracy}%`);
   ok(s.accuracy > 0 && s.accuracy <= 100, '正确率在 0–100 之间');
