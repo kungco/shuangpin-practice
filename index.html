@@ -747,8 +747,11 @@
   </main>
 
   <!-- ============ 结果弹窗 ============ -->
+  <!-- tabindex="-1" 让 openModal 能把焦点送进来（否则 Tab 会停在背景页面上）；
+       aria-labelledby 指向弹窗内部的标题，openModal 会在写入内容后接好这个引用。 -->
   <div class="overlay" id="overlay" hidden>
-    <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+    <div class="modal" id="modal" role="dialog" aria-modal="true"
+         tabindex="-1" aria-labelledby="modalTitle"></div>
   </div>
 
   <!-- ============ 全局提示 ============ -->

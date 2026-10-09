@@ -383,8 +383,17 @@ function buildSvg(interactive, onKeyClick) {
 
   const svg = document.createElementNS(SVG_NS, 'svg');
   svg.setAttribute('viewBox', `${minX - PAD} 0 ${width} ${height}`);
-  svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', '小鹤双拼键位图');
+  /* role 必须随 interactive 变 —— 这是个容易踩的坑：
+     `role="img"` 在 ARIA 里是「原子」角色，会把**所有后代从无障碍树里剪掉**
+     （视为纯表现内容）。键位图页的键是 <g role="button" tabindex="0"
+     aria-label="X 键">，一旦外层还是 role="img"，那 26 个键名和可聚焦性就全被
+     吞掉，读屏用户只会听到「小鹤双拼键位图，图片」，既不知道能点也拿不到键名。
+     所以：可交互时用 role="group"（容器角色，不剪后代），
+     纯展示（迷你键位图）时才用 role="img"。 */
+  svg.setAttribute('role', interactive ? 'group' : 'img');
+  svg.setAttribute('aria-label', interactive
+    ? '小鹤双拼键位图，可用 Tab 在 26 个键之间移动，按回车查看该键详情'
+    : '小鹤双拼键位图');
 
   ROWS.forEach((row, r) => {
     row.keys.forEach((k, c) => {

@@ -112,7 +112,11 @@ class FakeKeyboardEvent extends FakeEvent {
     this.code = opts.code ?? '';
     this.keyCode = opts.keyCode ?? 0;
     this.isComposing = !!opts.isComposing;
+    // 修饰键要齐。早先漏了 shiftKey，导致「Shift+Tab 反向循环焦点」这类
+    // 依赖修饰键的逻辑在测试里恒走 else 分支（shiftKey === undefined），
+    // 断言必然失败 —— 那是测试桩的缺陷，不是被测代码的问题。
     this.ctrlKey = !!opts.ctrlKey;
+    this.shiftKey = !!opts.shiftKey;
     this.metaKey = !!opts.metaKey;
     this.altKey = !!opts.altKey;
   }
@@ -180,6 +184,41 @@ if (!proto.closest) {
 }
 if (!proto.matches) {
   proto.matches = function (sel) { return false; };
+}
+
+/**
+ * linkedom 兼容层 0：焦点
+ * linkedom 既没有 document.activeElement，Element.prototype.focus 也是空实现，
+ * 于是「打开弹窗把焦点送进去 / 关闭后还回来」这类逻辑在测试里**完全观测不到**。
+ * 这里补一个最小可观测的焦点模型：focus() 记录 activeElement，
+ * blur() 清空，document.contains 判断元素是否还在树上。
+ * 只要够测「焦点有没有被正确迁移」即可，不追求与浏览器完全一致。
+ */
+if (!proto.focus || typeof document.activeElement === 'undefined') {
+  let active = null;
+  proto.focus = function () { active = this; };
+  proto.blur = function () { if (active === this) active = null; };
+  Object.defineProperty(document, 'activeElement', {
+    configurable: true,
+    get() { return active || document.body || null; }
+  });
+  Object.defineProperty(document, 'hasFocus', {
+    configurable: true,
+    value() { return true; }
+  });
+}
+
+/**
+ * linkedom 兼容层 0b：offsetParent
+ * trapModalTab 用 `offsetParent !== null` 过滤「可见」元素；linkedom 恒返回
+ * undefined，会把所有候选都滤掉。这里统一返回一个非 null 值（视作可见），
+ * 让 Tab 循环逻辑可被测。真实浏览器里隐藏元素的 offsetParent 才是 null。
+ */
+if (!('offsetParent' in proto) || proto.offsetParent === undefined) {
+  Object.defineProperty(proto, 'offsetParent', {
+    configurable: true,
+    get() { return this.parentNode || null; }
+  });
 }
 
 // 简易 canvas 上下文桩
@@ -1107,6 +1146,36 @@ if (vKey) {
   ok(q('#keyDetail').innerHTML.includes('ui'), 'V 键详情包含 ui 韵母');
 }
 
+/* ---------- 无障碍：SVG 键位图的 role 语义 ----------
+   曾经的坑：根节点写死 role="img"。ARIA 里 img 是「原子」角色，会把所有后代从
+   无障碍树里剪掉 —— 于是 26 个 <g role="button" tabindex="0" aria-label="X 键">
+   全部作废，读屏只能听到「小鹤双拼键位图，图片」。这里把「可交互 → group，
+   纯展示 → img」的契约锁住，防止哪天有人图省事又写回 role="img"。 */
+{
+  const full = q('#fullKeymap svg');
+  ok(full && full.getAttribute('role') === 'group',
+    '可交互键位图的根节点是 role="group"（不是 img，否则会剪除 26 个键）');
+  ok(full && !/^img$/i.test(full.getAttribute('role') || ''),
+    '可交互键位图绝不用 role="img"');
+
+  const keyGs = full ? full.querySelectorAll('[data-key]') : [];
+  const btns = Array.from(keyGs).filter(g => g.getAttribute('role') === 'button');
+  ok(btns.length === 26, `26 个键都声明 role="button"（实际 ${btns.length}）`);
+  const focusable = btns.filter(g => g.getAttribute('tabindex') === '0');
+  ok(focusable.length === 26, `26 个键都可聚焦（实际 ${focusable.length}）`);
+  const named = btns.filter(g => /键$/.test(g.getAttribute('aria-label') || ''));
+  ok(named.length === 26, `26 个键都有可读名（实际 ${named.length}）`);
+
+  // 迷你键位图是纯展示，不承担交互 → 应保持 img（避免读屏在练习页被 26 个键打断）
+  const mini = q('#miniKeymap svg');
+  if (mini) {
+    ok(mini.getAttribute('role') === 'img', '迷你键位图保持 role="img"（纯展示）');
+    const miniKeys = mini.querySelectorAll('[role="button"]');
+    ok(miniKeys.length === 0, '迷你键位图不含可聚焦键（不打断练习）');
+  }
+}
+
+
 /* ---------- 卡住自动提示 ---------- */
 console.log('\n【10b】卡住自动提示');
 {
@@ -1345,6 +1414,149 @@ console.log('\n【10f】语音朗读：接线与无语音降级');
     if (b6) fire(b6, 'click');
   }
   await new Promise(r => setTimeout(r, 20));
+}
+
+/* ---------- 语音必须在离开练习页/隐藏页面时被掐断 ----------
+   测试环境没有 speechSynthesis，所以验的是「接线」而非「真的停了声」：
+   给模块的 stop() 套一层计数探针，看 switchView 与 visibilitychange
+   有没有真的调到它。原 bug：L2 模式下朗读到一半切设置页，上一题会继续念完。 */
+console.log('\n【10h】语音掐断时机：切视图 / 页面隐藏');
+{
+  const sSpeech = await import('../src/ui/speech.js');
+  let stopCalls = 0;
+  const realStop = sSpeech.stop;
+  // 注意：模块导出的绑定不可直接改，改用 app 侧可观测的副产物 ——
+  // 这里通过临时替换 window.speechSynthesis 让 stop() 真正执行并计数。
+  const fake = {
+    _cancel: 0,
+    cancel() { fake._cancel++; },
+    speak() {}, getVoices: () => [], addEventListener() {}, removeEventListener() {}
+  };
+  const hadSS = 'speechSynthesis' in fakeWindow;
+  const prevSS = fakeWindow.speechSynthesis;
+
+  /* speech.js 内部读的是 window.speechSynthesis（模块加载时已捕获 window 引用），
+     因此这里改 fakeWindow 上的属性即可让 isSupported() 转真、stop() 真的跑 cancel。 */
+  fakeWindow.speechSynthesis = fake;
+  fakeWindow.SpeechSynthesisUtterance = function (t) { this.text = t; };
+
+  try {
+    ok(sSpeech.isSupported() === true, '（探针）注入桩后 isSupported() 转真，stop() 才有可观测副作用');
+
+    // ① 从练习页切到设置页 → 必须 cancel 一次
+    if (app.view !== 'practice') {
+      const navPractice = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
+      if (navPractice) { fire(navPractice, 'click'); await new Promise(r => setTimeout(r, 10)); }
+    }
+    fake._cancel = 0;
+    fire(qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'settings'), 'click');
+    await new Promise(r => setTimeout(r, 10));
+    ok(fake._cancel >= 1, `离开练习页切到设置页 → 朗读被 cancel（调用 ${fake._cancel} 次）`);
+
+    // ② 页面隐藏 → 必须 cancel 一次
+    fake._cancel = 0;
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    document.dispatchEvent(new fakeWindow.Event('visibilitychange'));
+    await new Promise(r => setTimeout(r, 10));
+    ok(fake._cancel >= 1, `页面隐藏 → 朗读被 cancel（调用 ${fake._cancel} 次）`);
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+
+    // ③ 留在练习页内部切题不应被这里的逻辑误伤（那是 speak() 自己的 cancel 负责）
+    await new Promise(r => setTimeout(r, 10));
+  } finally {
+    if (hadSS) fakeWindow.speechSynthesis = prevSS; else delete fakeWindow.speechSynthesis;
+    delete fakeWindow.SpeechSynthesisUtterance;
+    // 回到练习页，恢复给后续用例的初始视图
+    const navPractice2 = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
+    if (navPractice2) { fire(navPractice2, 'click'); await new Promise(r => setTimeout(r, 10)); }
+  }
+}
+
+/* ---------- 弹窗焦点管理 ----------
+   原 bug：openModal/closeModal 只切 hidden —— 打开不聚焦、Tab 能穿到被遮罩盖住的
+   背景控件上、关闭后焦点掉到 body。这里把三件事都锁住。 */
+console.log('\n【10i】弹窗焦点管理：初始聚焦 / Tab 陷阱 / 关闭归还');
+{
+  const overlay = q('#overlay');
+  const modal = q('#modal');
+
+  // 先确保弹窗是关着的
+  if (overlay && !overlay.hidden) { const b = qa('#modal [data-act]')[0]; if (b) fire(b, 'click'); }
+  await new Promise(r => setTimeout(r, 10));
+
+  ok(!!modal, '（前置）#modal 存在');
+
+  // 走真实入口驱动一次弹窗：统计页「清空全部练习记录」→ 确认框
+  const navStats = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'stats');
+  if (navStats) { fire(navStats, 'click'); await new Promise(r => setTimeout(r, 20)); }
+  const clearBtn = q('#btnClearStats');
+  ok(!!clearBtn, '（前置）统计页有 #btnClearStats');
+  if (clearBtn) {
+    try { clearBtn.focus(); } catch (_) {}
+    fire(clearBtn, 'click');
+    await new Promise(r => setTimeout(r, 20));
+
+    ok(overlay && overlay.hidden === false, '点「清空记录」后弹窗打开');
+
+    // ① 可读名：aria-labelledby 指向弹窗内的 h2
+    const lab = modal && modal.getAttribute('aria-labelledby');
+    const titleEl = (lab && modal.querySelector('#' + lab)) || modal.querySelector('h2');
+    ok(!!titleEl && /清空/.test(titleEl.textContent),
+      `弹窗标题可读（aria-labelledby → 「${titleEl ? titleEl.textContent.trim() : '(空)'}」）`);
+    ok(modal && modal.getAttribute('tabindex') === '-1',
+      '弹窗容器 tabindex="-1"（能接收程序化焦点）');
+
+    // ② 初始聚焦：焦点必须已经被送进弹窗内部
+    const act = document.activeElement;
+    ok(!!act && modal.contains(act),
+      `打开后焦点已在弹窗内（实际 ${act ? (act.id || act.className || act.tagName) : 'null'}）`);
+    ok(!!act && act.getAttribute && act.getAttribute('data-act'),
+      '初始焦点落在 [data-act] 主按钮上（而不是容器，读屏能直接念出动作）');
+
+    // ③ Tab 陷阱：在最后一个可聚焦元素上按 Tab → 回到第一个
+    const focusables = Array.from(modal.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+      .filter(el => !el.disabled);
+    ok(focusables.length >= 2, `弹窗内至少 2 个可聚焦控件（实际 ${focusables.length}）`);
+    if (focusables.length >= 2) {
+      const hs = modal.__handlers && modal.__handlers.keydown;
+      const pressTab = (from, shift) => {
+        try { from.focus(); } catch (_) {}
+        const ev = new FakeKeyboardEvent('keydown', { key: 'Tab', shiftKey: !!shift, bubbles: true, cancelable: true });
+        ev.target = from; ev.currentTarget = modal;
+        ev._path = [{ currentTarget: modal, target: from }];
+        if (hs) hs.slice().forEach(h => { try { h(ev); } catch (e) { console.error(e); } });
+      };
+
+      pressTab(focusables[focusables.length - 1], false);
+      ok(document.activeElement === focusables[0],
+        '在末尾按 Tab 会绕回第一个控件（焦点没跑出弹窗）');
+
+      pressTab(focusables[0], true);
+      ok(document.activeElement === focusables[focusables.length - 1],
+        '在首个控件按 Shift+Tab 会绕到末尾（反向同样不逃逸）');
+    }
+
+    // ④ 关闭后归还焦点
+    const cancelBtn = qa('#modal [data-act]').find(b => !/clear|ok|confirm|yes/i.test(b.getAttribute('data-act')))
+      || qa('#modal [data-act]')[0];
+    if (cancelBtn) {
+      fire(cancelBtn, 'click');
+      await new Promise(r => setTimeout(r, 20));
+      ok(overlay && overlay.hidden === true, '点取消后弹窗关闭');
+      const back = document.activeElement;
+      ok(!!back && back !== document.body,
+        `关闭后焦点有去处（实际 ${back ? (back.id || back.className || back.tagName) : 'null'}），未掉到 body`);
+      ok(back === clearBtn,
+        '关闭后焦点精确回到触发它的那个按钮');
+    }
+  } else {
+    ok(false, '未找到 #btnClearStats，无法驱动真实弹窗路径');
+  }
+
+  // 恢复视图
+  const navPractice3 = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
+  if (navPractice3) { fire(navPractice3, 'click'); await new Promise(r => setTimeout(r, 10)); }
 }
 
 /* ---------- 键位掌握度层（接线层） ----------
@@ -2404,6 +2616,60 @@ console.log('【新增】提示依赖度可见、存储降级如实告知');
   await new Promise(r => setTimeout(r, 20));
   ok(!q('#storageBadge').classList.contains('is-warn'), '恢复后徽标回到正常态');
   ok(q('#storageNote').textContent.includes('localStorage'), '恢复后设置页文案回到正常承诺');
+}
+
+/* ---------- DOM 节点缓存（hot path 优化）的安全契约 ----------
+   为每键路径省掉十几次 querySelector 而引入的缓存，唯一的风险是「拿到陈旧引用」：
+   节点被换掉后仍往旧引用上写字，界面就不更新了。这里锁两件事：
+   ① 缓存对**存活**节点确实命中，写进去的东西界面上能读到；
+   ② 节点被移除/替换后，缓存自动失效、重新查询，不会往孤儿节点上写。 */
+console.log('\n【12b】DOM 缓存：命中且不返回陈旧引用');
+{
+  // 借练习页的 #hudSpeed 做样本（它就在每键路径上）
+  const navPractice = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
+  if (navPractice) { fire(navPractice, 'click'); await new Promise(r => setTimeout(r, 20)); }
+
+  const hud = q('#hudSpeed');
+  ok(!!hud, '（前置）找到 #hudSpeed');
+
+  if (hud && app.engine) {
+    // ① 同一个选择器两次取到的是同一个节点（命中缓存，不是每次重建）
+    const a1 = document.querySelector('#hudSpeed');
+    const a2 = document.querySelector('#hudSpeed');
+    ok(a1 === a2, '同一选择器取到同一节点（缓存不会返回副本）');
+
+    /* 触发一次真实渲染链：engine 的 change 事件 → renderSession → updateHud → setText。
+       用 pressKey 驱动引擎，事件会自动走到 UI。 */
+    const driveOnce = () => {
+      const t = app.engine.currentTarget();
+      if (t && t.keys && t.keys.length) {
+        app.engine.pressKey(String(t.keys[0]).toLowerCase());
+      }
+    };
+
+    // ② 通过真实答题驱动，值必须真的落到 DOM 上
+    driveOnce();
+    await new Promise(r => setTimeout(r, 10));
+    const after = q('#hudSpeed').textContent;
+    ok(typeof after === 'string' && after.length > 0,
+      `经缓存写入后 DOM 上的文字可读（「${after}」）`);
+
+    /* ③ 关键安全性：把节点从文档里摘掉再替换，缓存必须识别并回退到实时查询。
+       做法：用新节点替换旧的，然后驱动一次渲染 —— 写入必须出现在**新**节点上。 */
+    const parent = hud.parentNode;
+    const fresh = document.createElement('span');
+    fresh.id = 'hudSpeed';
+    fresh.textContent = 'SENTINEL';
+    parent.replaceChild(fresh, hud);
+    ok(!document.contains(hud), '旧节点已被移出文档（构造出「缓存陈旧」的场景）');
+
+    driveOnce();
+    await new Promise(r => setTimeout(r, 10));
+    const live = q('#hudSpeed');
+    ok(live === fresh, '缓存识别到旧节点已失效，改用新节点');
+    ok(live.textContent !== 'SENTINEL',
+      `写入落在新节点上（「${live.textContent}」），没有写到孤儿节点`);
+  }
 }
 
 /* ---------- 收尾 ---------- */

@@ -72,6 +72,33 @@ const app = {
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
+/* ------------------------------------------------------------
+   常驻节点缓存
+   ------------------------------------------------------------
+   为什么需要：打字是 8–15 键/秒的场景，每次按键都会走
+   change → renderSession → updateHud(6×setText) + updateTimebar + 若干
+   clearHint/clearFeedback/flashXxx，累计十几次 querySelector 查的是
+   **同一批从页面加载起就不再变**的节点（#hudSpeed、#feedback、#stage…）。
+
+   querySelector 是实时查找（要解析选择器 + 走树），不是索引取用，
+   在高频路径上纯属浪费。这里把这批稳定节点在首次访问时记下来。
+
+   安全性：只缓存**不会在运行中被替换**的元素。像 #prompt / #decode 的
+   内容会被重写，但元素本身始终是同一个，缓存引用是安全的。
+   若某个节点因故不在文档里了（被重新挂载/测试环境重建），
+   cacheEl 会自动退回实时查询，绝不返回陈旧引用。 */
+const _elCache = new Map();
+function cacheEl(sel) {
+  const hit = _elCache.get(sel);
+  // 命中且仍在文档中 → 直接用；否则重新查询（覆盖节点被替换/移除的情况）
+  if (hit && document.contains(hit)) return hit;
+  const el = document.querySelector(sel);
+  if (el) _elCache.set(sel, el);
+  else _elCache.delete(sel);
+  return el;
+}
+
+
 /* ============================================================
    辅助功能（无障碍 / 快捷键 / 音效）
    ============================================================ */
@@ -281,12 +308,19 @@ function switchView(view) {
   const v = LEVEL_MAP[view] ? view : view;
   if (!v) return;
 
-  // 练习中离开 → 提示
+  // 练习中离开 → 暂停计时
   if (app.view === 'practice' && v !== 'practice' && app.engine &&
       app.engine.state === STATE.RUNNING) {
     app.engine.pause();
     updatePauseButton();
   }
+
+  /* 离开练习页就掐掉正在朗读的语音。
+     不加这句的话，L2「听声母/听韵母」模式下切到设置页/统计页时，
+     上一题的音节会继续念完 —— 声音和屏幕内容对不上，用户会以为串台了。
+     放在「离开 practice」判断之外、无条件执行，是因为朗读可能残留于
+     暂停态或多题连播的间隙，只判 RUNNING 会漏。 */
+  if (v !== 'practice') stopSpeech();
 
   app.view = v;
   $$('.view').forEach(el => el.classList.toggle('is-active', el.id === `view-${v}`));
@@ -1459,12 +1493,12 @@ function renderSession() {
   if (!eng) return;
 
   const q = eng.currentQuestion();
-  const stage = $('#stage');
-  const prompt = $('#prompt');
-  const decode = $('#decode');
-  const feedback = $('#feedback');
-  const stageMode = $('#stageMode');
-  const stageTip = $('#stageTip');
+  // 这些节点自页面加载起就存在、不会被替换 → 走缓存（每键都要用）
+  const prompt = cacheEl('#prompt');
+  const decode = cacheEl('#decode');
+  const feedback = cacheEl('#feedback');
+  const stageMode = cacheEl('#stageMode');
+  const stageTip = cacheEl('#stageTip');
 
   if (!q || !prompt || !decode) return;
 
@@ -1476,7 +1510,7 @@ function renderSession() {
   /* 测验模式：在舞台顶部挂一个「无提示」标记。
      用户随时能看见自己处在测验中（而不是以为应用坏了），
      这也是诚实计分的一部分。 */
-  let examFlag = $('#examFlag');
+  let examFlag = cacheEl('#examFlag');
   if (eng.examMode) {
     if (!examFlag) {
       examFlag = document.createElement('span');
@@ -1738,7 +1772,7 @@ function updateHud() {
  * 提示过」，避免每答一个字就弹一次 toast。跨天（日期字符串变化）自动重置。
  */
 function renderGoalHud() {
-  const item = $('#hudGoalItem');
+  const item = cacheEl('#hudGoalItem');
   if (!item) return;
 
   const prog = dailyGoalProgress(app.settings);
@@ -1775,7 +1809,7 @@ function renderGoalHud() {
 
 function updateTimebar() {
   const eng = app.engine;
-  const fill = $('#timebarFill');
+  const fill = cacheEl('#timebarFill');
   if (!fill) return;
   if (!eng || !eng.durationSec) {
     fill.style.width = '0%';
@@ -1788,7 +1822,8 @@ function updateTimebar() {
 }
 
 function setText(sel, val) {
-  const el = $(sel);
+  // 走缓存：这 6 个 HUD 格子每键/每 tick 都要刷，是最典型的热点
+  const el = cacheEl(sel);
   if (el) el.textContent = String(val);
 }
 
@@ -1825,7 +1860,7 @@ function showErrorFeedback(fb) {
 }
 
 function clearFeedback() {
-  const box = $('#feedback');
+  const box = cacheEl('#feedback');
   if (!box) return;
   box.hidden = true;
   box.innerHTML = '';
@@ -1898,9 +1933,9 @@ function renderHint(p) {
 
 function clearHint() {
   app.hint = null;
-  const bar = $('#hintBar');
-  const flag = $('#hintFlag');
-  const note = $('#miniKeymapNote');
+  const bar = cacheEl('#hintBar');
+  const flag = cacheEl('#hintFlag');
+  const note = cacheEl('#miniKeymapNote');
   if (bar) { bar.hidden = true; bar.innerHTML = ''; bar.className = 'hintbar'; }
   if (flag) { flag.hidden = true; flag.className = 'hint-flag'; }
   if (note) note.textContent = '';
@@ -2160,7 +2195,11 @@ function announceProgress() {
     if (t && t.kind === 'syllable' && t.pos === 0) {
       announce(`${t.char || t.pinyin || ''} 完成。已完成 ${s.totalChars} 字，正确率 ${s.accuracy}%`);
     }
-  } catch (_) {}
+  } catch (e) {
+    // 播报失败不该打断练习，但也不能彻底无声 —— 这条走了太久静默，
+    // 出问题时连线索都没有。降级为警告，不进 toast（那是给用户看的）。
+    console.warn('[a11y] 进度播报失败', e);
+  }
 }
 
 /**
@@ -2170,7 +2209,7 @@ function announceProgress() {
  * 我们换成**不移动**的提示：把边框闪一下，信息量等价，但不动。
  */
 function flashStageError() {
-  const stage = $('#stage');
+  const stage = cacheEl('#stage');
   if (!stage) return;
   if (currentReduceMotion()) {
     // 静态替代：描边高亮一下，不做位移
@@ -2188,7 +2227,7 @@ function flashStageError() {
 }
 
 function flashStageOk() {
-  const decode = $('#decode');
+  const decode = cacheEl('#decode');
   if (!decode) return;
   if (currentReduceMotion()) return;   // 正确本来就不需要视觉强调
   try {
@@ -3838,6 +3877,8 @@ function confirmClearStats() {
    ============================================================ */
 
 let modalCleanup = null;
+// 打开弹窗前持有焦点的元素，关闭时归还（见 openModal / closeModal）
+let lastFocus = null;
 
 /**
  * 兜底：确保 [hidden] 规则真的生效。
@@ -3895,8 +3936,28 @@ function openModal(html, onAct, onClose) {
 
   ensureHiddenRule();
 
+  /* 记下打开前的焦点，关闭时还回去。
+     不记的话，键盘用户关掉弹窗后焦点会掉到 <body>，
+     只能从头 Tab 一遍才能回到刚才那个按钮。 */
+  lastFocus = document.activeElement;
+  // 重入保护：弹窗里再开弹窗（如「覆盖自定义文本？」）时，
+  // lastFocus 已被上一次覆盖成 modal 自己，再还回去等于没还。
+  if (lastFocus && modal.contains(lastFocus)) lastFocus = null;
+
   modal.innerHTML = html;
   overlay.hidden = false;
+
+  /* 给弹窗接上可读名：6 个弹窗的首个元素都是 <h2>，直接把它标成标题。
+     没有 h2 的（理论上不该有）就退回 aria-label 兜底，绝不留下无名对话框。 */
+  const titleEl = modal.querySelector('h2');
+  if (titleEl) {
+    if (!titleEl.id) titleEl.id = 'modalTitle';
+    modal.setAttribute('aria-labelledby', titleEl.id);
+    modal.removeAttribute('aria-label');
+  } else {
+    modal.removeAttribute('aria-labelledby');
+    modal.setAttribute('aria-label', '对话框');
+  }
 
   const handler = (e) => {
     /* [data-weak] 是弹窗里的「点它去练这个字/词」（结算页的本轮错字）。
@@ -3918,8 +3979,14 @@ function openModal(html, onAct, onClose) {
   };
   modal.addEventListener('click', handler);
 
+  /* 焦点陷阱：Tab 在弹窗内循环。
+     不做的话 Tab 会跑到被遮罩盖住的背景控件上 —— 视觉上「什么都没有」，
+     但焦点确实在那，读屏会念出用户看不见的东西。 */
+  modal.addEventListener('keydown', trapModalTab);
+
   modalCleanup = () => {
     modal.removeEventListener('click', handler);
+    modal.removeEventListener('keydown', trapModalTab);
     if (typeof onClose === 'function') {
       try { onClose(); } catch (err) { console.error(err); }
     }
@@ -3927,6 +3994,14 @@ function openModal(html, onAct, onClose) {
 
   // 点击遮罩关闭
   overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
+
+  /* 把焦点送进弹窗。优先聚焦第一个「安全」控件：
+     优先主按钮 [data-act]，否则第一个可聚焦元素，最后才落到容器本身。
+     聚焦容器（tabindex="-1"）也能让读屏立刻念出对话框标题。 */
+  const prefer = modal.querySelector('[data-act]')
+    || modal.querySelector('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+    || modal;
+  try { prefer.focus(); } catch (_) {}
 }
 
 function closeModal() {
@@ -3939,6 +4014,50 @@ function closeModal() {
   }
   const modal = $('#modal');
   if (modal) modal.innerHTML = '';
+
+  /* 把焦点还给打开弹窗的那个元素。
+     要放在 innerHTML='' 之后再还，否则某些浏览器里被清空的节点无法接收焦点。
+     元素可能已经不在文档里（比如触发它的按钮在重绘中被换掉了），
+     这种情况就退回给主内容区，总好过掉到 <body>。 */
+  const back = lastFocus;
+  lastFocus = null;
+  if (back && typeof back.focus === 'function' && document.contains(back)) {
+    try { back.focus(); return; } catch (_) {}
+  }
+  const fallback = $('#hiddenInput') || $('main') || document.body;
+  if (fallback && typeof fallback.focus === 'function') {
+    try { fallback.focus(); } catch (_) {}
+  }
+}
+
+/* 弹窗内的 Tab 焦点循环。取「当前可见且可聚焦」的元素作为循环区间 ——
+   弹窗内容里有 hidden 的分支（如根据状态显示不同按钮），
+   若把隐藏元素也算进去，Tab 会出现「按一下没反应」的空档。 */
+function trapModalTab(e) {
+  if (e.key !== 'Tab') return;
+  const modal = $('#modal');
+  if (!modal) return;
+  const nodes = Array.from(modal.querySelectorAll(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  )).filter(el => !el.disabled && el.offsetParent !== null);
+  if (!nodes.length) {
+    // 没有任何可聚焦控件 → 焦点留在容器上，别让它跑到背景
+    e.preventDefault();
+    try { modal.focus(); } catch (_) {}
+    return;
+  }
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey) {
+    if (active === first || active === modal || !modal.contains(active)) {
+      e.preventDefault();
+      try { last.focus(); } catch (_) {}
+    }
+  } else if (active === last) {
+    e.preventDefault();
+    try { first.focus(); } catch (_) {}
+  }
 }
 
 function isModalOpen() {
@@ -4004,6 +4123,9 @@ function initGlobalGuards() {
   // 页面隐藏时自动暂停（切标签页不会白跑时间）
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) flushSettings();
+    /* 页面一藏起来就闭嘴。语音合成在部分浏览器里不会因为标签页不可见而自动停，
+       用户切回来时会听到上一题念到一半 —— 和切视图同一个道理。 */
+    if (document.hidden) stopSpeech();
     if (document.hidden && app.engine && app.engine.state === STATE.RUNNING) {
       app.engine.pause();
       updatePauseButton();
