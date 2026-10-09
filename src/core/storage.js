@@ -295,6 +295,18 @@ export const DEFAULT_SETTINGS = {
   theme: 'auto',
   /* 复习队列：是否只练「到期」的错题（间隔重复）。false = 练全部易错项 */
   reviewDueOnly: true,
+  /* 每日目标。0 = 不设目标（不显示进度条）。
+     打字练习最容易半途而废，而「连续天数」只有断了才痛 ——
+     需要一个「今天还没达标」的软提醒。两个维度都要：
+     字数反映练习量，次数反映「有坐下来练」这件事本身。 */
+  dailyGoalChars: 300,
+  dailyGoalSessions: 1,
+  /* 自定义文本内容。跟打自己的材料 —— 内置语料练到头之后，
+     边际收益趋近于零。存进设置而不是单独的 key，是为了跟着
+     「导出数据」一起备份：用户辛苦粘的长文不该导出时丢掉。
+     上限 20000 字（见 clampText），足够一整章小说，
+     再长会把 localStorage 撑爆。 */
+  customText: '',
   /* 快捷键。对象在 loadSettings 里单独处理（不是标量），
      合并/校验逻辑见 ui/a11y.js::mergeShortcuts */
   shortcuts: null
@@ -350,13 +362,46 @@ export function loadSettings() {
     }
   }
   merged.count = normalizeCount(merged.count);
+  /* 每日目标是数值型，上面那张表只管枚举。负数字数会让进度条算成
+     负数百分比（宽度 -30%），所以在这里夹到 [0, 上限]。
+     上限取 100 万：再多的目标不是目标，是笔误。 */
+  merged.dailyGoalChars = clampInt(merged.dailyGoalChars, 0, 1000000);
+  merged.dailyGoalSessions = clampInt(merged.dailyGoalSessions, 0, 100);
+  merged.customText = clampText(merged.customText);
   return merged;
+}
+
+/** 取整并夹到 [lo, hi]；非有限数回落到 lo（0 = 不设目标） */
+function clampInt(v, lo, hi) {
+  const n = Math.floor(Number(v));
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+/**
+ * 截断自定义文本。
+ *
+ * 上限 20000 字符：一整章小说的量级。再长的话 localStorage 单键
+ * 5MB 的限制就危险了（中文字符 UTF-16 占 2 字节，2 万字约 40KB，
+ * 留足余量给历史记录）。超长直接截断而不是拒绝 ——
+ * 用户粘了一本书的话，「截断后能用」比「报错什么也做不了」友好。
+ *
+ * 非字符串一律归零：导入的备份可能带 null / 数字 / 对象。
+ */
+function clampText(v) {
+  if (typeof v !== 'string') return '';
+  const arr = Array.from(v);
+  return arr.length > 20000 ? arr.slice(0, 20000).join('') : v;
 }
 
 export function saveSettings(settings) {
   const safe = Object.assign({}, DEFAULT_SETTINGS);
   if (settings && typeof settings === 'object') Object.assign(safe, settings);
   safe.count = normalizeCount(safe.count);
+  // 与 loadSettings 同口径：写进去的也必须是干净的，否则下次读出来才发现
+  safe.dailyGoalChars = clampInt(safe.dailyGoalChars, 0, 1000000);
+  safe.dailyGoalSessions = clampInt(safe.dailyGoalSessions, 0, 100);
+  safe.customText = clampText(safe.customText);
   return writeJSON(KEYS.settings, safe);
 }
 

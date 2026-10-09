@@ -14,6 +14,7 @@
 import {
   generateQuestions, generateReviewQuestions, LEVELS, LEVEL_MAP,
   questionFromCharChar, questionFromPhrase, isPunct,
+  makeCustomPassageQuestion, splitPassageText,
   ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS, phrasePool
 } from './core/questions.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
@@ -21,7 +22,7 @@ import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
 import { summarize, historySeries, dailySeries, scoreSeries, weakRanking, groupWeakItems,
          reviewAdvice, formatDuration, formatClock, keyHeatmap, keySlowness,
-         KEY_SLOW_MIN_SAMPLES } from './core/stats.js';
+         KEY_SLOW_MIN_SAMPLES, recentBaseline, dailyGoalProgress } from './core/stats.js';
 import { scoreExam, gradeTier, SCORE_CONFIG } from './core/score.js';
 import {
   getKeymapData, splitSyllable, primarySplit, highlightForSplit,
@@ -414,6 +415,7 @@ function initSetupPanel() {
     });
   }
   updatePhrasePoolInfo();
+  initCustomText();
 
   const btnStart = $('#btnStart');
   // 注意：必须用箭头函数包装。若直接传 startSession，
@@ -432,6 +434,89 @@ function initSetupPanel() {
   });
 
   updateModeCounts();
+}
+
+/**
+ * 「自定义文本」输入区。
+ *
+ * 【持久化时机】用 input 事件 + 防抖写盘，而不是 change / blur。
+ * 用户粘一篇长文后不太可能立刻点开始，而是先滚动检查一下 ——
+ * 若等 change（失焦）才存，中途关掉标签页就丢了。
+ *
+ * 【实时统计】每次输入都算一遍「可打字数 / 跳过字数」并显示。
+ * 这是刻意做的：用户粘完一段材料，最想知道的是「这段能不能练、
+ * 有多少字是练不了的」。直接告诉他，而不是等他点了开始才发现
+ * 一半的字被跳过。
+ */
+function initCustomText() {
+  const ta = $('#customTextInput');
+  const stat = $('#customTextStat');
+  if (!ta) return;
+
+  // 恢复上次粘贴的内容（跟着设置一起落盘）
+  ta.value = app.settings.customText || '';
+
+  const refresh = () => {
+    const text = String(ta.value || '');
+    if (!stat) return;
+    if (!text.trim()) { stat.textContent = ''; return; }
+
+    /* 用 makeCustomPassageQuestion 算统计 —— 而不是自己数汉字。
+       因为它就是真正开练时用的那个函数，两边口径完全一致：
+       「统计说 500 字可练」但开练后实际只有 480 字这种事不会发生。 */
+    const q = makeCustomPassageQuestion(text);
+    if (!q) {
+      stat.textContent = '这段文字里没有可练的汉字（全是标点/英文/数字）。';
+      stat.className = 'is-warn';
+      return;
+    }
+    const m = q.meta;
+    const skip = m.unknownCount;
+    stat.className = skip ? 'is-thin' : '';
+    stat.textContent = `可练 ${m.hanCount - skip} 字` +
+      (skip ? ` · 跳过 ${skip} 字（未收录）` : '') +
+      ` · 约 ${splitPassageText(text, CUSTOM_SEG_CHARS).length} 段`;
+  };
+
+  ta.addEventListener('input', () => {
+    app.settings.customText = ta.value;
+    refresh();
+    saveSettingsDebounced();
+  });
+  // 初次进入时也刷新一次（可能是从存储恢复的旧内容）
+  refresh();
+
+  const btnClear = $('#btnClearCustomText');
+  if (btnClear) {
+    btnClear.addEventListener('click', () => {
+      ta.value = '';
+      app.settings.customText = '';
+      refresh();
+      saveSettingsDebounced();
+      ta.focus();
+    });
+  }
+}
+
+/* 自定义文本切成多段时的每段上限（可打字数）。
+   为什么是分段而不是一次性跑完：一段 5000 字的文章，
+   进度条和「已完成 N 字」会变得毫无意义，而且中途被打断
+   （刷新、暂停退出）时续练的粒度太粗。按 80 字一段，
+   大约是一屏能看完、一口气能打完的长度。 */
+const CUSTOM_SEG_CHARS = 80;
+
+/**
+ * 从自定义文本生成题目序列。
+ * 切段后每段一道 passage 题。空文本返回空数组（调用方提示用户）。
+ */
+function buildCustomQuestions(text) {
+  const segs = splitPassageText(text, CUSTOM_SEG_CHARS);
+  const out = [];
+  segs.forEach((seg, i) => {
+    const q = makeCustomPassageQuestion(seg, { title: `第 ${i + 1} 段` });
+    if (q) out.push(q);              // 纯标点的段会被 makeCustom... 判为 null，跳过
+  });
+  return out;
 }
 
 function selectMode(mode, silent) {
@@ -455,6 +540,11 @@ function selectMode(mode, silent) {
   if (tierField) tierField.hidden = m !== 'char';
   for (const id of ['phraseCategoryField', 'phraseLengthField']) { const el = $(`#${id}`); if (el) el.hidden = m !== 'phrase'; }
   if ($('#trainingField')) $('#trainingField').hidden = m === 'exam';
+  // 自定义文本输入区只在「自定义文本」模式下出现。
+  // 其余模式（含测验）都隐藏 —— 一个和当前模式无关的输入框
+  // 只会让人以为「填了会生效」。
+  const customField = $('#customTextField');
+  if (customField) customField.hidden = m !== 'custom';
   if (!silent) saveSettingsDebounced();
 }
 
@@ -515,6 +605,13 @@ function updateModeCounts() {
   const count = app.settings.count;
   $$('#modeGrid .mode-count').forEach(el => {
     const mode = el.getAttribute('data-count');
+    // 自定义文本的题量由材料长度决定（按 80 字切段），
+    // 显示用户在「题量」里选了什么没有意义 —— 直接说明这件事。
+    if (mode === 'custom') {
+      const segs = splitPassageText(app.settings.customText || '', CUSTOM_SEG_CHARS).length;
+      el.textContent = app.settings.customText ? `${segs} 段` : '粘贴文本';
+      return;
+    }
     el.textContent = count > 0 ? `${count} ${mode === 'passage' ? '段' : '题'}`
       : (mode === 'exam' ? '50 题' : '不限量');
   });
@@ -645,8 +742,32 @@ function startSession(questionsOverride, modeOverride) {
       charTier: app.settings.charTier, weakBoost: app.settings.weakBoost,
       phraseCategory: app.settings.phraseCategory, phraseLength: app.settings.phraseLength
     };
-    const questionSource = preset ? null : createQuestionSource(generation);
-    const questions = preset || questionSource();
+
+    /* 自定义文本不走通用出题器：题目来自用户粘的那段文字。
+       在 createQuestionSource 之前拦下来，是因为出题器只认内置语料
+       （passage 从 PASSAGES 里挑），给它 mode='custom' 会走进
+       「未知模式 → 落到默认分支」的坑。 */
+    let customPreset = null;
+    if (!preset && mode === 'custom') {
+      // 以 textarea 的当前值为准（用户可能刚粘完就点了开始，防抖还没落盘）
+      const ta = $('#customTextInput');
+      const text = (ta ? ta.value : app.settings.customText) || '';
+      if (!text.trim()) {
+        toast('请先粘贴要练的文字', 'err');
+        // 把焦点送回去，用户不用再找输入框
+        if (ta) ta.focus();
+        return;
+      }
+      customPreset = buildCustomQuestions(text);
+      if (!customPreset.length) {
+        toast('这段文字里没有可练的汉字，试试其他内容', 'err');
+        if (ta) ta.focus();
+        return;
+      }
+    }
+
+    const questionSource = (preset || customPreset) ? null : createQuestionSource(generation);
+    const questions = preset || customPreset || questionSource();
 
     if (!Array.isArray(questions) || !questions.length) {
       toast(mode === 'phrase' ? '此分类与长度组合暂无词组，请更换筛选条件' : '题目生成失败，请重试', 'err');
@@ -704,7 +825,12 @@ function resumeSession() {
   if (!saved) { toast('没有可继续的进度', 'err'); return; }
   try {
     const generation = saved.generation || { mode: saved.mode, count: saved.mode === 'passage' ? 3 : 20, charTier: app.settings.charTier };
-    const source = saved.unlimited || generation.charTier === 'progressive'
+    /* 自定义文本不能重建出题源 —— 它的题目来自用户当时粘的那段文字，
+       而出题器只认内置语料。不过续练其实不需要重建：saved.questions
+       里已经存着剩余的题目，PracticeEngine.restore 靠它恢复。
+       所以这里对 custom 传 null source（与有限题量练习一致）。 */
+    const canResumeBySource = saved.unlimited || generation.charTier === 'progressive';
+    const source = (canResumeBySource && generation.mode !== 'custom')
       ? createQuestionSource(generation, saved.questions, saved.generationState) : null;
     const eng = PracticeEngine.restore(saved, source);
     if (!eng) { toast('进度已损坏，无法恢复', 'err'); S.clearResume(); return; }
@@ -879,6 +1005,10 @@ function persistRecord(summary) {
     // 正确的用时；这里只拦「几乎没输入」的空练习。
     const meaningful = s.keystrokes >= 5 && s.durationSec >= 1;
 
+    /* 本轮记录的 id。要在 if 外声明 —— 结算页的「本轮对照」需要它
+       （拿近几轮做基线时得把自己排除掉），而赋值发生在 if 内。 */
+    let recordId = '';
+
     if (meaningful) {
       const rec = S.makeRecord({
         mode: s.mode,
@@ -906,6 +1036,7 @@ function persistRecord(summary) {
         rec.scoreValid = examResult.valid;
       }
       S.appendRecord(rec);
+      recordId = rec.id;
 
       // 记录易错字词
       const perErr = s.perCharErrors || {};
@@ -955,7 +1086,10 @@ function persistRecord(summary) {
     }
 
     S.clearResume();
-    showResultModal(s, meaningful);
+    /* 把本轮记录 id 带上：结算页的「本轮对照」要拿近几轮做基线，
+       而自己刚刚已经落库了（就在上面 appendRecord）。不排除自己的话
+       基线里混进了「本轮」，N=1 时还会变成「本轮 vs 本轮」= 永远持平。 */
+    showResultModal(s, meaningful, recordId);
   } catch (err) {
     console.error('[persistRecord] 失败', err);
     toast('成绩保存失败', 'err');
@@ -964,7 +1098,7 @@ function persistRecord(summary) {
   }
 }
 
-function showResultModal(s, recorded) {
+function showResultModal(s, recorded, recordId) {
   const sc = s.score || null;
 
   // 测验模式用「分数 + 等级」做标题，练习模式沿用「正确率」评语
@@ -989,6 +1123,91 @@ function showResultModal(s, recorded) {
   } else if (recorded && !sc) {
     noteParts.push('全程没有出错的字，键位掌握得很扎实。');
   }
+
+  /* ---------- 本轮对照：和最近几轮比怎么样 ----------
+     光看「速度 42 字/分」是没有意义的 —— 快还是慢要看跟自己的历史比。
+     这也是练习者最想立刻知道的：这一轮比平时进步了没有。
+
+     口径（与 keySlowness 保持一致）：
+       - 取**中位数**而非平均值（单次走神就能把均值拽走一大截）
+       - 不足 3 轮**如实说明**，不硬凑一个不可靠的对照
+       - 按**模式**分开比：单字和短文的速度天然不是一个量级 */
+  const base = recentBaseline({
+    mode: s.mode,
+    exclude: recordId,
+    curSpeed: s.speed,
+    curAccuracy: s.accuracy
+  });
+  const deltaTag = (d, unit, digits = 1) => {
+    if (!base.enough) return '';
+    const cls = d > 0 ? 'is-up' : d < 0 ? 'is-down' : 'is-flat';
+    const arrow = d > 0 ? '↑' : d < 0 ? '↓' : '＝';
+    return `<span class="base-delta ${cls}">${arrow}${Math.abs(d).toFixed(digits)}${unit}</span>`;
+  };
+  const baselineBlock = base.samples > 0 ? `
+    <div class="base-block${base.enough ? '' : ' is-thin'}">
+      ${base.enough
+        ? `<span class="base-line">与最近 ${base.samples} 轮同模式练习比：`
+          + `速度 <b>${base.speed}</b> 字/分 ${deltaTag(base.speedDelta, '')}`
+          + `　正确率 <b>${base.accuracy}%</b> ${deltaTag(base.accuracyDelta, '%')}</span>`
+        : `<span class="base-line">已有 <b>${base.samples}</b> 轮同模式记录，`
+          + `攒够 <b>${base.min}</b> 轮后就能给出「比平时快/慢」的对照。</span>`}
+    </div>` : '';
+
+  /* ---------- 本轮错字：点了就能当场重练 ----------
+     上面那句 notePart 只给了一个**数字**，用户看到「有 3 个字出过错」
+     却不知道是哪 3 个，也没法立刻重练 —— 得先切到复习页、再从几十个
+     历史易错项里找。刚练完这一刻的记忆最鲜活，正是重练的最佳时机。
+
+     数据来源就是落库时用的那两个字段（perWordErrors 是词组/短文按整条记的，
+     perCharErrors 是单字）。口径必须与落库一致，否则会出现
+     「结算页列了它、但复习页里没有」的割裂。
+
+     排序：先按错误次数降序，同次数时词组在前（词组错说明连打有问题，
+     信息量比单个字更大）。上限 12 个，再多会把弹窗撑得很长。 */
+  const wrongChips = (() => {
+    const entries = [];
+    const seen = new Set();
+
+    // 词组优先入列，并把它包含的单字标记为「已覆盖」
+    Object.entries(s.perWordErrors || {}).forEach(([text, cnt]) => {
+      if (!cnt || !text) return;
+      const chars = Array.from(text);
+      const entry = PHRASES.find(p => p.w === text);
+      if (!entry && chars.some(c => !ALL_CHARS[c])) return;   // 拼音凑不齐，练不了
+      if (seen.has(text)) return;
+      seen.add(text);
+      chars.forEach(c => seen.add(c));                        // 单字不重复列
+      entries.push({ key: text, count: cnt, phrase: true });
+    });
+
+    Object.entries(s.perCharErrors || {}).forEach(([ch, cnt]) => {
+      if (!cnt || !ch || seen.has(ch)) return;
+      if (!ALL_CHARS[ch]) return;                             // 没有拼音就出不了题
+      seen.add(ch);
+      entries.push({ key: ch, count: cnt, phrase: false });
+    });
+
+    if (!entries.length) return '';
+    entries.sort((a, b) => (b.count - a.count) || (Number(b.phrase) - Number(a.phrase)));
+    const shown = entries.slice(0, 12);
+    const more = entries.length - shown.length;
+
+    return `<div class="wrong-block">
+      <h3 class="sub-title">本轮出错的字词</h3>
+      <div class="wrong-chips">
+        ${shown.map(e => `
+          <button class="wrong-chip" type="button" data-weak="${escapeHtml(e.key)}"
+                  title="点击立刻重练「${escapeHtml(e.key)}」（连做 3 遍）">
+            <span class="wc-char">${escapeHtml(e.key)}</span>
+            <span class="wc-err">×${e.count}</span>
+            <span class="wc-cta">重练</span>
+          </button>`).join('')}
+      </div>
+      <p class="wrong-note">点任意一个立刻开练（连做 3 遍，用来区分「真会了」和「蒙对的」）。
+        ${more > 0 ? `另有 ${more} 个未列出，都在「错题复习」里。` : ''}</p>
+    </div>`;
+  })();
   if (s.maxCombo >= 30) {
     noteParts.push(`最长连击 ${s.maxCombo} 键，手感相当稳定。`);
   }
@@ -1130,6 +1349,10 @@ function showResultModal(s, recorded) {
       </div>
     </div>
     ${hintedNote}
+
+    ${baselineBlock}
+
+    ${wrongChips}
 
     ${slowBlock}
 
@@ -1445,6 +1668,70 @@ function updateHud() {
   setText('#hudProgress', st.progress);
   setText('#hudCombo', st.combo);
   setText('#hudMaxCombo', st.maxCombo);
+  /* 今日目标格子也在这里刷新。
+     注意：这是**每 tick** 调用的（updateHud ← eng.on('tick')），
+     而 dailyGoalProgress 内部会 summarize() 读一遍全部历史 ——
+     一轮练习动辄几百条记录，每秒读一次并不划算。
+     所以这里做了节流：同一秒内不重复计算。 */
+  const now = Date.now();
+  if (now - (app._goalHudAt || 0) >= 1000) {
+    app._goalHudAt = now;
+    renderGoalHud();
+  }
+}
+
+/**
+ * 渲染练习 HUD 里的「今日目标」格子。
+ *
+ * 【口径来源】必须与统计页的「今日 N 字」同源 —— 都走 stats.summarize()，
+ * 它内部用 dateStr(new Date()) 划今天。自己再写一套日期判断迟早会错开
+ * （比如把「凌晨 4 点前算昨天」这类规则只加在一处）。
+ *
+ * 【为什么要容忍「没设目标」】goalChars / goalSessions 都是 0 时不能画一条
+ * 永远 0% 的进度条 —— 那看起来像「你还没开始」，而实际是「你没设目标」。
+ * 这一格直接隐藏。
+ *
+ * 【为什么练习中也要更新】练习开始时调用一次（显示今天的起点），
+ * 每答完一题再调用一次（今日字数在增长）。这里只在**练习内更新**，
+ * 不引入新的定时器 —— updateHud 本来就被答题事件驱动。
+ *
+ * 【达标的处理】达标只提示一次：用 app._goalToastDay 记住「哪一天已经
+ * 提示过」，避免每答一个字就弹一次 toast。跨天（日期字符串变化）自动重置。
+ */
+function renderGoalHud() {
+  const item = $('#hudGoalItem');
+  if (!item) return;
+
+  const prog = dailyGoalProgress(app.settings);
+
+  if (!prog.hasGoal) {
+    item.hidden = true;
+    return;
+  }
+  item.hidden = false;
+
+  /* 显示哪个维度：两个都设时以「更不容易达标」的那个为准（与 ratio 同源，
+     取比率较小者），这样格子里的数字和进度条的方向一致 —— 否则会出现
+     「字数 500/300 已超额，但次数 0/1 还没开始」却显示「500/300」的错位。
+     只有次数目标时显示 N/M 次。 */
+  const useChars = prog.goalChars > 0 &&
+    (prog.goalSessions <= 0 || (prog.chars / prog.goalChars) <= (prog.sessions / prog.goalSessions));
+
+  const now = useChars ? prog.chars : prog.sessions;
+  const total = useChars ? prog.goalChars : prog.goalSessions;
+  setText('#hudGoal', now);
+  setText('#hudGoalUnit', `/${total} ${useChars ? '字' : '次'}`);
+
+  item.classList.toggle('is-done', prog.achieved);
+
+  // 达标只提示一次（按天去重）
+  const today = S.dateStr(new Date());
+  if (prog.achieved && app._goalToastDay !== today) {
+    app._goalToastDay = today;
+    toast('今日目标已达成 🎉', 'ok');
+    playSound('finish', app.settings.sound);
+    if (app.view === 'stats') renderStatsView();
+  }
 }
 
 function updateTimebar() {
@@ -2075,14 +2362,44 @@ function renderStatsView() {
     /* ---- 卡片 ---- */
     const cards = $('#statCards');
     if (cards) {
+      /* 「今日」这张卡要同时回答两个问题：今天做了多少、离目标还有多远。
+         口径必须与练习页 HUD 完全一致 —— 都用 dailyGoalProgress()，
+         它内部复用 summarize()，所以数字不会两边打架。
+         不设目标时（hasGoal=false）回落到原来的「N 次练习」副标题。 */
+      const goal = dailyGoalProgress(app.settings, sum);
+      const todaySub = goal.hasGoal
+        ? (goal.achieved
+            ? `已完成目标（${goal.percent}%）· ${sum.todaySessions} 次练习`
+            : goalSubText(goal))
+        : `${sum.todaySessions} 次练习`;
+
       cards.innerHTML = `
         ${statCard('累计练习', sum.sessions, '次', `${sum.totalDays} 个练习日`)}
         ${statCard('累计字数', sum.totalChars, '字', `总时长 ${formatDuration(sum.totalSeconds)}`)}
         ${statCard('平均速度', sum.avgSpeed, '字/分', `最佳 ${sum.bestSpeed} 字/分`)}
         ${statCard('平均正确率', sum.avgAccuracy, '%', `最佳 ${sum.bestAccuracy}%`)}
         ${statCard('连续练习', sum.streakDays, '天', sum.streakDays >= 3 ? '节奏很好' : '坚持就有效果')}
-        ${statCard('今日', sum.todayChars, '字', `${sum.todaySessions} 次练习`)}
+        ${statCard('今日', sum.todayChars, '字', todaySub, goal.hasGoal ? `目标进度 ${goal.percent}%` : '')}
       `;
+
+      // 目标进度条（独立于卡片网格，放在卡片下方）
+      const goalBar = $('#todayGoalBar');
+      if (goalBar) {
+        if (!goal.hasGoal) {
+          goalBar.hidden = true;
+        } else {
+          goalBar.hidden = false;
+          goalBar.className = 'today-goal' + (goal.achieved ? ' is-done' : '');
+          goalBar.innerHTML = `
+            <div class="tg-head">
+              <span class="tg-title">今日目标</span>
+              <span class="tg-pct">${goal.percent}%</span>
+            </div>
+            <div class="tg-track"><div class="tg-fill" style="width:${goal.percent}%"></div></div>
+            <div class="tg-detail">${escapeHtml(goalDetail(goal))}</div>
+          `;
+        }
+      }
     }
 
     /* ---- 曲线 ---- */
@@ -2199,12 +2516,39 @@ function renderStatsView() {
   }
 }
 
-function statCard(label, value, unit, sub) {
+/**
+ * 一张统计卡片。
+ * @param {string} label 标题
+ * @param {any}    value 主数值
+ * @param {string} unit  单位（可空）
+ * @param {string} sub   副标题（可空）
+ * @param {string} badge 右上角小徽标（可空）。只有「今日」卡片用它显示目标进度百分比。
+ */
+function statCard(label, value, unit, sub, badge) {
   return `<div class="stat-card">
-    <div class="stat-card-label">${escapeHtml(label)}</div>
+    <div class="stat-card-label">${escapeHtml(label)}${
+      badge ? `<span class="stat-card-badge">${escapeHtml(badge)}</span>` : ''
+    }</div>
     <div class="stat-card-value">${escapeHtml(String(value))}${unit ? `<i>${escapeHtml(unit)}</i>` : ''}</div>
     <div class="stat-card-sub">${escapeHtml(sub || '')}</div>
   </div>`;
+}
+
+/* 今日目标的两段文案。抽出来是为了让「卡片副标题」和「进度条明细」
+   用同一套措辞 —— 两处都手写迟早会出现「还差 30 字」vs「剩余 30 字」
+   这种不一致，虽然意思一样但读起来像两个功能。 */
+function goalSubText(goal) {
+  const parts = [];
+  if (goal.goalChars > 0) parts.push(`还差 ${goal.charsLeft} 字`);
+  if (goal.goalSessions > 0) parts.push(`还差 ${goal.sessionsLeft} 次`);
+  return parts.join(' · ') || '还没开始';
+}
+
+function goalDetail(goal) {
+  const parts = [];
+  if (goal.goalChars > 0) parts.push(`字数 ${goal.chars}/${goal.goalChars}`);
+  if (goal.goalSessions > 0) parts.push(`次数 ${goal.sessions}/${goal.goalSessions}`);
+  return (parts.join(' · ') || '') + (goal.achieved ? ' —— 今天达标了' : '');
 }
 
 function bindChips(sel, attr, onPick) {
@@ -2626,27 +2970,47 @@ function bindReviewActions() {
   // 单独练习某个字词
   $$('.review-chip').forEach(chip => {
     chip.addEventListener('click', () => {
-      const key = chip.getAttribute('data-key');
-      if (!key) return;
-      let q = null;
-      // 优先当词组处理
-      const phrase = PHRASES.find(p => p.w === key);
-      if (phrase) q = questionFromPhrase(phrase.w, phrase.p);
-      if (!q) {
-        const chars = Array.from(key);
-        if (chars.length === 1 && ALL_CHARS[chars[0]]) {
-          q = questionFromCharChar(chars[0], ALL_CHARS[chars[0]]);
-        } else {
-          // 多字但词表里没有：逐字查
-          const pys = chars.map(c => ALL_CHARS[c]).filter(Boolean);
-          if (pys.length === chars.length) q = questionFromPhrase(key, pys);
-        }
-      }
-      if (!q) { toast('该条目暂无法生成练习', 'err'); return; }
-      switchView('practice');
-      startSession([q, q, q], 'char');
+      practiceSingleItem(chip.getAttribute('data-key'));
     });
   });
+}
+
+/**
+ * 由「一个字 / 一个词」直接开一局针对性练习。
+ *
+ * 复习页的 chip 与结算页的本轮错字 chip 共用这段逻辑 —— 两边要的
+ * 完全是同一件事（把某个字词变成 3 道题立刻开练），分开写迟早会长歪。
+ *
+ * 为什么是 3 道而不是 1 道：单次盲打对了说明不了什么，连做三次
+ * 能在几秒内区分「真的记住了」和「蒙对的」。
+ *
+ * @param {string} key 单字或词组原文（如 "月" / "双拼"）
+ */
+function practiceSingleItem(key) {
+  if (!key) return;
+  let q = null;
+
+  // 优先当词组：【词表里查得到】才有经校对的语境拼音，
+  // 这比逐字拼默认音准（多音字如「银行」的「行」）。
+  const phrase = PHRASES.find(p => p.w === key);
+  if (phrase) q = questionFromPhrase(phrase.w, phrase.p);
+
+  if (!q) {
+    const chars = Array.from(key);
+    if (chars.length === 1 && ALL_CHARS[chars[0]]) {
+      q = questionFromCharChar(chars[0], ALL_CHARS[chars[0]]);
+    } else {
+      // 多字但词表里没有：逐字查。拼音凑不齐就不出题 ——
+      // 缺音的字会让引擎走 unknown 分支跳过，题目实际比看起来短，
+      // 不如明确告诉用户这条练不了。
+      const pys = chars.map(c => ALL_CHARS[c]).filter(Boolean);
+      if (pys.length === chars.length) q = questionFromPhrase(key, pys);
+    }
+  }
+
+  if (!q) { toast('该条目暂无法生成练习', 'err'); return; }
+  switchView('practice');
+  startSession([q, q, q], 'char');
 }
 
 /* ============================================================
@@ -2784,6 +3148,34 @@ function initSettingsView() {
       motionClass(currentReduceMotion());
     });
   }
+
+  /* ---- 每日目标 ----
+     两个 input 用同一套逻辑：先按 [0, 上限] 夹取再写回控件，
+     因为用户可能输入负数或 1e9 —— 负数会让进度条算出负宽度，
+     过大值则是笔误。夹取口径与 storage.clampInt 一致，
+     这里再夹一次是为了**改完当场看到被纠正的结果**，
+     而不是等下一次 loadSettings 时才悄悄变掉。
+
+     改目标后立刻重算：练习中的 HUD 要马上反映新目标，
+     统计页的完成度也要跟着变（不然切过去还是旧分母）。 */
+  const goalParts = [
+    ['#setDailyGoalChars', 'dailyGoalChars', 0, 1000000],
+    ['#setDailyGoalSessions', 'dailyGoalSessions', 0, 100]
+  ];
+  goalParts.forEach(([sel, key, lo, hi]) => {
+    const el = $(sel);
+    if (!el) return;
+    el.value = String(app.settings[key]);
+    el.addEventListener('change', () => {
+      const n = Math.floor(Number(el.value));
+      const v = Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : lo;
+      app.settings[key] = v;
+      el.value = String(v);              // 回写夹取后的值，用户看得见
+      saveSettingsDebounced();
+      renderGoalHud();
+      if (app.view === 'stats') renderStatsView();
+    });
+  });
 
   /* ---- 快捷键改键面板 ---- */
   initShortcutSettings();
@@ -3069,6 +3461,22 @@ function syncSettingsUI() {
     const el = $(sel);
     if (el) el.checked = !!app.settings[key];
   });
+  // 每日目标是数字输入框（不是 select 也不是 checkbox），单独同步。
+  // 放在这里而不是散落在各调用点：syncSettingsUI 是「设置变化后统一刷新
+  // 所有 UI」的唯一入口，漏掉它会导致「导入数据后目标框还是旧值」。
+  [['#setDailyGoalChars', 'dailyGoalChars'], ['#setDailyGoalSessions', 'dailyGoalSessions']]
+    .forEach(([sel, key]) => {
+      const el = $(sel);
+      if (el) el.value = String(app.settings[key]);
+    });
+  // 自定义文本可能被导入数据 / 恢复默认改掉，输入框要跟着变。
+  // 不走 initCustomText()（那会重复绑事件），只同步值 + 刷新统计。
+  const ctInput = $('#customTextInput');
+  if (ctInput) {
+    ctInput.value = app.settings.customText || '';
+    ctInput.dispatchEvent(new Event('input'));
+  }
+  renderGoalHud();
   selectMode(app.settings.mode, true);
   applyMiniKeymapVisibility();
   updateModeCounts();
@@ -3194,6 +3602,18 @@ function openModal(html, onAct, onClose) {
   overlay.hidden = false;
 
   const handler = (e) => {
+    /* [data-weak] 是弹窗里的「点它去练这个字/词」（结算页的本轮错字）。
+       放在这里统一处理，而不是让调用方自己 querySelectorAll 绑事件 ——
+       弹窗内容是每次 innerHTML 重建的，调用方绑定很容易漏掉重复打开的场景。
+       顺序要紧：先判 data-act（关闭/跳转），再判 data-weak，避免嵌套元素
+       同时命中两个属性时行为不确定。 */
+    const weak = e.target.closest('[data-weak]');
+    if (weak) {
+      const key = weak.getAttribute('data-weak');
+      closeModal();                 // 先关掉，否则练习页被弹窗盖住
+      practiceSingleItem(key);
+      return;
+    }
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
     const act = btn.getAttribute('data-act');

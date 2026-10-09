@@ -108,6 +108,14 @@ export const LEVELS = [
     tip: '最接近真实输入'
   },
   {
+    id: 'custom',
+    level: 5.5,
+    name: '自定义文本',
+    badge: 'DIY',
+    desc: '粘贴任意文字跟打。未收录的字自动跳过，不影响练习。',
+    tip: '练自己的材料'
+  },
+  {
     id: 'exam',
     level: 7,
     name: '能力测验',
@@ -419,6 +427,114 @@ function makePassageQuestion(diff, usedSet) {
       unknownCount: raw.filter(c => !c.punct && !c.syl).length
     }
   };
+}
+
+/**
+ * 自定义文本：把用户粘贴的任意文字变成一道「短文跟打」题。
+ *
+ * 【为什么能直接复用 annotatePassage】它本来就是为「一段文字 → 逐字标注」
+ * 设计的，而它内部走 tokenizeWithPinyin() —— 未收录的字会拿不到拼音，
+ * 被标成 unknown，引擎遇到 unknown 自动跳过（不会卡住，也不计入错误）。
+ * 换言之，「用户粘了一段含生僻字的材料」这个场景，
+ * 内置短文用的那套机制天生就能应付，不需要另写一套解析。
+ *
+ * 【为什么不用 vettedReadings】内置短文有 p 字段（人工校对的多音字读音），
+ * 用户粘的文本没有。传 null 即走自动注音。多音字可能读错，但：
+ *   ① 用户练的是手感不是读音，个别多音字读错不影响练习价值；
+ *   ② 强行猜测读音比「按字典默认音」错得更多。
+ * 所以这里不传 vetted，并在 UI 上说明「多音字按常用读音」。
+ *
+ * 【为什么返回单题而不是多题】一段文本就是一题，与 makePassageQuestion
+ * 的语义完全一致（引擎按字符流推进，不按题数）。切片交给上层
+ * —— 太长的文本要分段落，那是产品决策，不该固化在 core 里。
+ *
+ * @param {string} text 用户输入的文字
+ * @param {object} [meta] 附加信息（如 title、source）
+ * @returns {Question|null} 无有效汉字时返回 null（调用方据此提示）
+ */
+export function makeCustomPassageQuestion(text, meta = {}) {
+  const raw = String(text || '').replace(/\r\n?/g, '\n').trim();
+  const annotated = annotatePassage(raw, null);
+
+  // 至少要有一个「可打」的字：全是标点/空白/生僻字的话，这题没法练。
+  const typeable = annotated.filter(c => !c.punct && c.syl).length;
+  if (!typeable) return null;
+
+  const hanCount = annotated.filter(c => !c.punct).length;
+  const unknownCount = annotated.filter(c => !c.punct && !c.syl).length;
+
+  return {
+    id: nextId(),
+    level: 5.5,
+    kind: 'passage',
+    label: '自定义文本',
+    promptText: raw,
+    promptSub: unknownCount ? `标点自动跳过 · ${unknownCount} 个未收录字自动跳过` : '标点自动跳过',
+    text: raw,
+    chars: annotated,
+    meta: {
+      custom: true,
+      title: meta.title || '',
+      difficulty: 5,
+      hanCount,
+      unknownCount
+    }
+  };
+}
+
+/**
+ * 把长文本切成若干段，每段不超过 limit 个可打字符。
+ *
+ * 【为什么按「可打字符」而不是「总字数」切】标点不算进度，如果按总长切，
+ * 一段里标点特别多时实际的打字量会比预期少很多，段落长短不齐。
+ *
+ * 【为什么在标点处断开】中文长句很少在中间换气，硬切会让半句话开头
+ * 显得突兀。优先在标点后断开，找不到标点再硬切 —— 这样每段读起来
+ * 是完整的语义单元。
+ *
+ * 切不动的短文本（<= limit）原样返回单元素数组，不做特殊处理。
+ *
+ * @param {string} text
+ * @param {number} limit 每段最多多少个可打字符（默认 80）
+ * @returns {string[]}
+ */
+export function splitPassageText(text, limit = 80) {
+  const src = Array.from(String(text || '').replace(/\r\n?/g, '\n'));
+  const cap = Math.max(10, Math.floor(Number(limit)) || 80);
+  const out = [];
+  let buf = [];
+  let count = 0;
+  // 最近一次「可断点」在 buf 中的下标（标点之后）
+  let breakAt = -1;
+
+  const push = () => {
+    const seg = buf.join('').trim();
+    if (seg) out.push(seg);
+    buf = []; count = 0; breakAt = -1;
+  };
+
+  for (const ch of src) {
+    if (ch === '\n') { push(); continue; }
+
+    buf.push(ch);
+    const isBreakChar = isPunct(ch);
+    if (isBreakChar) breakAt = buf.length;         // 可在此后断开
+    else count++;
+
+    if (count >= cap) {
+      if (breakAt > 0 && breakAt < buf.length) {
+        // 在标点后断开：把标点留在前一段（读起来更自然）
+        const seg = buf.slice(0, breakAt).join('').trim();
+        const rest = buf.slice(breakAt);
+        if (seg) out.push(seg);
+        buf = rest; count = buf.filter(c => !isPunct(c)).length; breakAt = -1;
+      } else {
+        push();
+      }
+    }
+  }
+  push();
+  return out.length ? out : [String(text || '').trim()];
 }
 
 /**

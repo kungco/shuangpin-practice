@@ -340,7 +340,7 @@ ok(qa('#nav .nav-btn').length === 6, `导航按钮 6 个（实际 ${qa('#nav .na
   ok(order[0] === 'why', '「为什么用双拼」排在第一位');
 }
 
-ok(qa('#modeGrid .mode-card').length === 8, `模式卡片 8 个（实际 ${qa('#modeGrid .mode-card').length}）`);
+ok(qa('#modeGrid .mode-card').length === 9, `模式卡片 9 个（实际 ${qa('#modeGrid .mode-card').length}）`);
 
 // 新增的拆分成分练习模式必须出现在选择面板上
 {
@@ -348,6 +348,7 @@ ok(qa('#modeGrid .mode-card').length === 8, `模式卡片 8 个（实际 ${qa('#
   ok(ids.includes('sheng'), '模式列表含「只听声母」(sheng)');
   ok(ids.includes('yun'), '模式列表含「只听韵母」(yun)');
   ok(ids.includes('exam'), '模式列表含「能力测验」(exam)');
+  ok(ids.includes('custom'), '模式列表含「自定义文本」(custom)');
   // 老模式的 L2 tip 里「zh/ch/sh 需按 3 个键」是错误说法，必须已修正
   const splitCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'split');
   ok(!!splitCard, '拆分模式卡片存在');
@@ -802,6 +803,144 @@ if (sel) {
   await new Promise(r => setTimeout(r, 500));
   const loaded = sMod.loadSettings();
   ok(loaded.duration === 300, `时长设置已持久化（实际 ${loaded.duration}）`);
+}
+
+/* ---------- 每日目标 UI ---------- */
+console.log('\n【9c】每日目标：设置、进度条与 HUD');
+{
+  const charsInput = q('#setDailyGoalChars');
+  const sessInput = q('#setDailyGoalSessions');
+  ok(!!charsInput, '设置页有「每日字数」输入框');
+  ok(!!sessInput, '设置页有「每日练习次数」输入框');
+  ok(!!q('#todayGoalBar'), '统计页有今日目标进度条容器');
+  ok(!!q('#hudGoalItem'), '练习 HUD 有今日目标格子');
+
+  // 脏值必须被夹取并回写到控件（用户当场看得见被纠正）
+  if (charsInput) {
+    charsInput.value = '-99';
+    fire(charsInput, 'change');
+    ok(charsInput.value === '0', `负数字数被夹到 0 并回写（实际 ${charsInput.value}）`);
+    charsInput.value = '999999999';
+    fire(charsInput, 'change');
+    ok(charsInput.value === '1000000', `超大值被夹到上限并回写（实际 ${charsInput.value}）`);
+    charsInput.value = '250';
+    fire(charsInput, 'change');
+  }
+
+  await new Promise(r => setTimeout(r, 500));
+  const loadedGoal = sMod.loadSettings();
+  ok(loadedGoal.dailyGoalChars === 250, `每日字数已持久化（实际 ${loadedGoal.dailyGoalChars}）`);
+
+  // 统计页进度条：设了目标就应该可见，且展示百分比
+  fire(q('[data-view="stats"]'), 'click');
+  await new Promise(r => setTimeout(r, 30));
+  const bar = q('#todayGoalBar');
+  ok(bar && !bar.hidden, '设了目标后统计页进度条可见');
+  ok(bar && /%/.test(bar.textContent), '进度条展示完成度百分比');
+
+  /* 两项都设 0 → 进度条隐藏（而不是画一条永远 0% 的）。
+     这是「未设目标」和「还没开始做」的区分，UI 上不能混为一谈。 */
+  if (charsInput && sessInput) {
+    charsInput.value = '0'; fire(charsInput, 'change');
+    sessInput.value = '0'; fire(sessInput, 'change');
+    await new Promise(r => setTimeout(r, 30));
+    ok(q('#todayGoalBar').hidden, '两项目标都为 0 时进度条隐藏');
+
+    // 复原成有目标，供后续用例使用
+    charsInput.value = '100'; fire(charsInput, 'change');
+    sessInput.value = '1'; fire(sessInput, 'change');
+    await new Promise(r => setTimeout(r, 30));
+  }
+}
+
+/* ---------- 自定义文本跟打（用户路径） ---------- */
+console.log('\n【9d】自定义文本：粘贴 → 开始 → 打字 → 落库');
+{
+  // 回到设置面板
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  q('#sessionPanel').hidden = true;
+  q('#setupPanel').hidden = false;
+  if (!q('#overlay').hidden) {
+    const b = qa('#modal [data-act]')[0];
+    if (b) fire(b, 'click');
+  }
+
+  const ta = q('#customTextInput');
+  ok(!!ta, '存在自定义文本输入框');
+
+  // 选中「自定义文本」模式 → 输入框出现
+  const customCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'custom');
+  ok(!!customCard, '存在「自定义文本」模式卡片');
+  fire(customCard, 'click');
+  await new Promise(r => setTimeout(r, 20));
+  ok(app.sessionMode === 'custom', `模式切到 custom（实际 ${app.sessionMode}）`);
+  ok(q('#customTextField').hidden === false, '自定义文本输入区已显示');
+
+  // 切到别的模式 → 输入区隐藏（避免「填了却不生效」的误解）
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char'), 'click');
+  await new Promise(r => setTimeout(r, 10));
+  ok(q('#customTextField').hidden === true, '切到其他模式后输入区隐藏');
+  fire(customCard, 'click');
+  await new Promise(r => setTimeout(r, 10));
+
+  // 空文本点开始 → 拒绝并给出提示，不进入练习
+  fire(q('[data-view="practice"]'), 'click');
+  await new Promise(r => setTimeout(r, 10));
+  ta.value = '';
+  fire(ta, 'input');
+  fire(q('#btnStart'), 'click');
+  await new Promise(r => setTimeout(r, 20));
+  ok(q('#setupPanel').hidden === false && !app.engine, '空文本时不启动练习（停留在设置面板）');
+
+  // 纯标点 → 同样拒绝
+  ta.value = '，。！？';
+  fire(ta, 'input');
+  fire(q('#btnStart'), 'click');
+  await new Promise(r => setTimeout(r, 20));
+  ok(!app.engine, '没有可练汉字时不启动练习');
+
+  // 有效文本 → 正常开练
+  const source = '今天天气不错我们出去走走然后回家吃饭';
+  ta.value = source;
+  fire(ta, 'input');
+  await new Promise(r => setTimeout(r, 30));
+
+  // 实时统计：显示了可练字数
+  const stat = q('#customTextStat');
+  ok(stat && stat.textContent.includes('可练'), `输入后显示可练字数（实际「${stat && stat.textContent}」)`);
+
+  fire(q('#btnStart'), 'click');
+  await new Promise(r => setTimeout(r, 40));
+  ok(!!app.engine, '有效文本启动了练习');
+  ok(app.engine.mode === 'custom', `引擎模式为 custom（实际 ${app.engine.mode}）`);
+  ok(app.engine.currentQuestion()?.kind === 'passage', '自定义文本题目是 passage 类型');
+
+  // 逐字打完（用引擎的期望键位一路打下去，最多防死循环）
+  const eng = app.engine;
+  ok(q('#prompt') && q('#prompt').textContent.includes('今'), '舞台渲染了自定义文本的首字');
+  let guard = 0;
+  while (eng.state === 'running' && guard < 4000) {
+    guard++;
+    const t = eng.currentTarget();
+    if (!t) break;
+    if (t.kind === 'skip' || t.kind === 'punct') { eng.pressKey('a'); continue; }
+    const keys = t.keys || [];
+    const k = keys[t.pos];
+    if (!k) break;
+    eng.pressKey(k.toLowerCase());
+    // 引擎只在 durationSec >= 1 时落库（拦空练习），所以这里也要放慢节奏
+    await new Promise(r => setTimeout(r, 26));
+  }
+  ok(guard > 0, `自定义文本可连续打字推进（循环 ${guard} 次）`);
+  ok(eng.state === 'finished', `自定义文本能打完（实际状态 ${eng.state}）`);
+
+  // 落库：自定义文本走 passage 口径。
+  // 注意不能取 h[h.length-1] —— 前面【10e】的测验记录可能排在更后面
+  // （按写入顺序而非时间戳），要按模式反查本次那条。
+  const h = sMod.loadHistory();
+  const rec = h.filter(r => r.mode === 'custom' || r.mode === 'passage').pop();
+  ok(!!rec, '自定义文本练习写入了历史记录');
+  ok(rec && Array.from(rec.mode) && rec.date, `历史记录带模式与日期（实际 mode=${rec && rec.mode}）`);
 }
 
 /* ---------- 存储降级：写失败后马上读 ---------- */

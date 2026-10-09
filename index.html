@@ -131,6 +131,24 @@
           </label>
         </div>
 
+        <!-- 自定义文本：仅在选择「自定义文本」模式时显示。
+             未收录的字（生僻字/英文/数字）会被自动跳过，不影响练习。 -->
+        <div class="custom-text-field" id="customTextField" hidden>
+          <label class="field">
+            <span>粘贴要练的文字</span>
+            <textarea id="customTextInput" rows="5"
+                      placeholder="在此粘贴任意中文材料，例如一段小说、新闻或工作文档。&#10;标点自动跳过；未收录的字（生僻字、英文、数字）也会自动跳过。"></textarea>
+          </label>
+          <div class="custom-text-meta">
+            <span id="customTextStat" aria-live="polite"></span>
+            <button class="btn btn-ghost btn-sm" id="btnClearCustomText" type="button">清空</button>
+          </div>
+          <p class="footnote" style="margin-top:2px">
+            多音字按常用读音处理（如「行」读 xíng）。要练的字不在字库里时会自动跳过，
+            并在下方统计里如实说明跳过了多少。
+          </p>
+        </div>
+
         <div class="setup-foot">
           <div class="resume-hint" id="resumeHint" hidden>
             <span id="resumeText"></span>
@@ -165,6 +183,10 @@
           <div class="hud-item hud-item-wide">
             <span class="hud-label">本次连击 / 最长</span>
             <span class="hud-value"><b id="hudCombo">0</b><i>/</i><b id="hudMaxCombo">0</b></span>
+          </div>
+          <div class="hud-item" id="hudGoalItem">
+            <span class="hud-label">今日目标</span>
+            <span class="hud-value"><b id="hudGoal">0</b><i id="hudGoalUnit">/0 字</i></span>
           </div>
           <div class="hud-actions">
             <button class="btn btn-ghost btn-sm" id="btnPause">暂停</button>
@@ -469,6 +491,9 @@
         <p class="panel-sub">平均速度按练习时长加权，正确率按完成字数加权。统计基于保留的历史成绩。</p>
         <div class="stat-cards" id="statCards"></div>
 
+        <!-- 今日目标进度条。未设目标时由 main.js 置 hidden -->
+        <div class="today-goal" id="todayGoalBar" hidden></div>
+
         <h3 class="sub-title">历史成绩曲线</h3>
         <div class="chart-tools">
           <div class="chips" id="chartMetricChips">
@@ -569,6 +594,25 @@
             <span>默认题量</span>
             <select id="setCount" aria-label="默认题量"></select>
             <input id="setCustomCount" type="number" min="1" max="5000" step="1" value="20" aria-label="自定义默认题量（1 至 5000）" hidden />
+          </label>
+        </div>
+
+        <h3 class="sub-title">每日目标</h3>
+        <p class="panel-sub" style="margin-top:-6px">
+          打字练习最容易半途而废，而「连续天数」只有断了才痛。
+          设一个今天该做多少，练习时的顶部 HUD 和统计页都会显示完成进度。
+          <strong>任一项填 0 表示不设该项目标</strong>；两项都为 0 就不显示进度条。
+        </p>
+        <div class="settings-grid">
+          <label class="field">
+            <span>每日字数</span>
+            <input id="setDailyGoalChars" type="number" min="0" max="1000000" step="50" value="300"
+                   aria-label="每日目标字数，0 表示不设目标" />
+          </label>
+          <label class="field">
+            <span>每日练习次数</span>
+            <input id="setDailyGoalSessions" type="number" min="0" max="100" step="1" value="1"
+                   aria-label="每日目标练习次数，0 表示不设目标" />
           </label>
         </div>
 

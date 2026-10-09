@@ -778,6 +778,180 @@ console.log('【新增】候选耗尽、近期避重与语境读音');
   }
 }
 
+/* ============================================================
+   【新增】每日目标与同模式基线
+   ============================================================ */
+
+console.log('【新增】每日目标完成度');
+
+{
+  /* dailyGoalProgress 是纯函数（settings + summary 进，进度出），
+     但 summarize() 会读 localStorage —— 在 Node 里没有 localStorage，
+     storage 层会降级为内存存储，所以这里直接用显式的 summary 对象喂进去，
+     不依赖真存储。 */
+  const { dailyGoalProgress, recentBaseline } = await import('../src/core/stats.js');
+
+  const sum = (chars, sessions) => ({ todayChars: chars, todaySessions: sessions });
+
+  // 两个目标都设：完成度取**较小**者（任一未达标就不算完成）
+  let g = dailyGoalProgress({ dailyGoalChars: 300, dailyGoalSessions: 1 }, sum(150, 1));
+  ok(g.hasGoal === true, '设了目标则 hasGoal 为真');
+  ok(g.percent === 50, `字数 150/300 完成度 50%（实际 ${g.percent}）`);
+  ok(g.achieved === false, '字数未达标时不算完成');
+  ok(g.charsLeft === 150, `还差 150 字（实际 ${g.charsLeft}）`);
+
+  // 字数超额但次数不足 —— 必须仍算未完成（取较小比率）
+  g = dailyGoalProgress({ dailyGoalChars: 100, dailyGoalSessions: 2 }, sum(500, 1));
+  ok(g.percent === 50, `字数超额但次数 1/2，完成度仍为 50%（实际 ${g.percent}）`);
+  ok(g.achieved === false, '任一维度未达标时不算完成');
+
+  // 两项都达标
+  g = dailyGoalProgress({ dailyGoalChars: 100, dailyGoalSessions: 2 }, sum(120, 3));
+  ok(g.achieved === true && g.percent === 100, '两项都达标时完成');
+
+  // 超额不会超过 100%
+  g = dailyGoalProgress({ dailyGoalChars: 100, dailyGoalSessions: 0 }, sum(9999, 9));
+  ok(g.percent === 100, `超额时封顶 100%（实际 ${g.percent}）`);
+
+  // 只设字数目标
+  g = dailyGoalProgress({ dailyGoalChars: 200, dailyGoalSessions: 0 }, sum(50, 3));
+  ok(g.hasGoal === true && g.percent === 25, '只设字数目标时按字数算');
+  ok(g.sessionsLeft === 0, '未设次数目标时 sessionsLeft 为 0');
+
+  // 两个都不设 → hasGoal=false，UI 不画进度条
+  g = dailyGoalProgress({ dailyGoalChars: 0, dailyGoalSessions: 0 }, sum(500, 5));
+  ok(g.hasGoal === false, '两项都为 0 时 hasGoal 为假（不显示进度条）');
+  ok(g.percent === 0, '无目标时完成度为 0');
+
+  // 脏值不应产生 NaN / 负宽度
+  g = dailyGoalProgress({ dailyGoalChars: -50, dailyGoalSessions: NaN }, sum(10, 1));
+  ok(g.hasGoal === false, '负值/NaN 目标被当作「未设目标」');
+  g = dailyGoalProgress(null, sum(10, 1));
+  ok(g.percent === 0 && g.hasGoal === false, 'settings 为 null 时不抛错');
+}
+
+console.log('【新增】同模式基线（本轮对照）');
+
+{
+  const { recentBaseline } = await import('../src/core/stats.js');
+  /* recentBaseline 从 loadHistory() 读数据。Node 下 storage 降级为内存，
+     可以先把记录写进去再算。S.appendRecord 需要 makeRecord。 */
+  const S = await import('../src/core/storage.js');
+  S.clearHistory();
+
+  const push = (mode, speed, accuracy) => {
+    const rec = S.makeRecord({ mode, speed, accuracy, durationSec: 30, keystrokes: 60,
+                               chars: 30, maxCombo: 10, errors: 0 });
+    S.appendRecord(rec);
+    return rec.id;
+  };
+
+  // 不足 3 轮：enough 必须为 false
+  push('char', 40, 95); push('char', 42, 96);
+  let b = recentBaseline({ mode: 'char', min: 3 });
+  ok(b.samples === 2 && b.enough === false, '不足 3 轮时 enough 为 false（如实说明）');
+
+  // 第 3 轮后够了：中位数 = 41（[40,42,41] 排序后 [40,41,42] 中间值）
+  const thirdId = push('char', 41, 94);
+  b = recentBaseline({ mode: 'char', min: 3 });
+  ok(b.samples === 3 && b.enough === true, '满 3 轮后给出基线');
+  ok(b.speed === 41, `中位数为 41（实际 ${b.speed}）`);
+
+  /* 中位数对离群值免疫：加一个极端慢值 5，只看「中间」。
+     注意是**偶数个**样本，中位数取中间两者平均：
+     [5,40,41,42] → (40+41)/2 = 40.5。
+     关键是它只被离群值挪动了 0.5，而算术平均会被拽到 (40+42+41+5)/4 = 32。
+     这正是「用中位数而不是平均值」的全部意义。 */
+  push('char', 5, 50);
+  b = recentBaseline({ mode: 'char', min: 3 });
+  ok(b.speed === 40.5, `加入离群值 5 后中位数 40.5（若用均值会跌到 32，实际 ${b.speed}）`);
+
+  // exclude 把自己排除掉（N=1 时不该变成「本轮 vs 本轮」）
+  const b2 = recentBaseline({ mode: 'char', min: 1, window: 1, exclude: thirdId });
+  ok(b2.samples === 1, `exclude 生效，样本降到 1（实际 ${b2.samples}）`);
+
+  // 模式隔离：单字与短文不混在一起算
+  push('passage', 80, 99); push('passage', 82, 99); push('passage', 78, 99);
+  const bp = recentBaseline({ mode: 'passage', min: 3 });
+  ok(bp.speed === 80, `短文模式中位数为 80，未被单字记录污染（实际 ${bp.speed}）`);
+  const bc = recentBaseline({ mode: 'char', min: 3 });
+  ok(bc.speed === 40.5, `单字模式中位数仍为 40.5，未被短文记录污染（实际 ${bc.speed}）`);
+
+  /* 差值计算：本轮 45 vs 单字基线 40.5 → +4.5（排除自己）。
+     基线此时含 [40,42,41,5]，中位数 40.5，所以 45 - 40.5 = 4.5。 */
+  const diffId = push('char', 45, 99);
+  const bd = recentBaseline({ mode: 'char', min: 3, exclude: diffId, curSpeed: 45 });
+  ok(Math.abs(bd.speedDelta - 4.5) < 0.05, `本轮比基线快 4.5（实际 ${bd.speedDelta}）`);
+
+  S.clearHistory();
+}
+
+/* ============================================================
+   【新增】自定义文本跟打
+   ============================================================ */
+
+console.log('【新增】自定义文本：标注、跳过未收录、分段');
+
+{
+  const { makeCustomPassageQuestion, splitPassageText } =
+    await import('../src/core/questions.js');
+
+  // 基本：一段常见中文全部可打
+  const q = makeCustomPassageQuestion('今天天气不错');
+  ok(q && q.kind === 'passage', '自定义文本生成 passage 题型');
+  ok(q.meta.custom === true, '题目带 custom 标记（引擎/统计据此区分）');
+  ok(q.chars.every(c => c.punct || c.syl), '全部常用字都能标注出音节');
+  ok(q.chars.every(c => !c.syl || c.syl.split.steps.length === 2),
+    '每个可打字恒为 2 键（与内置语料同口径）');
+
+  // 未收录字应被标成 unknown 并跳过，而不是让整段失效
+  const q2 = makeCustomPassageQuestion('龘靐这是测试');
+  ok(q2.meta.unknownCount >= 1, `生僻字被计入 unknownCount（实际 ${q2.meta.unknownCount}）`);
+  ok(q2.chars.filter(c => c.unknown).every(c => !c.syl), 'unknown 的字没有音节（引擎据此跳过）');
+  ok(q2.chars.some(c => c.syl), '同一段里有可打的字，整段仍成立');
+
+  // 英文/数字同理
+  const q3 = makeCustomPassageQuestion('abc 123 中文');
+  ok(q3.meta.unknownCount >= 4, '英文与数字都算未收录');
+
+  // 纯标点 / 空 → null（调用方据此提示用户）
+  ok(makeCustomPassageQuestion('，。！？、；：') === null, '纯标点返回 null');
+  ok(makeCustomPassageQuestion('') === null, '空文本返回 null');
+  ok(makeCustomPassageQuestion('   \n  ') === null, '纯空白返回 null');
+
+  // 标点单独标记，且不计入音节
+  const q4 = makeCustomPassageQuestion('你好，世界。');
+  const puncts = q4.chars.filter(c => c.punct);
+  ok(puncts.length === 2, `标点被单独标记（实际 ${puncts.length}）`);
+  ok(puncts.every(c => c.syl === null), '标点没有音节');
+
+  /* ---- 分段 ---- */
+  // 短文本不切
+  ok(splitPassageText('你好', 80).length === 1, '短文本不切段');
+
+  // 按标点断开，每段不超过上限
+  const long = '这是一句测试。'.repeat(30);
+  const segs = splitPassageText(long, 40);
+  ok(segs.length > 1, `长文本被切段（实际 ${segs.length} 段）`);
+  ok(segs.every(s => Array.from(s).filter(c => !isPunct(c)).length <= 40),
+    '每段可打字符数不超过上限');
+  ok(segs.join('') === long.replace(/\s/g, '') || segs.join('').length >= long.length - segs.length,
+    '切段后内容无丢失（首尾拼接还原原意）');
+
+  // 无标点长文本也能硬切（不能因为找不到断点就不切）
+  const noPunct = '字'.repeat(200);
+  const segs2 = splitPassageText(noPunct, 50);
+  ok(segs2.length === 4, `无标点长文本硬切成 4 段（实际 ${segs2.length}）`);
+
+  // 换行即断段
+  const nl = '第一行\n第二行\n第三行';
+  ok(splitPassageText(nl, 80).length === 3, '按换行切成 3 段');
+
+  // 极端上限：cap 过小时不应产生空段或死循环
+  const tiny = splitPassageText('测试文字测试文字', 1);
+  ok(tiny.length >= 1 && tiny.every(s => s.length > 0), '极小上限仍产出非空段');
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 全部自检通过'
   : `❌ 共 ${fail} 项未通过`));

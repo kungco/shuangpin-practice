@@ -301,6 +301,137 @@ export function dailySeries(days = 14, mode = 'all') {
    易错字词
    ============================================================ */
 
+/* ============================================================
+   每日目标
+   ============================================================ */
+
+/**
+ * 今日目标的完成情况。
+ *
+ * 【为什么复用 summarize 而不是自己读日报】口径必须与统计页的
+ * 「今日 N 字」完全一致 —— 两处显示同一个数字的来源，用户才不会看到
+ * 「统计页说 120 字，练习页进度条说 90 字」这种自相矛盾。
+ * summarize() 内部走 dateStr(new Date())，跨天自动归零，不用另写日期逻辑。
+ *
+ * 计算前必须先把 settings.count 之外的目标值传进来 —— 传 0 表示不设目标，
+ * 此时 hasGoal 为 false，UI 不该画进度条（而不是画一条永远 0% 的）。
+ *
+ * @param {object} settings  应用设置（读 dailyGoalChars / dailyGoalSessions）
+ * @param {object} [summary] 可选的 summarize() 结果，避免重复读取
+ */
+export function dailyGoalProgress(settings, summary) {
+  const s = summary || summarize();
+  const goalChars = Math.max(0, Math.floor(Number(settings && settings.dailyGoalChars) || 0));
+  const goalSessions = Math.max(0, Math.floor(Number(settings && settings.dailyGoalSessions) || 0));
+
+  const chars = Math.max(0, num(s.todayChars));
+  const sessions = Math.max(0, num(s.todaySessions));
+
+  // 两个维度分别算完成度，再取**较小**者作为整体完成度。
+  // 取最小而不是平均：练了 300 字但只坐了 1 次和练了 100 字坐 3 次，
+  // 前者是「一次练够了」，后者是「分次坚持」—— 但只要有任一维度没达标，
+  // 就不该显示成「今天已完成」。目标的作用是推动，不是安慰。
+  const charRatio = goalChars > 0 ? Math.min(1, chars / goalChars) : null;
+  const sessionRatio = goalSessions > 0 ? Math.min(1, sessions / goalSessions) : null;
+
+  const parts = [charRatio, sessionRatio].filter(r => r !== null);
+  const ratio = parts.length ? Math.min(...parts) : 0;
+
+  return {
+    hasGoal: parts.length > 0,
+    achieved: parts.length > 0 && ratio >= 1,
+    ratio,
+    percent: Math.round(ratio * 100),
+    chars,
+    sessions,
+    goalChars,
+    goalSessions,
+    // 还差多少。任一目标未设时给 0，UI 据此决定要不要显示「还差 N 字」
+    charsLeft: goalChars > 0 ? Math.max(0, goalChars - chars) : 0,
+    sessionsLeft: goalSessions > 0 ? Math.max(0, goalSessions - sessions) : 0
+  };
+}
+
+/* ============================================================
+   同模式基线（本轮 vs 近 N 轮）
+   ============================================================ */
+
+/**
+ * 结算页的「本轮对照」：拿最近若干轮同模式练习做基线，
+ * 算出中位数，让本轮有个参照系。
+ *
+ * 【为什么不用平均值】单次走神或一次特别顺手的练习就能把均值拽走
+ * 一大截，而用户看到的「比平时快还是慢」会被这个异常值误导。
+ * 中位数只看「中间那个」，对离群值免疫 —— 这与 keySlowness() 的口径
+ * 一致（那里也是「偶尔走神一次就能把均值拽高一倍」）。
+ *
+ * 【为什么要门槛】只有 1–2 轮历史时，中位数就是那 1–2 个值本身，
+ * 「比中位数快 3」这种结论毫无统计意义。不足 MIN_SAMPLES 轮时
+ * 返回 samples 供 UI 如实说明，而不是硬凑一个数字出来。
+ *
+ * 【为什么按模式分开】单字练习和短文跟打的速度天然不是一个量级
+ * （短文有连贯语境，速度更高），混在一起算基线会让两个模式都失真。
+ *
+ * @param {object} opts
+ *   - mode:    'char' | 'phrase' | ... ；'all' 或空表示不按模式过滤
+ *   - exclude: 要排除的记录 id（本轮可能已经落库，不该把自己算进基线）
+ *   - window:  取最近多少轮（默认 5）
+ *   - min:     最少要几轮才给出基线（默认 3）
+ * @returns {{
+ *   samples:number, enough:boolean,
+ *   speed:number, accuracy:number, speedDelta:number, accuracyDelta:number
+ * }}
+ */
+export const BASELINE_MIN_SAMPLES = 3;
+export const BASELINE_WINDOW = 5;
+
+export function recentBaseline(opts = {}) {
+  const window = Math.max(1, Math.floor(Number(opts.window)) || BASELINE_WINDOW);
+  const min = Math.max(1, Math.floor(Number(opts.min)) || BASELINE_MIN_SAMPLES);
+  const mode = opts.mode && opts.mode !== 'all' ? String(opts.mode) : '';
+  const exclude = opts.exclude ? String(opts.exclude) : '';
+
+  const list = loadHistory()
+    .filter(r => (!mode || r.mode === mode) && (!exclude || r.id !== exclude))
+    .sort((a, b) => num(a.ts) - num(b.ts));
+
+  // 取最近 window 轮。测验模式题量固定、耗时较长，与日常练习不可比，
+  // 但仍按模式隔离，所以不会互相污染。
+  const recent = list.slice(Math.max(0, list.length - window));
+
+  const empty = {
+    samples: 0, enough: false,
+    speed: 0, accuracy: 0, speedDelta: 0, accuracyDelta: 0
+  };
+  if (!recent.length) return empty;
+
+  /* 百分比类指标要保留一位小数：中位数落在 96 和 97 之间时，
+     取整会得到 97 或 96，而「本轮 96.5 vs 基线 97」的差值就失真了。
+     速度同理。所以这里不用 storage.median()（它返回整数），
+     单独算一次带小数的中位数。 */
+  const med1 = (arr) => {
+    const nums = arr.map(num).filter(Number.isFinite).sort((a, b) => a - b);
+    if (!nums.length) return 0;
+    const mid = nums.length >> 1;
+    const v = nums.length % 2 === 1 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+    return round1(v);
+  };
+
+  const speed = med1(recent.map(r => r.speed));
+  const accuracy = med1(recent.map(r => r.accuracy));
+
+  return {
+    samples: recent.length,
+    // 样本不足时上层必须如实说明，不能安静地给出一个不可靠的对照
+    enough: recent.length >= min,
+    min,
+    speed,
+    accuracy,
+    speedDelta: round1(num(opts.curSpeed) - speed),
+    accuracyDelta: round1(num(opts.curAccuracy) - accuracy)
+  };
+}
+
 export function weakRanking(limit = 30) {
   return getWeakList({ limit, minCount: 1 });
 }

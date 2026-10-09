@@ -479,7 +479,7 @@ code {
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > span { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
 
-select, input[type="search"], input[type="text"], input[type="number"] {
+select, input[type="search"], input[type="text"], input[type="number"], textarea {
   font-family: inherit; font-size: 13.5px; color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border-strong);
@@ -489,10 +489,33 @@ select, input[type="search"], input[type="text"], input[type="number"] {
   outline: none;
   transition: border-color .15s, box-shadow .15s;
 }
-select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="number"]:focus {
+select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="number"]:focus,
+textarea:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-a12);
 }
+
+/* ---------------- 自定义文本输入区 ---------------- */
+
+.custom-text-field { margin: 4px 0 18px; }
+.custom-text-field textarea {
+  width: 100%; min-width: 0; min-height: 108px;
+  resize: vertical;
+  line-height: 1.7;
+  /* 用户可能粘一大段文字，等宽字体更容易核对落字；
+     但也可能粘的是文章，所以用 sans 保持可读性。 */
+  font-family: var(--sans);
+}
+.custom-text-field textarea::placeholder { color: var(--text-3); }
+.custom-text-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-top: 7px;
+}
+.custom-text-meta > span { font-size: 12px; color: var(--text-3); }
+/* 有字被跳过时用偏冷的强调色 —— 这不是错误，但用户该知道。
+   「警告」在这里过重，会让人以为材料不能用。 */
+.custom-text-meta > span.is-thin { color: var(--text-2); }
+.custom-text-meta > span.is-warn { color: var(--err); }
 
 .field-check > span { margin-bottom: 0; }
 
@@ -553,6 +576,12 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 .hud-value b { font-weight: 650; }
 
 .hud-actions { margin-left: auto; display: flex; gap: 8px; }
+
+/* 「今日目标」格子。数字用主题色的弱化版 —— 它是个「进度提示」，
+   不该和右边的速度/正确率抢注意力（那两个才是当下表现）。
+   达标后整格变绿：练习中达成目标的那一刻，用户扫一眼 HUD 就知道。 */
+.hud-item.is-done .hud-value,
+.hud-item.is-done .hud-value i { color: var(--ok); }
 
 .timebar {
   height: 4px; border-radius: 999px;
@@ -997,9 +1026,55 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
   padding: 14px 16px;
 }
 .stat-card-label { font-size: 12px; color: var(--text-3); margin-bottom: 3px; }
+
+/* 「今日」卡片右上角的目标进度徽标。绝对定位到卡片右上角，
+   这样不会改变卡片高度（6 张卡片等高才整齐）。 */
+.stat-card { position: relative; }
+.stat-card-badge {
+  position: absolute; top: 10px; right: 12px;
+  font-size: 10.5px; font-weight: 600;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-radius: 999px; padding: 1px 7px;
+  font-family: var(--mono);
+}
 .stat-card-value { font-size: 25px; font-weight: 700; font-family: var(--mono); letter-spacing: -.6px; line-height: 1.25; }
 .stat-card-value i { font-size: 12px; font-weight: 400; font-style: normal; color: var(--text-3); margin-left: 3px; }
 .stat-card-sub { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+
+/* ---------------- 今日目标进度条 ---------------- */
+
+/* 独立于卡片网格，横贯整行 —— 进度条太窄就失去「一眼看出还差多少」的作用。
+   放在卡片下方而不是塞进「今日」卡里，是为了不被 minmax(148px) 挤成一条细缝。 */
+.today-goal {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 12px 16px;
+}
+.tg-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 7px;
+}
+.tg-title { font-size: 12.5px; font-weight: 600; }
+.tg-pct { font-size: 13px; font-weight: 700; font-family: var(--mono); color: var(--primary); }
+.tg-track {
+  height: 8px; border-radius: 999px;
+  background: var(--bg-soft); overflow: hidden;
+}
+.tg-fill {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), var(--primary-2));
+  transition: width .3s ease;
+}
+.tg-detail { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+
+/* 达标：整块转绿，与 HUD 里的 .is-done 呼应 */
+.today-goal.is-done { border-color: var(--ok-border); background: var(--ok-soft); }
+.today-goal.is-done .tg-pct { color: var(--ok-text); }
+.today-goal.is-done .tg-fill { background: linear-gradient(90deg, var(--ok), var(--ok-text)); }
+.today-goal.is-done .tg-detail { color: var(--ok-text); }
 
 .chart-tools { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
 
@@ -1105,6 +1180,89 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
   font-size: 11.5px; line-height: 1.65; color: var(--text-3);
 }
 .slow-block-note strong, .slow-block-note b { color: var(--text-2); }
+
+/* ---- 本轮对照（与最近 N 轮同模式练习比）----
+   放在指标卡正下方，因为它解释的正是上面那些数字「算好还是算差」。
+   颜色语义：快/高 = 好 = --ok（绿），慢/低 = --err（红）。
+   注意这**不**是股票涨跌色 —— 这里的「好」与「坏」是能力指标，
+   与涨跌的红绿约定无关，用 --ok/--err 才是对的。 */
+.base-block {
+  margin-top: 14px;
+  padding: 9px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+}
+/* 样本不足时降一级视觉权重：它给的是「还差几轮」的说明，不是结论 */
+.base-block.is-thin {
+  background: transparent;
+  border-style: dashed;
+  color: var(--text-3);
+}
+.base-block b { color: var(--text); font-weight: 600; }
+.base-delta {
+  font-family: var(--mono); font-weight: 700;
+  padding: 0 5px; border-radius: 4px;
+}
+.base-delta.is-up   { color: var(--ok);  background: var(--ok-soft); }
+.base-delta.is-down { color: var(--err); background: var(--err-soft); }
+.base-delta.is-flat { color: var(--text-3); background: var(--bg-soft); }
+
+/* ---- 本轮出错的字词（结算页可点重练）----
+   与「反应最慢的键」是两个互补维度：这里说哪些**字**错了，
+   那里说哪些**键**慢。都放在结算页，所以视觉上要能区分开 ——
+   错字用 --err（红，与「错误」语义一致），慢键用 --slow。
+   按钮态而不是纯展示：刚练完的记忆最鲜活，点一下就能当场重练。 */
+.wrong-block { margin-top: 20px; }
+.wrong-block .sub-title { margin-bottom: 10px; }
+.wrong-chips {
+  display: flex; flex-wrap: wrap; gap: 7px;
+}
+.wrong-chip {
+  display: inline-flex; align-items: baseline; gap: 7px;
+  padding: 6px 11px;
+  font: inherit;                    /* 按钮默认字体要显式继承，否则与正文不一致 */
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--err);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color .15s, background .15s, transform .1s;
+}
+.wrong-chip:hover {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+.wrong-chip:active { transform: translateY(1px); }
+.wrong-chip:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.wrong-chip .wc-char { font-size: 16px; font-weight: 600; }
+.wrong-chip .wc-err {
+  font-family: var(--mono); font-size: 11px; color: var(--err);
+}
+/* 「重练」二字平时不显示，hover / 聚焦时才浮出来 ——
+   一排 chips 每个都带这两个字会显得很吵，但它又必须在被需要时可见。
+   用 opacity 而非 display 是为了让宽度稳定，避免 hover 时整排跳动。 */
+.wrong-chip .wc-cta {
+  font-size: 11px; color: var(--primary);
+  opacity: 0; transition: opacity .15s;
+}
+.wrong-chip:hover .wc-cta,
+.wrong-chip:focus-visible .wc-cta { opacity: 1; }
+/* 触摸设备没有 hover，直接常显 */
+@media (hover: none) {
+  .wrong-chip .wc-cta { opacity: 1; }
+}
+.wrong-note {
+  margin-top: 10px;
+  font-size: 11.5px; line-height: 1.65; color: var(--text-3);
+}
 
 .chart-wrap {
   border: 1px solid var(--border);
