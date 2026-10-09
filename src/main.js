@@ -163,6 +163,7 @@ function boot() {
     app.settings.shortcuts = mergeShortcuts(app.settings.shortcuts);
     // 先确保 [hidden] 兜底规则生效，再渲染任何东西
     ensureHiddenRule();
+    renderStorageBadge();
     if (!S.isStorageAvailable()) {
       toast('浏览器存储不可用，本次记录不会被保存', 'err', 5000);
     }
@@ -184,6 +185,73 @@ function boot() {
       '应用初始化失败：' + escapeHtml(err && err.message ? err.message : '未知错误') +
       '<br>请刷新页面重试。</div>');
   }
+}
+
+/* ============================================================
+   存储状态
+   ============================================================ */
+
+/**
+ * 把「数据现在到底存哪」如实说给用户听。
+ *
+ * 这个应用对数据丢失最敏感：localStorage 配额满时会**静默**降级到内存，
+ * 那时用户练完一整场、关掉页面，记录全部蒸发 —— 而顶栏原本一直挂着
+ * 「离线 · 本地存储」，等于在数据已经不在的时候继续声称数据在。
+ *
+ * storageModeName() 早就写好了、注释里也明说「给设置页用」，但一直没有
+ * 调用点。这里把它接到顶栏徽标和设置页说明上；降级状态还会补一个提示。
+ */
+const STORAGE_BADGE = {
+  persistent: { text: '离线 · 本地存储', tip: '所有数据保存在本机浏览器的 localStorage 中，不会上传到任何服务器。' },
+  memory: { text: '离线 · 内存（不保存）', tip: '当前浏览器不允许写入本地存储（可能是隐私模式）。本次练习结束后记录会丢失。' },
+  'quota-memory': { text: '离线 · 内存（配额已满）', tip: 'localStorage 配额已满，本次记录只存在内存里，关闭页面即丢失。请导出备份或清理浏览器数据。' },
+  unprobed: { text: '离线 · 本地存储', tip: '所有数据保存在本机浏览器中，不会上传到任何服务器。' }
+};
+
+/** 刷新顶栏徽标与设置页说明。存储状态可能在运行中变化（配额写满）。 */
+function renderStorageBadge() {
+  // 必须先探一次：storageModeName() 只读模块级状态，初始为 null 时会
+  // 返回 'unprobed' —— 也就是「还没探测过」。而探测在 isStorageAvailable()
+  // 里。不主动探，徽标会一直显示未探测态，用户看到的是承诺而不是事实。
+  // 顺带的好处：处于配额降级时会顺手尝试恢复（清理了空间就能落盘）。
+  try { S.isStorageAvailable(); } catch (_) {}
+  const mode = S.storageModeName();
+  const info = STORAGE_BADGE[mode] || STORAGE_BADGE.unprobed;
+  const badge = $('#storageBadge');
+  if (badge) {
+    badge.textContent = info.text;
+    badge.title = info.tip;
+    badge.classList.toggle('is-warn', mode === 'memory' || mode === 'quota-memory');
+  }
+  const note = $('#storageNote');
+  if (note) {
+    let bytes = 0;
+    try { bytes = S.storageUsage(); } catch (_) {}
+    const kb = (bytes / 1024).toFixed(1);
+    note.textContent = mode === 'persistent' || mode === 'unprobed'
+      ? `所有数据保存在浏览器 localStorage 中（当前约 ${kb} KB），不会上传到任何服务器。清除浏览器数据会导致记录丢失，建议定期导出备份。`
+      : `${info.tip}（当前约 ${kb} KB）` + (mode === 'quota-memory'
+        ? '历史记录可能仍完整（那是之前写入的），但新的练习记录不再落盘。'
+        : '');
+    note.classList.toggle('is-warn', mode === 'memory' || mode === 'quota-memory');
+  }
+  return mode;
+}
+
+/** 存储状态一旦转差就提醒一次，避免用户白练。 */
+let lastStorageWarn = '';
+function watchStorageMode() {
+  const mode = S.storageModeName();
+  if (mode === 'memory' || mode === 'quota-memory') {
+    const tip = STORAGE_BADGE[mode].tip;
+    if (mode !== lastStorageWarn) {
+      lastStorageWarn = mode;
+      toast(tip, 'err', 6000);
+    }
+  } else {
+    lastStorageWarn = '';
+  }
+  renderStorageBadge();
 }
 
 /* ============================================================
@@ -214,6 +282,9 @@ function switchView(view) {
   if (v === 'stats') renderStatsView();
   if (v === 'review') renderReviewView();
   if (v === 'keymap') renderSyllableList();
+  // 进设置页时刷新存储状态：配额可能在练习途中写满，
+  // 而设置页那段文案是「数据安全」承诺的唯一出处。
+  if (v === 'settings') watchStorageMode();
 }
 
 /* ============================================================
@@ -641,6 +712,8 @@ function bindEngineEvents() {
   });
 
   eng.on('finish', (summary) => {
+    // 落盘时配额可能刚好写满 → 状态转差，趁结算页还在就告诉用户。
+    watchStorageMode();
     onSessionFinish(summary);
   });
 
@@ -833,6 +906,18 @@ function showResultModal(s, recorded) {
     noteParts.push('本次为主动结束，已完成部分已计入统计。');
   }
 
+  /* ---------- 提示依赖度 ----------
+     README 承诺结算页给出提示次数，并说「两个指标的差值正好反映真实掌握程度」。
+     那个差值以前根本没显示，所以这里把它算出来摆到台面上：
+     差值大 = 有相当一部分字是等提示才打对的，独立正确率已经扣掉了它们，
+     但用户需要看见「扣了多少」才知道该练哪。 */
+  const hinted = Math.max(0, Number(s.hintedChars) || 0);
+  const gap = Math.max(0, Math.round((s.accuracy - s.independentAccuracy) * 10) / 10);
+  const hintedNote = hinted > 0
+    ? `<p class="result-hint-note">其中 <strong>${hinted}</strong> 个字是等提示才打对的，已从独立正确率中剔除。` +
+      `表面正确率 ${s.accuracy}%、独立正确率 ${s.independentAccuracy}%，相差 ${gap} 个百分点。</p>`
+    : '';
+
   /* ---------- 测验：分数区块 ---------- */
   const scoreBlock = sc ? `
     <div class="score-card ${sc.valid ? '' : 'is-invalid'}">
@@ -892,14 +977,23 @@ function showResultModal(s, recorded) {
         <div class="result-cell-value">${s.correctChars}<i>/</i>${s.wrongChars}</div>
       </div>
       <div class="result-cell">
-        <div class="result-cell-label">总按键</div>
-        <div class="result-cell-value">${s.keystrokes}<i>键</i></div>
+        <div class="result-cell-label">按键 / 错键</div>
+        <div class="result-cell-value">${s.keystrokes}<i>/</i>${s.wrongKeystrokes}</div>
       </div>
       <div class="result-cell">
         <div class="result-cell-label">最长连击</div>
         <div class="result-cell-value">${s.maxCombo}<i>键</i></div>
       </div>
+      <div class="result-cell${hinted ? ' is-warn' : ''}">
+        <div class="result-cell-label">依赖提示</div>
+        <div class="result-cell-value">${hinted}<i>字</i></div>
+      </div>
+      <div class="result-cell">
+        <div class="result-cell-label">自动跳过</div>
+        <div class="result-cell-value">${s.skipped || 0}<i>字</i></div>
+      </div>
     </div>
+    ${hintedNote}
 
     ${noteParts.length ? `<div class="result-note">${noteParts.map(escapeHtml).join('<br>')}</div>` : ''}
 
@@ -1029,9 +1123,13 @@ function renderSession() {
       else if (st.done) cls.push('is-done');
       else if (st.current) cls.push('is-current');
       if (st.unknown) cls.push('is-bad');
+      // 等提示才打对的字：标成 is-hinted，视觉上比 is-done 弱一档。
+      // 标点与未收录的字不算「靠提示」，不该带这个记号。
+      if (st.hinted && !st.punct && !st.unknown) cls.push('is-hinted');
       let extra = '';
       if (st.punct) extra = '';
       else if (st.unknown) extra = ' title="该字未收录拼音，自动跳过"';
+      else if (st.hinted) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)} —— 等提示才打对，不计入独立正确率"`;
       else if (!eng.examMode && eng.assistanceLevel() < 2) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)}"`;
       return `<span class="${cls.join(' ')}"${extra}>${escapeHtml(st.ch)}</span>`;
     }).join('');
@@ -2466,19 +2564,13 @@ function initSettingsView() {
     });
   }
 
-  // 数据占用提示
-  try {
-    const bytes = S.storageUsage();
-    const kb = (bytes / 1024).toFixed(1);
-    // 必须精确定位到 #storageNote —— 设置页里有多个 .footnote，
-    // 用 $('.footnote') 会命中第一个（可能是快捷键说明那段），
-    // 一个 textContent 赋值就把它的 <code> 子节点全抹掉了。
-    const note = $('#storageNote');
-    if (note) {
-      note.textContent = `所有数据保存在浏览器 localStorage 中（当前约 ${kb} KB），不会上传到任何服务器。` +
-        '清除浏览器数据会导致记录丢失，建议定期导出备份。';
-    }
-  } catch (_) {}
+  // 数据占用 + 存储状态。
+  // renderStorageBadge() 负责 #storageNote 的文案：它必须精确定位到
+  // #storageNote —— 设置页里有多个 .footnote，用 $('.footnote') 会命中
+  // 第一个（可能是快捷键说明那段），一个 textContent 赋值就把它的
+  // <code> 子节点全抹掉了。降级到内存时文案会改口，不能再声称「保存在
+  // localStorage 中」。
+  renderStorageBadge();
 }
 
 /* ============================================================

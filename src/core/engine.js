@@ -1061,6 +1061,10 @@ export class PracticeEngine {
       unknown: !!c.unknown,
       done: i < this.charIndex,
       current: i === this.charIndex,
+      // 这个字是等提示才打出来的（键位图闪 / 亮了答案 / 按了 Tab）。
+      // UI 要靠它把「靠猜的」和「真会的」区分开 —— 否则屏幕上
+      // 一路 is-done 到底，独立正确率扣掉的那部分字根本看不出来。
+      hinted: this._hintedChars.has(`${this.index}:${i}`),
       pinyin: c.pinyin || ''
     }));
   }

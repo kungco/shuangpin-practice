@@ -434,6 +434,51 @@ for (const mode of ['sheng', 'yun']) {
   eng.destroy();
 }
 
+console.log('【新增】charStates 标出「等提示才打对」的字');
+{
+  // 结算页的提示依赖度和舞台的 is-hinted 高亮都靠这个字段：
+  // 独立正确率把提示过的字从分子里剔了，用户必须看得见剔掉了哪些。
+  const eng = new PracticeEngine({ questions: generateQuestions({ mode: 'phrase', count: 1 }), mode: 'phrase',
+    hintEnabled: true, hintDelayMs: 0, revealDelayMs: 0 });
+  eng.start();
+  // 第一个字靠提示打对，第二个字自己打对。
+  // 断言要放在「两个字都在同一道题里」的时点上：二字节打完后引擎立刻
+  // 推进到下一题，charStates() 会换成新题（上一题的标记看不到了）。
+  eng.requestHint('reveal');
+  let t = eng.currentTarget();
+  for (const key of t.keys) eng.pressKey(key);
+  const afterFirst = eng.charStates();
+  ok(afterFirst.filter(st => st.done).length === 1, '第一个字已完成');
+  const hintedNow = afterFirst.filter(st => st.hinted);
+  ok(hintedNow.length >= 1, `标出依赖提示的字（${hintedNow.length}）`);
+  ok(hintedNow.some(st => st.done), '提示过的字同时标记为已完成');
+  t = eng.currentTarget();
+  for (const key of t.keys) eng.pressKey(key);
+  ok(eng.stats.hintedChars === 1, `依赖提示的字计入 hintedChars（${eng.stats.hintedChars}）`);
+  ok(eng.visibleStats().independentAccuracy < eng.visibleStats().accuracy,
+    '提示过的字被排除出独立正确率');
+  // 标点不是「靠提示」，不该带记号
+  const passage = new PracticeEngine({ questions: generateQuestions({ mode: 'passage', count: 1 }), mode: 'passage',
+    skipPunct: true, hintEnabled: true, hintDelayMs: 0, revealDelayMs: 0 });
+  passage.start();
+  passage.requestHint('reveal');
+  // 标点会被自动跳过，pressKey 对它直接返回，用 guard 防止原地打转
+  let p = passage.currentTarget();
+  let guard = 0;
+  while (p && p.kind !== 'syllable' && guard++ < 20) {
+    passage.pressKey((p.keys && p.keys[p.pos]) || '');
+    p = passage.currentTarget();
+  }
+  ok(guard < 20, '标点不会让作答目标原地打转');
+  const pStates = passage.charStates();
+  ok(pStates.filter(st => st.punct).every(st => !st.hinted), '标点字不会被标成依赖提示');
+  ok(pStates.filter(st => st.hinted).every(st => !st.punct && !st.unknown),
+    '标点与未收录字不会混入 hinted 统计');
+  passage.destroy();
+  eng.destroy();
+  console.log('  ✓ 提示标记只落在真正依赖提示的汉字上');
+}
+
 console.log('【新增】不限量续题、统计与恢复');
 {
   const batch = () => generateQuestions({ mode: 'char', count: 2, charTier: '1' });

@@ -30,7 +30,7 @@
     </nav>
 
     <div class="topbar-right">
-      <span class="local-badge" title="所有数据仅保存在本机浏览器中">离线 · 本地存储</span>
+      <span class="local-badge" id="storageBadge" title="所有数据仅保存在本机浏览器中">离线 · 本地存储</span>
     </div>
   </header>
 
@@ -631,6 +631,8 @@
           <button class="btn btn-danger btn-sm" id="btnResetSettings">恢复默认设置</button>
         </div>
 
+        <!-- 这段是「数据安全」承诺的唯一出处。降级到内存存储时
+             main.js 会改掉它并加上 is-warn —— 不能再声称保存在 localStorage。 -->
         <p class="footnote" id="storageNote">
           所有数据保存在浏览器 localStorage 中，不会上传到任何服务器。清除浏览器数据会导致记录丢失，建议定期导出备份。
         </p>

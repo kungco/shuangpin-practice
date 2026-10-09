@@ -141,6 +141,15 @@ body {
   background: var(--surface-2);
   white-space: nowrap;
 }
+/* 存储降级（隐私模式 / 配额满）：徽标必须变，
+   否则用户会以为记录还在，关掉页面才发现全没了。 */
+.local-badge.is-warn {
+  color: #a86a10; border-color: #f0c98a; background: #fdf4e3;
+  font-weight: 600;
+}
+.footnote.is-warn, .panel-sub.is-warn {
+  color: #a86a10;
+}
 
 /* ---------------- 主区域 ---------------- */
 
@@ -429,6 +438,16 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
   transition: color .15s;
 }
 .prompt .ch.is-done { color: var(--text); }
+/* 等提示才打对的字：底色 + 虚线下划线，明显弱于 is-done。
+   is-done 在 style 顺序上先定义，这里要放在它之后才能盖住
+   （两者都会被同一个字命中，is-hinted 表示 assisted 优先显示）。 */
+.prompt .ch.is-done.is-hinted { color: var(--text-2); }
+.prompt .ch.is-done.is-hinted::after {
+  content: ""; position: absolute; left: 50%; bottom: -3px;
+  width: 78%; height: 2px; border-radius: 2px;
+  background: repeating-linear-gradient(90deg, #e0a33c 0 4px, transparent 4px 7px);
+  transform: translateX(-50%);
+}
 .prompt .ch.is-current { color: var(--primary); }
 .prompt .ch.is-current::after {
   content: ""; position: absolute; left: 50%; bottom: -4px;
@@ -478,6 +497,10 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 }
 .syl-block.is-wrong { border-color: var(--err); box-shadow: 0 0 0 3px rgba(220,61,61,.12); }
 .syl-block.is-ok { border-color: #bfe3d4; }
+/* 提示态（键位图闪 / 亮答案）—— main.js 一直在加这两个 class，
+   但这里一直没写规则，所以提示在拆分面板上是完全不可见的。 */
+.syl-block.is-hinted { border-color: #e0a33c; background: #fdf8ee; }
+.syl-block.is-hinted-reveal { border-color: #d98c2b; background: #fdf2e0; box-shadow: 0 0 0 3px rgba(224,163,60,.14); }
 
 .syl-top {
   font-family: var(--mono); font-size: 13px; font-weight: 600;
@@ -1203,6 +1226,18 @@ table.weak-table .bar-cell { min-width: 110px; }
 .result-cell-value i { font-size: 12px; font-weight: 400; font-style: normal; color: var(--text-3); margin-left: 3px; }
 .result-cell.is-hl { border-color: #bcd2fb; background: var(--primary-soft); }
 .result-cell.is-hl .result-cell-value { color: var(--primary-dark); }
+/* 依赖提示的字 > 0 才标黄：这一格是「诚实性指标」，
+   平时是 0（灰），一旦有提示就说明成绩里混了辅助。 */
+.result-cell.is-warn { border-color: #f0c98a; background: #fdf4e3; }
+.result-cell.is-warn .result-cell-value { color: #a86a10; }
+
+.result-hint-note {
+  font-size: 13px; color: var(--text-2); line-height: 1.7;
+  background: #fdf4e3; border: 1px solid #f0c98a;
+  border-radius: var(--radius-sm);
+  padding: 11px 14px; margin: -8px 0 20px;
+}
+.result-hint-note strong { color: #a86a10; }
 
 .result-note {
   font-size: 13px; color: var(--text-2); line-height: 1.75;

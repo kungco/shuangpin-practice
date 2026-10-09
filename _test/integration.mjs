@@ -1485,6 +1485,90 @@ console.log('【新增】会话用时与反应时间同源、切回前台结算�
   cleanup();
 }
 
+console.log('【新增】提示依赖度可见、存储降级如实告知');
+{
+  const cleanup = () => { if (app.engine) app.engine.destroy(); app.engine = null; app.sessionActive = false; };
+  cleanup();
+  app.settings.hint = true;
+  // 用词组模式：只有词组/短文才会渲染逐字状态（char 是单音节，走另一条分支）
+  q('#selPhraseCategory').value = 'all'; fire(q('#selPhraseCategory'), 'change');
+  q('#selPhraseLength').value = 'all'; fire(q('#selPhraseLength'), 'change');
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'phrase'), 'click');
+  q('#selCount').value = '5'; fire(q('#selCount'), 'change');
+  fire(q('#btnStart'), 'click');
+  ok(!!app.engine, '词组练习已启动');
+  const eng = app.engine;
+  // 第一个字靠提示打对，第二个字自己打 —— 留在同一道题里断言，
+  // 因为提示标记是按「题号:字序」记的，换题后看不到上一题。
+  eng.requestHint('reveal');
+  let t = eng.currentTarget();
+  for (const key of t.keys) eng.pressKey(String(key).toLowerCase());
+  // 只打完第一个字就断言：词组是 2 字，打完第二个会直接换到下一题，
+  // 标记也就跟着换题号看不见了。
+  // 完整提示阶段引擎还会预先标记「下一字」（它的答案本来就摆在屏幕上），
+  // 所以可能是 2 个：1 个已完成 + 1 个待打。断言要认这个语义。
+  const hintedEls = qa('#prompt .ch.is-hinted');
+  ok(hintedEls.length >= 1, `舞台上标出依赖提示的字（${hintedEls.length}）`);
+  const doneHinted = hintedEls.filter(el => el.classList.contains('is-done'));
+  ok(doneHinted.length === 1, `已完成的提示字被标出（${doneHinted.length}）`);
+  ok(!!hintedEls[0] && hintedEls[0].getAttribute('title')?.includes('不计入独立正确率'),
+    '提示字带说明，悬浮可读');
+  ok(qa('#prompt .ch.is-done').length === 1, '已完成的字标记为 is-done');
+  // 继续打完，让成绩够长
+  for (let i = 0; i < 40 && eng.stats.totalChars < 8; i++) {
+    const x = eng.currentTarget();
+    if (!x || !x.keys || !x.keys.length) break;
+    for (const key of x.keys) eng.pressKey(String(key).toLowerCase());
+  }
+  const sum = eng.summary();
+  ok(sum.hintedChars >= 1, `存在依赖提示的字（${sum.hintedChars}）`);
+  ok(sum.independentAccuracy <= sum.accuracy, '独立正确率不高于表面正确率');
+  eng.finish('user');
+  await new Promise(r => setTimeout(r, 30));
+  // 结算页
+  const modalText = q('#modal').textContent;
+  ok(modalText.includes('依赖提示'), '结算页显示依赖提示字数');
+  ok(modalText.includes('错键'), '结算页显示错键次数');
+  ok(modalText.includes('自动跳过'), '结算页显示自动跳过字数');
+  ok(modalText.includes('独立正确率'), '结算页同时给出独立正确率');
+  ok(!!q('#modal .result-hint-note'), '提示依赖说明块存在');
+  ok(!!q('#modal .result-cell.is-warn'), '依赖提示非零时该格高亮');
+  cleanup();
+  const again = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'again');
+  if (again) fire(again, 'click');
+  await new Promise(r => setTimeout(r, 20));
+
+  // 存储降级：徽标与设置页文案都不能再说「保存在 localStorage」
+  const badge = q('#storageBadge');
+  ok(!!badge, '顶栏有存储状态徽标');
+  ok(badge.textContent.includes('本地存储'), '正常时徽标说明数据在本地存储');
+  // 模拟隐私模式：localStorage 写不进去
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  try {
+    const { _resetStorageState } = await import('../src/core/storage.js');
+    _resetStorageState();
+    fire(q('[data-view="settings"]'), 'click');
+    await new Promise(r => setTimeout(r, 20));
+    const b2 = q('#storageBadge');
+    ok(b2.classList.contains('is-warn'), '存储不可用时徽标高亮');
+    ok(!b2.textContent.includes('本地存储') || b2.textContent.includes('内存'),
+      `徽标如实说明内存模式（实际「${b2.textContent}」）`);
+    const note = q('#storageNote');
+    ok(!/保存在浏览器 localStorage 中/.test(note.textContent),
+      '设置页不再声称数据保存在 localStorage');
+    ok(note.classList.contains('is-warn'), '设置页说明高亮');
+  } finally {
+    localStorage.setItem = realSet;
+    const { _resetStorageState } = await import('../src/core/storage.js');
+    _resetStorageState();
+    fire(q('[data-view="settings"]'), 'click');
+  }
+  await new Promise(r => setTimeout(r, 20));
+  ok(!q('#storageBadge').classList.contains('is-warn'), '恢复后徽标回到正常态');
+  ok(q('#storageNote').textContent.includes('localStorage'), '恢复后设置页文案回到正常承诺');
+}
+
 /* ---------- 收尾 ---------- */
 console.log('\n【13】最终检查');
 ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);
