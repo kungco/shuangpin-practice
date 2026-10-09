@@ -10,7 +10,7 @@
 | `engine.mjs` | 练习引擎逻辑：逐键校验、推进、统计、暂停、限时、异常输入、**考试模式无提示硬约束**、**逐字「等提示才打对」标记（标点不算）**、**严格/非严格模式的推进与统计口径** | 无 |
 | `storage.mjs` | **存储降级**（配额满 → 内存 → 恢复落盘）、**导入合并**、**日报与历史一致性**、**间隔重复排期（SM-2 简化版）**、设置项类型校验、**键位错误按模式取数与导入合并** | 无 |
 | `a11y.mjs` | **减少动态效果**、**快捷键规范化与冲突校验**、**物理键位映射（Dvorak / AZERTY）**、**屏幕阅读器播报**、**WebAudio 音效合成与连错降音** | 无 |
-| `launcher.mjs` | **启动脚本静态自检**：编码前提（BOM / CRLF / chcp 顺序）、引用的文件是否存在、标签配对、三级回退链、与服务端脚本的接口一致性、危险写法扫描、**CI 工作流确实存在** | 无 |
+| `launcher.mjs` | **启动脚本静态自检**：编码前提（BOM / CRLF / chcp 顺序）、引用的文件是否存在、标签配对、三级回退链、与服务端脚本的接口一致性、危险写法扫描、**模块类型声明**、**CI 工作流确实存在** | 无 |
 | `training.mjs` | 提示撤除、滑动窗口与决策节奏续练、自适应档位、键位覆盖与强化上限、人工注音长度告警、词组筛选、续练、加权统计与降级、曲线均值口径、日报回落、计时同源、**测验成绩曲线只取有效分数**、500 / 5,000 题性能 | 无 |
 | `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**、**辅助功能接线层**、**提示依赖度可见性**、**存储降级时的界面告知**、**词组易错归组**、**完成音效**、**测验成绩曲线**、**键位图开关**、**热力图跟随模式筛选**） | `linkedom` |
 
@@ -104,9 +104,34 @@ node _test/integration.mjs
 这样「检出目录没有 linkedom、集成测试跑不起来」的情况不会再出现 ——
 依赖由锁文件保证，runner 每次都是干净且一致的。
 
-> 这份工作流**本身**也被 `launcher.mjs` 的 G 组守着：文件存在、矩阵含三个
+> 这份工作流**本身**也被 `launcher.mjs` 的 H 组守着：文件存在、矩阵含三个
 > 版本、用 `npm ci` 而非 `npm install`、在 `_test` 下执行。
 > 之前 README 在描述一份并不存在的 CI —— 文档承诺的东西要么兑现，要么删掉。
+
+### CI 第一次跑就抓到的真 bug（`type: module`）
+
+工作流补上后第一次推送，Node 18/20 立刻挂，报：
+
+```
+SyntaxError: Named export 'ALL_CHARS' not found. The requested module
+'../src/data/pinyin.js' is a CommonJS module, which may not support
+all module.exports as named exports.
+```
+
+根因：`_test/package.json` 声明了 `"type": "module"`，但 `src/` 在它**外面**。
+Node 从 `src/data/pinyin.js` 往上找最近的 `package.json`，一路到仓库根都没有，
+于是按 CommonJS 处理这个 ES 模块。
+
+本地开发完全看不出来 —— Node 24 有 **ESM 语法自动探测**，会把带 `import`/`export`
+的 `.js` 重新判定为 ESM。只有真在 18/20 上跑才会暴露。
+
+修法是根目录加一个 `package.json` 声明 `"type": "module"`（应用本体不读它，
+浏览器靠 `<script type="module">`）。`launcher.mjs` 的 G 组现在会直接
+`import()` 一次 `src/data/pinyin.js` 并检查导出，把这个症状钉在自检里。
+
+> 教训：README 里「Node 18/20/22 各跑一遍」这句话，在工作流存在之前
+> 是一句没人验证过的话。文档承诺的东西要么兑现，要么删掉 —— 两者都算改进，
+> 放着不管不算。
 
 > `launcher.mjs` 在 Linux runner 上也能跑：它做的是**纯静态检查**（读字节、
 > 匹配文本、校验接口约定），不依赖 Windows 运行时。真正的 `cmd.exe` 行为

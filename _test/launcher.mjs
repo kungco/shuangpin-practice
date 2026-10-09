@@ -168,7 +168,40 @@ ok(bat.includes('probe-service.ps1') && probe.includes('SHA256'),
 ok(bat.includes('已有服务正在运行') && bat.includes('端口已被其他服务占用'),
   '已有本项目服务可复用，其他服务占用有明确提示');
 
-console.log('\n【G】CI 工作流（README 描述的三版本自检必须真的存在）');
+console.log('\n【G】模块类型声明（src/ 必须在 ESM 语境下被 Node 解析）');
+{
+  /* 这个坑是 CI 第一次真正跑起来才暴露的：
+     _test/package.json 声明了 "type": "module"，但 src/ 在它**外面**。
+     从 src/data/pinyin.js 往上找不到任何 package.json，Node 就按
+     CommonJS 处理它，于是报「命名导出 ALL_CHARS 不存在」。
+     Node 24 有 ESM 语法自动探测会兜住，Node 18/20 不会 ——
+     三版本矩阵里只有 22 能过，本地开发也完全看不出来。
+     浏览器不受影响（<script type="module">），但自检脚本依赖它。 */
+  const rootPkgPath = resolve(ROOT, 'package.json');
+  ok(existsSync(rootPkgPath), '★ 仓库根目录有 package.json');
+  if (existsSync(rootPkgPath)) {
+    const pkg = JSON.parse(readFileSync(rootPkgPath, 'utf8'));
+    ok(pkg.type === 'module',
+      '★ 根 package.json 声明 "type": "module"（否则 src/*.js 被当成 CommonJS）');
+    // 每一层都查一遍：src/ 下面不该有覆盖 type 的子 package.json
+    for (const sub of ['src/package.json', 'src/core/package.json', 'src/data/package.json', 'src/ui/package.json']) {
+      ok(!existsSync(resolve(ROOT, sub)), `没有 ${sub} 覆盖模块类型`);
+    }
+  }
+  // _test 自己也必须是 ESM（自检脚本全是 import）
+  const testPkg = JSON.parse(readFileSync(resolve(ROOT, '_test/package.json'), 'utf8'));
+  ok(testPkg.type === 'module', '_test/package.json 也是 ESM');
+  // 实测：直接从 src/ 下 import 一次，能取到命名导出
+  try {
+    const mod = await import(new URL('../src/data/pinyin.js', import.meta.url).href);
+    ok(typeof mod.ALL_CHARS === 'object' && Object.keys(mod.ALL_CHARS).length > 100,
+      '★ src/ 下的模块可被 import 且导出完整（这正是 CI 报错的症状）');
+  } catch (err) {
+    ok(false, `★ src/ 下的模块可被 import（${err && err.message}）`);
+  }
+}
+
+console.log('\n【I】工作流必须真的能在三版本上跑通');
 {
   /* README 与 _test/README.md 都在讲「Node 18/20/22 各跑一遍七套自检」，
      但 .github/workflows/ 曾经根本不存在 —— 文档在描述一件没发生的事。
