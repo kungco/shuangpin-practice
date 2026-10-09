@@ -62,7 +62,7 @@ export function renderKeymap(container, opts = {}) {
     svg = buildSvg(interactive, opts.onKeyClick);
   } catch (err) {
     console.error('[keymap] 渲染失败', err);
-    container.innerHTML = '<p style="color:#93a0b4;font-size:13px;padding:16px">键位图渲染失败。</p>';
+    container.innerHTML = '<p class="kb-error">键位图渲染失败。</p>';
     return makeNoop();
   }
 
@@ -80,6 +80,30 @@ export function renderKeymap(container, opts = {}) {
   heatLayer.setAttribute('class', 'kb-heat-layer');
   heatLayer.setAttribute('pointer-events', 'none');
 
+  /* 主题切换：SVG 的 fill/stroke 是**属性**而不是 CSS 声明，
+     属性优先级高于样式表里的 class 规则，所以换主题后必须重写一遍，
+     单纯改 CSS 变量是刷新不到它们的。这里记住上次的热力数据，重画时复用。 */
+  let lastHeat = null;
+  let lastHighlight = null;
+
+  /**
+   * 主题切换。
+   *
+   * 键面/文字的配色现在**完全由 CSS 负责**（.kb-body / .kb-main 等规则用
+   * var() 上色），所以切主题本身不需要重写任何属性。这里只做一件事：
+   * 重新套用上次的热力与高亮状态 —— 因为它们是靠 class 与内联
+   * --heat-level 表达的，重建后要确保 class 还在。
+   *
+   * 早先这里用 querySelector('.kb-body') 逐个 setAttribute 上色，结果
+   * 26 个键里只有第一个变色；而 SVG 的 fill 是**表现属性**，优先级低于
+   * 任何 CSS 声明，这条路本身就不该走。
+   */
+  function repaint() {
+    if (lastHeat) this.setHeat(lastHeat);
+    if (lastHighlight) this.setHighlight(lastHighlight);
+    else clearHighlight();
+  }
+
   return {
     /**
      * 高亮一组键
@@ -88,6 +112,7 @@ export function renderKeymap(container, opts = {}) {
      *   state: 'next' | 'hit' | 'miss'
      */
     setHighlight(list) {
+      lastHighlight = Array.isArray(list) ? list.slice() : null;
       clearHighlight();
       if (!Array.isArray(list)) return;
       const touched = new Set();
@@ -127,7 +152,8 @@ export function renderKeymap(container, opts = {}) {
      */
     setHeat(list) {
       this.clearHeat();
-      if (!Array.isArray(list) || !list.length) return;
+      lastHeat = Array.isArray(list) && list.length ? list.slice() : null;
+      if (!lastHeat) return;
       const maxLevel = Math.max(...list.map(x => Number(x && x.level) || 1));
 
       for (const item of list) {
@@ -160,7 +186,10 @@ export function renderKeymap(container, opts = {}) {
       if (heatLayer.parentNode) heatLayer.parentNode.removeChild(heatLayer);
     },
 
-    clear() { clearHighlight(); },
+    clear() { clearHighlight(); lastHighlight = null; },
+
+    repaint,
+
     destroy() { container.innerHTML = ''; }
   };
 
@@ -172,7 +201,7 @@ export function renderKeymap(container, opts = {}) {
     t.setAttribute('y', KEY_H - 6);
     t.setAttribute('font-size', 10.5);
     t.setAttribute('font-weight', 700);
-    t.setAttribute('fill', '#8a4a1e');
+    // fill 交给 .kb-heat-num 的 CSS 规则（用 var(--heat-text-2)）
     t.textContent = String(Number(item.count) || 0);
     // 用 <g> 包一层带上 translate，避免和已有 text 冲突
     const g = document.createElementNS(SVG_NS, 'g');
@@ -236,8 +265,10 @@ function buildKey(key, x, y, info, interactive, onKeyClick) {
   body.setAttribute('width', KEY_W);
   body.setAttribute('height', KEY_H);
   body.setAttribute('rx', 9);
-  body.setAttribute('fill', '#ffffff');
-  body.setAttribute('stroke', '#cfd8e3');
+  // fill / stroke 由 .kb-body 的 CSS 规则负责（见 style.css）。
+  // 不在这里写死颜色：SVG 的 fill 属性是「表现属性」，优先级低于任何 CSS
+  // 声明，靠 JS 逐个上色迟早会漏（早先就因为 querySelector 而非
+  // querySelectorAll，26 个键只有第一个换了色）。
   body.setAttribute('stroke-width', 1.4);
   g.appendChild(body);
 
@@ -247,7 +278,6 @@ function buildKey(key, x, y, info, interactive, onKeyClick) {
   main.setAttribute('x', 9);
   main.setAttribute('y', 18);
   main.setAttribute('font-size', 15);
-  main.setAttribute('fill', '#1d2433');
   main.textContent = key;
   g.appendChild(main);
 
@@ -260,7 +290,7 @@ function buildKey(key, x, y, info, interactive, onKeyClick) {
     t.setAttribute('text-anchor', 'end');
     t.setAttribute('font-size', 12.5);
     t.setAttribute('font-weight', 700);
-    t.setAttribute('fill', '#2f6df6');
+    // fill 由 .kb-sub 的 CSS 规则负责
     t.textContent = info.shengmu.join(' ');
     g.appendChild(t);
   }
@@ -284,7 +314,7 @@ function buildKey(key, x, y, info, interactive, onKeyClick) {
     t.setAttribute('text-anchor', 'middle');
     t.setAttribute('font-size', yunText.length > 9 ? 10.5 : (yunText.length > 6 ? 11.5 : 13));
     t.setAttribute('font-weight', 600);
-    t.setAttribute('fill', '#e0863a');
+    // fill 由 .kb-pinyin 的 CSS 规则负责
     t.textContent = yunText;
     g.appendChild(t);
   }
@@ -299,7 +329,7 @@ function buildKey(key, x, y, info, interactive, onKeyClick) {
     t.setAttribute('y', KEY_H - 4);
     t.setAttribute('text-anchor', 'middle');
     t.setAttribute('font-size', 9);
-    t.setAttribute('fill', '#93a0b4');
+    // fill 由 .kb-note 的 CSS 规则负责
     t.textContent = 'zh 首键 / ü';
     g.appendChild(t);
   }

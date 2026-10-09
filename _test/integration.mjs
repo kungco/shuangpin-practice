@@ -51,7 +51,33 @@ const fakeWindow = {
   addEventListener: (t, h) => { (fakeWindow._ls[t] ||= []).push(h); },
   removeEventListener: () => {},
   _ls: {},
-  getComputedStyle: () => ({ getPropertyValue: () => '' }),
+  /* getComputedStyle 要能读出 style.css 里的 CSS 自定义属性。
+     linkedom 完全不解析样式表，getPropertyValue 恒返回 ''，于是
+     main.js 画成绩曲线空态文案时拿不到 --text-3，只能走兜底色 ——
+     深色主题下那句提示会变成浅灰配深底，几乎看不见。
+     这里直接从 style.css 里解析出 :root / [data-theme="dark"] 两块，
+     按当前 <html data-theme> 选对应那块。
+
+     键位图的配色**不**走这条路：那是纯 CSS 规则（.kb-body 等用 var() 上色），
+     所以这里读不到它，运行时也测不出来 —— verify.mjs 查源码守着。 */
+  getComputedStyle(el) {
+    const theme = (document.documentElement && document.documentElement.getAttribute('data-theme')) || 'light';
+    const cache = {};
+    const read = () => {
+      if (cache[theme]) return cache[theme];
+      const src = readFileSync(resolve(root, 'assets/style.css'), 'utf8');
+      const sel = theme === 'dark' ? '[data-theme="dark"]' : ':root';
+      const at = src.indexOf(sel);
+      const block = at >= 0 ? src.slice(at, src.indexOf('\n}', at)) : '';
+      const map = {};
+      for (const m of block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) map[m[1]] = m[2].trim();
+      cache[theme] = map;
+      return map;
+    };
+    return {
+      getPropertyValue(name) { return read()[name] || ''; }
+    };
+  },
   requestAnimationFrame: (fn) => setTimeout(() => fn(Date.now()), 16),
   cancelAnimationFrame: (id) => clearTimeout(id),
   alert: () => {},
@@ -244,6 +270,12 @@ try {
   });
 } catch (_) { /* Node 已有只读 navigator，忽略 */ }
 globalThis.localStorage = localStorage;
+// main.js 画图表空态文案时调的是**裸的** getComputedStyle（浏览器里
+// window 的属性同时就是全局），所以必须挂到 globalThis，只挂 fakeWindow 够不着。
+// matchMedia 同理：a11y.js 里的 prefersDark() / prefersReducedMotion() 走
+// window.matchMedia，挂全局是为了让走 window 之外的路径也能解析。
+globalThis.getComputedStyle = fakeWindow.getComputedStyle;
+globalThis.matchMedia = fakeWindow.matchMedia;
 globalThis.performance = fakeWindow.performance;
 globalThis.requestAnimationFrame = fakeWindow.requestAnimationFrame;
 globalThis.cancelAnimationFrame = fakeWindow.cancelAnimationFrame;
@@ -1658,6 +1690,111 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   ok(!km.hidden, '再点一次恢复显示');
   cleanup();
   sMod.clearWeak();
+}
+
+console.log('【新增】主题切换：属性、图表、键位图、设置持久化');
+{
+  // chart.js 的两套配色（用对象同一性判断「切过去了」，而不是比较具体色值 ——
+  // 具体色值由 verify.mjs 负责与 style.css 对齐，这里只管「有没有切」）
+  const chartMod = await import('../src/ui/chart.js');
+  const lightPal = (chartMod.setTheme('light'), chartMod.currentTheme());
+  const darkPal = (chartMod.setTheme('dark'), chartMod.currentTheme());
+  const cleanup = () => { if (app.engine) app.engine.destroy(); app.engine = null; app.sessionActive = false; };
+  cleanup();
+  const html = q('html');
+  const sel = q('#setTheme');
+  ok(!!sel, '设置页有主题选择');
+  ok(!!q('meta[name="theme-color"]') ||
+     Array.from(document.querySelectorAll('meta')).some(m => m.getAttribute('name') === 'theme-color'),
+    '注入了 theme-color（地址栏跟着变色）');
+
+  // 默认跟随系统；测试环境 matchMedia 恒为 false → 浅色
+  fire(q('[data-view="settings"]'), 'click');
+  await new Promise(r => setTimeout(r, 20));
+  ok(html.getAttribute('data-theme') === 'light',
+    `默认（系统浅色）解析为 light（实际 ${html.getAttribute('data-theme')}）`);
+
+  // 切到深色
+  sel.value = 'dark';
+  fire(sel, 'change');
+  await new Promise(r => setTimeout(r, 30));
+  ok(html.getAttribute('data-theme') === 'dark', '选择深色后 data-theme=dark');
+  ok(app.settings.theme === 'dark', '设置已更新为 dark');
+  ok(String(html.style.colorScheme || '').indexOf('dark') >= 0, 'color-scheme 同步（表单控件/滚动条跟随）');
+  const meta = Array.from(document.querySelectorAll('meta')).find(m => m.getAttribute('name') === 'theme-color');
+  ok(meta && meta.getAttribute('content') === '#14171d', 'theme-color 变成深底色');
+
+  // 图表要重画：Canvas 读不到 CSS 变量，ui/chart.js 维护了自己的配色
+  ok(chartMod.currentTheme() === darkPal, '图表配色已切到深色');
+
+  /* 键位图现在**完全由 CSS 上色**（.kb-body / .kb-main 等规则用 var()），
+     所以这里不能断言 fill 属性 —— linkedom 也不解析样式表，断言 computed
+     只会永远失败。真正该守的是两件事：
+     ① 元素带着正确的 class（CSS 据此上色）
+     ② 元素上**没有** fill/stroke 表现属性（那会盖住 CSS 规则，
+        早先就因为 JS 逐个上色而漏了 25 个键）
+     静态那部分由 verify.mjs 查源码，运行时只查 class 是否齐全。 */
+  const kb = document.querySelector('#fullKeymap');
+  const classes = ['kb-body', 'kb-main', 'kb-pinyin', 'kb-sub', 'kb-note'];
+  for (const cls of classes) {
+    ok(!!kb.querySelector('.' + cls), `键位图有 .${cls} 元素（CSS 依此上色）`);
+  }
+  const withFill = Array.from(kb.querySelectorAll('[fill]')).filter(el => {
+    const f = el.getAttribute('fill');
+    return f && f !== 'none' && !f.startsWith('var(');
+  });
+  ok(withFill.length === 0,
+    `键位图没有硬编码的 fill 属性（发现 ${withFill.length} 处：${withFill.slice(0, 3).map(e => e.getAttribute('class')).join(',')}）`);
+  ok(typeof app.fullKeymap.repaint === 'function', '键位图控制器提供 repaint（重套热力/高亮状态）');
+
+  /* 成绩曲线「还没有数据」时的空态文案，颜色取自 CSS 变量 --text-3。
+     这条路径依赖 getComputedStyle 读自定义属性，而 linkedom 不解析样式表，
+     所以这里同时验证：① 垫片能按主题取到值 ② 取到的值是 trim 过的
+     （getPropertyValue 对自定义属性会保留首尾空白，直接塞进
+      ctx.fillStyle 是个隐患）。 */
+  const readText3 = () => globalThis.getComputedStyle(document.documentElement)
+    .getPropertyValue('--text-3');
+  const darkText3 = readText3();
+  ok(darkText3.trim() === darkText3 && darkText3 !== '', `--text-3 深色可解析且无空白（${JSON.stringify(darkText3)}）`);
+  sel.value = 'light';
+  fire(sel, 'change');
+  await new Promise(r => setTimeout(r, 20));
+  const lightText3 = readText3();
+  ok(lightText3 !== '' && lightText3 !== darkText3,
+    `--text-3 随主题变化（浅 ${lightText3} / 深 ${darkText3}）`);
+  sel.value = 'dark';
+  fire(sel, 'change');
+  await new Promise(r => setTimeout(r, 20));
+
+  // 切回浅色，颜色要真的回来
+  ok(html.getAttribute('data-theme') === 'dark', '（对照）切回深色');
+  sel.value = 'light';
+  fire(sel, 'change');
+  await new Promise(r => setTimeout(r, 30));
+  ok(html.getAttribute('data-theme') === 'light', '切回浅色');
+  ok(chartMod.currentTheme() === lightPal, '图表配色回到浅色');
+
+  // 非法值不能留下「无主题」状态
+  sel.value = 'nonsense';
+  fire(sel, 'change');
+  await new Promise(r => setTimeout(r, 20));
+  ok(app.settings.theme === 'auto' && html.getAttribute('data-theme') === 'light',
+    '非法值回落 auto（仍解析出有效主题）');
+
+  // 持久化：重开应用要沿用
+  sel.value = 'dark';
+  fire(sel, 'change');
+  await new Promise(r => setTimeout(r, 480));   // saveSettingsDebounced 400ms
+  const reloaded = sMod.loadSettings();
+  ok(reloaded.theme === 'dark', `主题已落盘（实际 ${reloaded.theme}）`);
+  ok(sMod.saveSettings({ theme: 'light' }) !== false, '可写回 light');
+  ok(sMod.loadSettings().theme === 'light', 'loadSettings 接受合法值');
+  sMod.saveSettings({ theme: 'glow' });
+  ok(sMod.loadSettings().theme !== 'glow', `脏值被枚举白名单拦下（实际 ${sMod.loadSettings().theme}）`);
+  sMod.saveSettings({ theme: 'auto' });
+  fire(sel, 'change');
+  await new Promise(r => setTimeout(r, 20));
+  cleanup();
 }
 
 console.log('【新增】提示依赖度可见、存储降级如实告知');

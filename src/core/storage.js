@@ -288,6 +288,10 @@ export const DEFAULT_SETTINGS = {
   /* 动效偏好。'auto' 跟随系统 prefers-reduced-motion；
      'on'/'off' 是用户显式覆盖系统设置（有些用户系统开着但本应用想要动画）。 */
   reduceMotion: 'auto',
+  /* 主题。'auto' 跟随系统 prefers-color-scheme；
+     'light'/'dark' 是用户显式覆盖（有些系统是浅色但用户想夜里练）。
+     实际生效的属性是 <html data-theme>，由 main.js::applyTheme 写入。 */
+  theme: 'auto',
   /* 复习队列：是否只练「到期」的错题（间隔重复）。false = 练全部易错项 */
   reviewDueOnly: true,
   /* 快捷键。对象在 loadSettings 里单独处理（不是标量），
@@ -310,7 +314,8 @@ const SETTINGS_ENUMS = {
   phraseCategory: ['all', 'daily', 'office', 'travel', 'idiom'],
   phraseLength: ['all', '2', '3', '4'],
   charTier: ['progressive', '1', '2', '3', '4', '5', '6', '7'],
-  reduceMotion: ['auto', 'on', 'off']
+  reduceMotion: ['auto', 'on', 'off'],
+  theme: ['auto', 'light', 'dark']
 };
 
 export function loadSettings() {

@@ -43,12 +43,214 @@
   --heat-stroke-3: #e0a05a;
   --heat-stroke-4: #cf7524;
 
+  /* ---- 提示态（琥珀）----
+     与「错误」的红**刻意分开**：提示是「需要帮助」，错误是「做错了」，
+     两者在同一个舞台上同时出现（错键会亮红提示条），混成一个色就分不清了。
+
+     --warn 是**虚线下划线与边框**的颜色，不是文字色。它要单独承担
+     「这个字是等提示才打对的」这个信息，所以对比度必须够 3:1
+     （WCAG 1.4.11 非文本对比度）—— 原来那个 #e0a33c 只有 2.22:1，
+     浅色背景上几乎看不出来，而它承载的恰恰是最需要被看见的信息。 */
+  --warn:           #c8840c;
+  --warn-2:         #b8770f;
+  --warn-dot:       #e3a018;
+  --warn-soft:      #fdf8ee;
+  --warn-soft-2:    #fdf2e0;
+  --warn-soft-3:    #fdf3dd;
+  --warn-border:    #f0dcb0;
+  --warn-border-2:  #f0e2c0;
+  --warn-text:      #8a5a10;
+  --warn-text-2:    #9a6209;
+
+  /* 依赖提示说明块（结算页 / 热力图回退标注）*/
+  --hintnote-soft:   #fdf4e3;
+  --hintnote-border: #f0c98a;
+  --hintnote-text:   #a86a10;
+
+  /* ---- 能力测验（紫）---- 与练习的蓝、错误的热力橙都区分开 */
+  --exam:           #7c4ddb;
+  --exam-2:         #5b32b5;
+  --exam-text:      #4b2c8a;
+  --exam-soft:      #f6f1fd;
+  --exam-border:    #e2d3f5;
+  --exam-grad:      linear-gradient(180deg, #fbf8ff 0%, #ffffff 100%);
+  --grade-s:        #5b32b5;
+  --grade-a:        #2f6df6;
+  --grade-b:        #16a37b;
+  --grade-c:        #d98324;
+
+  /* 主色之上的前景（按钮文字、图标）
+     单独一个变量而不是写死 #fff：深色主题下品牌色的亮度会升高，
+     纯白文字在亮蓝上对比度反而下降，需要降一点饱和或用深色。 */
+  --on-primary:     #ffffff;
+  --on-ok:          #ffffff;   /* 成功色块上的前景 */
+  --on-err:         #ffffff;   /* 错误色块上的前景 */
+  --on-exam:        #ffffff;
+  --on-toast:       #ffffff;
+  --primary-2:      #5b8cff;   /* 渐变另一端 */
+  --primary-border: #bcd2fb;
+  --primary-a12:    rgba(47,109,246,.12);
+  --primary-a16:    rgba(47,109,246,.16);
+  --primary-a20:    rgba(47,109,246,.20);
+
+  --ok-border:      #bfe3d4;
+  --ok-text:        #0f6a4c;
+  --ok-a14:         rgba(23,147,106,.14);
+  --err-border:     #f3c9c9;
+  --err-text:       #a02a2a;
+  --err-hover:      #fbdcdc;
+  --err-a12:        rgba(220,61,61,.12);
+  --err-2:          #f07c7c;
+  --warn-a14:       rgba(224,163,60,.14);
+  --sheng-border:   #bcd2fb;
+  --yun-border:     #f3d5b0;
+  --yun-text:       #a9622a;
+  --zero-border:    #b3e3d3;
+
+  --timebar-low:    linear-gradient(90deg, #f0a04b, #f5bd7a);
+
+  /* 行内代码底色：半透明白，叠在有色块上 */
+  --code-bg:        rgba(255,255,255,.80);
+  --code-bg-2:      rgba(255,255,255,.75);
+
+  --scrim:          rgba(24,30,42,.36);
+  --shadow-lg:      0 24px 60px -18px rgba(24,30,42,.35);
+  --toast:          #232b3a;
+  --toast-err:      #b83232;
+  --toast-ok:       #12805a;
+  --toast-shadow:   0 8px 24px -8px rgba(0,0,0,.4);
+  --kbd-note-bg:    rgba(29,36,51,.10);
+
+  --heat-text:      #5a3410;   /* 热力键上的文字（深色）*/
+  --heat-text-2:    #8a5a24;
+
   --radius:        14px;
   --radius-sm:     9px;
   --shadow:        0 1px 2px rgba(29,36,51,.05), 0 8px 24px -12px rgba(29,36,51,.14);
   --shadow-sm:     0 1px 2px rgba(29,36,51,.06);
   --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "SF Mono", ui-monospace, Menlo, monospace;
   --sans: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+/* ============================================================
+   深色主题
+   ------------------------------------------------------------
+   用 [data-theme] 而不是 @media (prefers-color-scheme) 单独一套：
+   设置里能手动切，而「跟随系统」由 JS 把系统的判断结果写到这个属性上。
+   这样 CSS 只有一份主题定义，切换不需要重新加载样式表。
+
+   颜色不是把浅色值调暗，而是重新选过：
+   - 背景分三层（bg / surface / surface-2）而不是全黑，否则键盘、
+     卡片、提示条会糊成一片，看不出层次。
+   - 文字三级对比度都要过 WCAG AA：--text ≥ 7:1、--text-2 ≥ 4.5:1、
+     --text-3 ≥ 3:1（只用于次要装饰文字）。
+   - 热力梯度在深色下改为「暗 → 亮」：浅色主题里最浅的一档贴近背景，
+     深色下最浅会变成刺眼的白块。
+   ============================================================ */
+[data-theme="dark"] {
+  --bg:            #14171d;
+  --bg-soft:       #1a1e26;
+  --surface:       #1e232c;
+  --surface-2:     #232935;
+  --border:        #2c3340;
+  --border-strong: #3b4453;
+
+  --text:          #e6ebf2;
+  --text-2:        #a9b4c4;
+  --text-3:        #7d899a;
+
+  --primary:       #5b8cff;
+  --primary-soft:  #1b2740;
+  --primary-dark:  #a9c4ff;   /* 语义反转：深色下要「更亮」才是深底上的强调色 */
+  --on-primary:    #0f1626;
+  --on-ok:         #06170f;
+  --on-err:        #2a0808;
+  --on-exam:       #1a0e2b;
+  --on-toast:      #e6ebf2;
+  --primary-2:     #7aa3ff;
+  --primary-border: #2f4272;
+  --primary-a12:   rgba(91,140,255,.18);
+  --primary-a16:   rgba(91,140,255,.24);
+  --primary-a20:   rgba(91,140,255,.30);
+
+  --sheng:         #5b8cff;
+  --sheng-soft:    #1b2740;
+  --yun:           #e8a15c;
+  --yun-soft:      #33240f;
+  --zero:          #35c99b;
+  --zero-soft:     #10301f;
+
+  --ok:            #35c99b;
+  --ok-soft:       #10301f;
+  --err:           #ff6b6b;
+  --err-soft:      #3a1518;
+  --err-2:         #ff9090;
+
+  --heat-0:        #232935;
+  --heat-1:        #3b2a1a;
+  --heat-2:        #5c3b1c;
+  --heat-3:        #8d5420;
+  --heat-4:        #c8761f;
+  --heat-stroke-1: #55401f;
+  --heat-stroke-2: #6d4d21;
+  --heat-stroke-3: #8a5a26;
+  --heat-stroke-4: #b06a22;
+  --heat-text:     #f7dcc0;
+  --heat-text-2:   #d8b287;
+
+  --warn:          #e8ac52;
+  --warn-2:        #e79b36;
+  --warn-dot:      #f0b95e;
+  --warn-soft:     #302309;
+  --warn-soft-2:   #3a2a0c;
+  --warn-soft-3:   #33250d;
+  --warn-border:   #5a441b;
+  --warn-border-2: #614a1d;
+  --warn-text:     #f2c680;
+  --warn-text-2:   #eec27a;
+
+  --hintnote-soft:   #33260d;
+  --hintnote-border: #5c4718;
+  --hintnote-text:   #f0c27c;
+
+  --exam:          #a97cf0;
+  --exam-2:        #9060e0;
+  --exam-text:     #d5b8f7;
+  --exam-soft:     #251a3a;
+  --exam-border:   #3d2b5c;
+  --exam-grad:     linear-gradient(180deg, #2a1e42 0%, #221a33 100%);
+  --grade-s:       #a97cf0;
+  --grade-a:       #5b8cff;
+  --grade-b:       #35c99b;
+  --grade-c:       #e8a15c;
+
+  --timebar-low:   linear-gradient(90deg, #d98c2b, #e8a15c);
+
+  --ok-border:     #1d5b45;
+  --ok-text:       #7ce3c0;
+  --ok-a14:        rgba(53,201,155,.18);
+  --err-border:    #6b2a2f;
+  --err-text:      #ff9d9d;
+  --err-hover:     #4a1b1f;
+  --err-a12:       rgba(255,107,107,.16);
+  --warn-a14:      rgba(232,172,82,.18);
+  --sheng-border:  #2f4272;
+  --yun-border:    #5a3d1a;
+  --yun-text:      #f0b375;
+  --zero-border:   #1a5340;
+
+  --code-bg:       rgba(255,255,255,.10);
+  --code-bg-2:     rgba(255,255,255,.08);
+
+  --scrim:         rgba(6,8,12,.62);
+  --shadow:        0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  --shadow-sm:     0 1px 2px rgba(0,0,0,.35);
+  --shadow-lg:     0 24px 60px -18px rgba(0,0,0,.7);
+  --toast:         #2b3240;
+  --toast-err:     #c23b3b;
+  --toast-ok:      #14855f;
+  --toast-shadow:  0 8px 24px -8px rgba(0,0,0,.6);
+  --kbd-note-bg:   rgba(255,255,255,.10);
 }
 
 * { box-sizing: border-box; }
@@ -107,11 +309,11 @@ body {
 .brand-logo {
   width: 36px; height: 36px;
   border-radius: 10px;
-  background: linear-gradient(135deg, var(--primary), #5b8cff);
-  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  color: var(--on-primary);
   display: grid; place-items: center;
   font-size: 18px; font-weight: 700;
-  box-shadow: 0 4px 12px -4px rgba(47,109,246,.55);
+  box-shadow: 0 4px 12px -4px var(--primary-a20);
 }
 
 .brand-text { display: flex; flex-direction: column; line-height: 1.25; }
@@ -144,11 +346,11 @@ body {
 /* 存储降级（隐私模式 / 配额满）：徽标必须变，
    否则用户会以为记录还在，关掉页面才发现全没了。 */
 .local-badge.is-warn {
-  color: #a86a10; border-color: #f0c98a; background: #fdf4e3;
+  color: var(--hintnote-text); border-color: var(--hintnote-border); background: var(--hintnote-soft);
   font-weight: 600;
 }
 .footnote.is-warn, .panel-sub.is-warn {
-  color: #a86a10;
+  color: var(--hintnote-text);
 }
 
 /* ---------------- 主区域 ---------------- */
@@ -205,14 +407,14 @@ code {
 .btn:active { transform: scale(.975); }
 .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
 
-.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary { background: var(--primary); color: var(--on-primary); }
 .btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
 
 .btn-ghost { background: var(--surface); color: var(--text-2); border-color: var(--border-strong); }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-soft); color: var(--text); }
 
-.btn-danger { background: var(--err-soft); color: var(--err); border-color: #f3c9c9; }
-.btn-danger:hover:not(:disabled) { background: #fbdcdc; }
+.btn-danger { background: var(--err-soft); color: var(--err); border-color: var(--err-border); }
+.btn-danger:hover:not(:disabled) { background: var(--err-hover); }
 
 .btn-lg { padding: 12px 34px; font-size: 15px; font-weight: 600; }
 .btn-sm { padding: 5px 12px; font-size: 12.5px; }
@@ -241,7 +443,7 @@ code {
 .mode-card.is-active {
   border-color: var(--primary);
   background: var(--primary-soft);
-  box-shadow: 0 0 0 3px rgba(47,109,246,.1);
+  box-shadow: 0 0 0 3px var(--primary-a12);
 }
 
 .mode-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
@@ -253,7 +455,7 @@ code {
   background: var(--bg-soft); color: var(--text-3);
   letter-spacing: .4px;
 }
-.mode-card.is-active .mode-lv { background: rgba(47,109,246,.16); color: var(--primary-dark); }
+.mode-card.is-active .mode-lv { background: var(--primary-a16); color: var(--primary-dark); }
 
 .mode-card-desc { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
 
@@ -282,7 +484,7 @@ select, input[type="search"], input[type="text"], input[type="number"] {
 }
 select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="number"]:focus {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(47,109,246,.12);
+  box-shadow: 0 0 0 3px var(--primary-a12);
 }
 
 .field-check > span { margin-bottom: 0; }
@@ -306,7 +508,7 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 }
 .checkbox input:checked + i { background: var(--primary); border-color: var(--primary); }
 .checkbox input:checked + i::after { opacity: 1; }
-.checkbox input:focus-visible + i { box-shadow: 0 0 0 3px rgba(47,109,246,.2); }
+.checkbox input:focus-visible + i { box-shadow: 0 0 0 3px var(--primary-a20); }
 
 .setup-foot {
   display: flex; align-items: center; justify-content: space-between;
@@ -319,7 +521,7 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
   display: flex; align-items: center; gap: 10px;
   font-size: 13px; color: var(--text-2);
   background: var(--yun-soft);
-  border: 1px solid #f6dfc4;
+  border: 1px solid var(--warn-border);
   padding: 7px 12px; border-radius: var(--radius-sm);
   flex-wrap: wrap;
 }
@@ -352,12 +554,12 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 }
 .timebar-fill {
   height: 100%; width: 0%;
-  background: linear-gradient(90deg, var(--primary), #6f9bff);
+  background: linear-gradient(90deg, var(--primary), var(--primary-2));
   border-radius: 999px;
   transition: width .25s linear, background .3s;
 }
-.timebar-fill.is-low { background: linear-gradient(90deg, #f0a04b, #f5bd7a); }
-.timebar-fill.is-critical { background: linear-gradient(90deg, var(--err), #f07c7c); }
+.timebar-fill.is-low { background: background: var(--timebar-low); }
+.timebar-fill.is-critical { background: linear-gradient(90deg, var(--err), var(--err-2)); }
 
 /* ---------------- 题目舞台 ---------------- */
 
@@ -378,16 +580,16 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 .hint-flag {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 11.5px; font-weight: 600;
-  color: #9a6209; background: #fdf3dd;
-  border: 1px solid #f0dcb0;
+  color: var(--warn-text-2); background: var(--warn-soft-3);
+  border: 1px solid var(--warn-border);
   padding: 2px 10px; border-radius: 999px;
   margin-left: auto;
   animation: hintFlagIn .18s ease;
 }
-.hint-flag.is-reveal { color: #a02a2a; background: var(--err-soft); border-color: #f3c9c9; }
+.hint-flag.is-reveal { color: var(--err-text); background: var(--err-soft); border-color: var(--err-border); }
 .hint-flag-dot {
   width: 7px; height: 7px; border-radius: 50%;
-  background: #e3a018;
+  background: var(--warn-dot);
   animation: pulseKey 1s ease-in-out infinite;
 }
 .hint-flag.is-reveal .hint-flag-dot { background: var(--err); }
@@ -400,20 +602,20 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
   padding: 10px 14px;
   font-size: 13.5px;
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  background: #fdf8ec;
-  border: 1px solid #f0e2c0;
-  color: #8a5a10;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border-2);
+  color: var(--warn-text);
   animation: fadeUp .16s ease;
 }
 .hintbar.is-reveal {
   background: var(--primary-soft);
-  border-color: #c3d7fb;
+  border-color: var(--primary-border);
   color: var(--primary-dark);
 }
 .hintbar-icon { font-size: 14px; }
 .hintbar-text { flex: 1; min-width: 180px; }
 .hintbar code {
-  background: rgba(255,255,255,.8); color: inherit;
+  background: var(--code-bg); color: inherit;
   font-weight: 700; font-size: 14px; padding: 1px 6px; border-radius: 4px;
 }
 .hintbar .btn { margin-left: auto; }
@@ -445,7 +647,7 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 .prompt .ch.is-done.is-hinted::after {
   content: ""; position: absolute; left: 50%; bottom: -3px;
   width: 78%; height: 2px; border-radius: 2px;
-  background: repeating-linear-gradient(90deg, #e0a33c 0 4px, transparent 4px 7px);
+  background: repeating-linear-gradient(90deg, var(--warn) 0 4px, transparent 4px 7px);
   transform: translateX(-50%);
 }
 .prompt .ch.is-current { color: var(--primary); }
@@ -493,14 +695,14 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 }
 .syl-block.is-current {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(47,109,246,.12);
+  box-shadow: 0 0 0 3px var(--primary-a12);
 }
-.syl-block.is-wrong { border-color: var(--err); box-shadow: 0 0 0 3px rgba(220,61,61,.12); }
-.syl-block.is-ok { border-color: #bfe3d4; }
+.syl-block.is-wrong { border-color: var(--err); box-shadow: 0 0 0 3px var(--err-a12); }
+.syl-block.is-ok { border-color: var(--ok-border); }
 /* 提示态（键位图闪 / 亮答案）—— main.js 一直在加这两个 class，
    但这里一直没写规则，所以提示在拆分面板上是完全不可见的。 */
-.syl-block.is-hinted { border-color: #e0a33c; background: #fdf8ee; }
-.syl-block.is-hinted-reveal { border-color: #d98c2b; background: #fdf2e0; box-shadow: 0 0 0 3px rgba(224,163,60,.14); }
+.syl-block.is-hinted { border-color: var(--warn); background: var(--warn-soft); }
+.syl-block.is-hinted-reveal { border-color: var(--warn-2); background: var(--warn-soft-2); box-shadow: 0 0 0 3px var(--warn-a14); }
 
 .syl-top {
   font-family: var(--mono); font-size: 13px; font-weight: 600;
@@ -540,29 +742,29 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 }
 
 /* 声母键 */
-.kc.kc-sheng { background: var(--sheng-soft); border-color: #bcd2fb; }
+.kc.kc-sheng { background: var(--sheng-soft); border-color: var(--sheng-border); }
 .kc.kc-sheng .kc-role { color: var(--sheng); }
 .kc.kc-sheng .kc-letter { color: var(--sheng); }
 .kc.kc-sheng .kc-part { color: var(--sheng); opacity: .75; }
 
 /* 韵母键 */
-.kc.kc-yun { background: var(--yun-soft); border-color: #f3d5b0; }
+.kc.kc-yun { background: var(--yun-soft); border-color: var(--yun-border); }
 .kc.kc-yun .kc-role { color: var(--yun); }
 .kc.kc-yun .kc-letter { color: var(--yun); }
 .kc.kc-yun .kc-part { color: var(--yun); opacity: .8; }
 
 /* 零声母 */
-.kc.kc-zero { background: var(--zero-soft); border-color: #b3e3d3; }
+.kc.kc-zero { background: var(--zero-soft); border-color: var(--zero-border); }
 .kc.kc-zero .kc-role { color: var(--zero); }
 .kc.kc-zero .kc-letter { color: var(--zero); }
 .kc.kc-zero .kc-part { color: var(--zero); opacity: .8; }
 
 /* 状态 */
-.kc.is-hit { border-color: var(--ok); box-shadow: 0 0 0 3px rgba(23,147,106,.14); }
+.kc.is-hit { border-color: var(--ok); box-shadow: 0 0 0 3px var(--ok-a14); }
 .kc.is-hit::after {
   content: "✓"; position: absolute; top: -7px; right: -7px;
   width: 17px; height: 17px; border-radius: 50%;
-  background: var(--ok); color: #fff;
+  background: var(--ok); color: var(--on-primary);
   font-size: 10.5px; line-height: 17px; text-align: center;
   font-weight: 700;
 }
@@ -574,7 +776,7 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 .kc.is-miss::after {
   content: "✕"; position: absolute; top: -7px; right: -7px;
   width: 17px; height: 17px; border-radius: 50%;
-  background: var(--err); color: #fff;
+  background: var(--err); color: var(--on-primary);
   font-size: 10.5px; line-height: 17px; text-align: center;
   font-weight: 700;
 }
@@ -599,10 +801,10 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
   flex-wrap: wrap;
   animation: fadeUp .16s ease;
 }
-.feedback.is-err { background: var(--err-soft); border: 1px solid #f3c9c9; color: #a02a2a; }
-.feedback.is-ok  { background: var(--ok-soft);  border: 1px solid #bfe3d4; color: #0f6a4c; }
+.feedback.is-err { background: var(--err-soft); border: 1px solid var(--err-border); color: var(--err-text); }
+.feedback.is-ok  { background: var(--ok-soft);  border: 1px solid var(--ok-border); color: var(--ok-text); }
 .feedback .fb-icon { font-size: 15px; }
-.feedback code { background: rgba(255,255,255,.75); color: inherit; font-weight: 600; }
+.feedback code { background: var(--code-bg-2); color: inherit; font-weight: 600; }
 .feedback .fb-explain { margin-left: auto; font-size: 12.5px; opacity: .85; font-family: var(--mono); }
 
 /* ---------------- 迷你键位图 ---------------- */
@@ -624,13 +826,24 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 }
 .kb-key.is-clickable { cursor: pointer; }
 .kb-key.is-clickable:hover .kb-body { stroke: var(--primary); stroke-width: 2; }
-.kb-body { transition: stroke .15s, fill .15s; }
+/* 键面底色与文字色。
+   刻意写在 CSS 里而不是 SVG 的 fill 属性上：表现属性（presentation
+   attribute）的优先级**低于任何** CSS 声明，靠 JS 逐个 setAttribute 上色
+   迟早会漏 —— 早先就因为用 querySelector 而非 querySelectorAll，
+   26 个键里只有第一个换了色，其余 25 个在深色主题下仍是白底。
+   交给 CSS 之后，主题切换不需要任何 JS 参与。 */
+.kb-body { fill: var(--surface); stroke: var(--border-strong); transition: stroke .15s, fill .15s; }
+.kb-main { fill: var(--text); }
+.kb-pinyin { fill: var(--yun); }
+.kb-sub  { fill: var(--sheng); }
+.kb-note { fill: var(--text-3); }
+.kb-heat-num { fill: var(--heat-text-2); }
 .kb-key.is-hl-sheng .kb-body { fill: var(--sheng-soft); stroke: var(--sheng); stroke-width: 2.2; }
 .kb-key.is-hl-yun   .kb-body { fill: var(--yun-soft);   stroke: var(--yun);   stroke-width: 2.2; }
 .kb-key.is-hl-zero  .kb-body { fill: var(--zero-soft);  stroke: var(--zero);  stroke-width: 2.2; }
 .kb-key.is-hl-hit .kb-body { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 2.4; }
 .kb-key.is-hl-miss .kb-body { fill: var(--err-soft); stroke: var(--err); stroke-width: 2.4; }
-.kb-key.is-hl-next .kb-body { fill: #fff; stroke: var(--primary); stroke-width: 2.4; stroke-dasharray: 4 3; }
+.kb-key.is-hl-next .kb-body { fill: var(--on-primary); stroke: var(--primary); stroke-width: 2.4; stroke-dasharray: 4 3; }
 .kb-key.is-dim { opacity: .42; }
 
 /* ---- 热力图模式 ----
@@ -644,10 +857,11 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 .kb-key.is-heat[style*="--heat-level: 4"] .kb-body { fill: var(--heat-4); stroke: var(--heat-stroke-4); }
 /* 最热的键加一圈外发光，让「最该练的键」一眼可见 */
 .kb-key.is-heat[style*="--heat-level: 4"] .kb-body { stroke-width: 2.6; }
-.kb-key.is-heat .kb-main { fill: #5a3410; }
-.kb-key.is-heat .kb-pinyin { fill: #8a5a24; }
-.kb-key.is-heat .kb-sub { fill: #8a5a24; }
+.kb-key.is-heat .kb-main { fill: var(--heat-text); }
+.kb-key.is-heat .kb-pinyin { fill: var(--heat-text-2); }
+.kb-key.is-heat .kb-sub { fill: var(--heat-text-2); }
 .kb-heat-num { font-family: var(--mono); }
+.kb-error { color: var(--text-3); font-size: 13px; padding: 16px; }
 .kb-heat-layer { pointer-events: none; }
 
 .kb-main { font-family: var(--mono); font-weight: 700; }
@@ -702,7 +916,7 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
   cursor: pointer; transition: all .15s;
 }
 .chip:hover { background: var(--bg-soft); }
-.chip.is-active { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+.chip.is-active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 600; }
 
 .syl-list {
   display: grid;
@@ -765,8 +979,8 @@ select:focus, input[type="search"]:focus, input[type="text"]:focus, input[type="
 /* 该模式暂无专属数据时的如实说明：不是错误，但要让人知道看到的是全量 */
 .heat-fallback-note {
   display: inline-block; margin-left: 10px; padding: 1px 8px;
-  border: 1px solid #f0c98a; border-radius: 999px;
-  background: #fdf4e3; color: #a86a10; font-size: 11.5px;
+  border: 1px solid var(--hintnote-border); border-radius: 999px;
+  background: var(--hintnote-soft); color: var(--hintnote-text); font-size: 11.5px;
 }
 
 .heat-legend { margin-top: 12px; }
@@ -917,7 +1131,7 @@ table.weak-table .bar-cell { min-width: 110px; }
   padding: 14px 16px;
 }
 .why-compare-col.is-why {
-  border-color: #bcd2fb;
+  border-color: var(--primary-border);
   background: var(--primary-soft);
 }
 
@@ -956,7 +1170,7 @@ table.weak-table .bar-cell { min-width: 110px; }
   min-width: 26px;
   text-align: center;
 }
-.why-compare-col.is-why .why-compare-keys b { border-color: #bcd2fb; }
+.why-compare-col.is-why .why-compare-keys b { border-color: var(--primary-border); }
 
 .why-compare-count {
   font-family: var(--mono); font-size: 11.5px;
@@ -1018,7 +1232,7 @@ table.weak-table .bar-cell { min-width: 110px; }
   margin: 6px 0 4px;
 }
 .why-caveat-title {
-  font-size: 13.5px; font-weight: 700; color: #a9622a;
+  font-size: 13.5px; font-weight: 700; color: var(--yun-text);
   margin-bottom: 10px;
 }
 .why-caveat-list { margin: 0; padding-left: 20px; }
@@ -1064,9 +1278,9 @@ table.weak-table .bar-cell { min-width: 110px; }
 
 /* 设置面板上的测验说明块 */
 .exam-note {
-  border: 1px solid #e2d3f5;
-  border-left: 3px solid #7c4ddb;
-  background: #f6f1fd;
+  border: 1px solid var(--exam-border);
+  border-left: 3px solid var(--exam);
+  background: var(--exam-soft);
   border-radius: var(--radius-sm);
   padding: 14px 17px;
   margin: 4px 0 22px;
@@ -1074,11 +1288,11 @@ table.weak-table .bar-cell { min-width: 110px; }
 .exam-note-head {
   display: flex; align-items: center; gap: 9px;
   margin-bottom: 9px;
-  font-size: 14px; color: #4b2c8a;
+  font-size: 14px; color: var(--exam-text);
 }
 .exam-note-badge {
   font-size: 10.5px; font-weight: 700; letter-spacing: .6px;
-  background: #7c4ddb; color: #fff;
+  background: var(--exam); color: var(--on-exam);
   padding: 2px 7px; border-radius: 4px;
 }
 .exam-note-list { margin: 0; padding-left: 19px; }
@@ -1087,22 +1301,22 @@ table.weak-table .bar-cell { min-width: 110px; }
   margin-bottom: 5px;
 }
 .exam-note-list li:last-child { margin-bottom: 0; }
-.exam-note-list strong { color: #4b2c8a; font-weight: 650; }
+.exam-note-list strong { color: var(--exam-text); font-weight: 650; }
 
 /* 练习中的「测验中」标记 */
 .exam-flag {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11.5px; font-weight: 650;
-  color: #4b2c8a;
-  background: #f6f1fd;
-  border: 1px solid #e2d3f5;
+  color: var(--exam-text);
+  background: var(--exam-soft);
+  border: 1px solid var(--exam-border);
   border-radius: 999px;
   padding: 2px 11px;
   margin-left: auto;
 }
 .exam-flag::before {
   content: ''; width: 6px; height: 6px; border-radius: 50%;
-  background: #7c4ddb;
+  background: var(--exam);
 }
 
 /* 测验中隐藏一切辅助元素（键位图 / 提示按钮） */
@@ -1113,13 +1327,13 @@ table.weak-table .bar-cell { min-width: 110px; }
 /* ---------------- 分数卡片（结算弹窗） ---------------- */
 
 .score-card {
-  border: 1px solid #e2d3f5;
-  background: linear-gradient(180deg, #fbf8ff 0%, #ffffff 100%);
+  border: 1px solid var(--exam-border);
+  background: var(--exam-grad);
   border-radius: var(--radius);
   padding: 20px 22px 18px;
   margin-bottom: 20px;
 }
-.score-card.is-invalid { border-color: #f0dcc4; background: #fffcf7; }
+.score-card.is-invalid { border-color: var(--warn-border); background: var(--warn-soft); }
 
 .score-main {
   display: flex; align-items: center; justify-content: space-between;
@@ -1130,7 +1344,7 @@ table.weak-table .bar-cell { min-width: 110px; }
   font-family: var(--mono);
   font-size: 44px; font-weight: 700; line-height: 1;
   letter-spacing: -1.5px;
-  color: #5b32b5;
+  color: var(--exam-2);
 }
 .score-num i {
   font-size: 14px; font-weight: 400; font-style: normal;
@@ -1141,12 +1355,12 @@ table.weak-table .bar-cell { min-width: 110px; }
   width: 34px; height: 34px; border-radius: 9px;
   display: grid; place-items: center;
   font-family: var(--mono); font-size: 17px; font-weight: 700;
-  color: #fff;
+  color: var(--on-primary);
 }
-.score-tier-1 { background: #5b32b5; }
-.score-tier-2 { background: #2f6df6; }
-.score-tier-3 { background: #16a37b; }
-.score-tier-4 { background: #d98324; }
+.score-tier-1 { background: var(--grade-s); }
+.score-tier-2 { background: var(--grade-a); }
+.score-tier-3 { background: var(--grade-b); }
+.score-tier-4 { background: var(--grade-c); }
 .score-grade-name { font-size: 16px; font-weight: 650; color: var(--text); }
 
 .score-desc { margin: 0 0 15px; font-size: 13px; color: var(--text-2); line-height: 1.7; }
@@ -1172,16 +1386,16 @@ table.weak-table .bar-cell { min-width: 110px; }
 }
 .score-part-bar > i {
   display: block; height: 100%; border-radius: 99px;
-  background: linear-gradient(90deg, #8b5cf6, #5b32b5);
+  background: linear-gradient(90deg, var(--exam), var(--exam-2));
   transition: width .3s ease;
 }
 
 .score-foot {
   margin: 14px 0 0; padding-top: 12px;
-  border-top: 1px solid #eae2f8;
+  border-top: 1px solid var(--exam-border);
   font-size: 11.5px; color: var(--text-3); line-height: 1.75;
 }
-.score-foot strong { color: #4b2c8a; font-weight: 650; }
+.score-foot strong { color: var(--exam-text); font-weight: 650; }
 
 /* ---------------- 设置 ---------------- */
 
@@ -1195,7 +1409,7 @@ table.weak-table .bar-cell { min-width: 110px; }
 
 .overlay {
   position: fixed; inset: 0; z-index: 100;
-  background: rgba(24,30,42,.36);
+  background: var(--scrim);
   backdrop-filter: blur(3px);
   display: grid; place-items: center;
   padding: 22px;
@@ -1206,7 +1420,7 @@ table.weak-table .bar-cell { min-width: 110px; }
 .modal {
   background: var(--surface);
   border-radius: 18px;
-  box-shadow: 0 24px 60px -18px rgba(24,30,42,.35);
+  box-shadow: var(--shadow-lg);
   width: 100%; max-width: 520px;
   max-height: 88vh; overflow-y: auto;
   padding: 28px;
@@ -1230,20 +1444,20 @@ table.weak-table .bar-cell { min-width: 110px; }
 .result-cell-label { font-size: 12px; color: var(--text-3); }
 .result-cell-value { font-size: 23px; font-weight: 700; font-family: var(--mono); letter-spacing: -.5px; }
 .result-cell-value i { font-size: 12px; font-weight: 400; font-style: normal; color: var(--text-3); margin-left: 3px; }
-.result-cell.is-hl { border-color: #bcd2fb; background: var(--primary-soft); }
+.result-cell.is-hl { border-color: var(--primary-border); background: var(--primary-soft); }
 .result-cell.is-hl .result-cell-value { color: var(--primary-dark); }
 /* 依赖提示的字 > 0 才标黄：这一格是「诚实性指标」，
    平时是 0（灰），一旦有提示就说明成绩里混了辅助。 */
-.result-cell.is-warn { border-color: #f0c98a; background: #fdf4e3; }
-.result-cell.is-warn .result-cell-value { color: #a86a10; }
+.result-cell.is-warn { border-color: var(--hintnote-border); background: var(--hintnote-soft); }
+.result-cell.is-warn .result-cell-value { color: var(--hintnote-text); }
 
 .result-hint-note {
   font-size: 13px; color: var(--text-2); line-height: 1.7;
-  background: #fdf4e3; border: 1px solid #f0c98a;
+  background: var(--hintnote-soft); border: 1px solid var(--hintnote-border);
   border-radius: var(--radius-sm);
   padding: 11px 14px; margin: -8px 0 20px;
 }
-.result-hint-note strong { color: #a86a10; }
+.result-hint-note strong { color: var(--hintnote-text); }
 
 .result-note {
   font-size: 13px; color: var(--text-2); line-height: 1.75;
@@ -1261,15 +1475,15 @@ table.weak-table .bar-cell { min-width: 110px; }
   align-items: center; pointer-events: none;
 }
 .toast {
-  background: #232b3a; color: #fff;
+  background: var(--toast); color: var(--on-toast);
   font-size: 13.5px;
   padding: 9px 20px; border-radius: 999px;
-  box-shadow: 0 8px 24px -8px rgba(0,0,0,.4);
+  box-shadow: var(--toast-shadow);
   animation: toastIn .2s ease;
   max-width: 80vw;
 }
-.toast.is-err { background: #b83232; }
-.toast.is-ok  { background: #12805a; }
+.toast.is-err { background: var(--toast-err); }
+.toast.is-ok  { background: var(--toast-ok); }
 @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
 /* ---------------- 隐藏输入 ---------------- */
@@ -1291,7 +1505,7 @@ table.weak-table .bar-cell { min-width: 110px; }
   background: var(--surface-2);
 }
 .review-due-card.has-due {
-  border-color: #bcd0fb;
+  border-color: var(--primary-border);
   background: var(--primary-soft);
 }
 .rdc-main { display: flex; align-items: baseline; gap: 7px; }
@@ -1312,7 +1526,7 @@ table.weak-table .bar-cell { min-width: 110px; }
 .rc-sched { display: flex; align-items: center; gap: 7px; margin-top: 1px; }
 .rc-bar {
   display: block; flex: 1 1 auto; height: 3px; border-radius: 2px;
-  background: rgba(29,36,51,.10); overflow: hidden;
+  background: var(--kbd-note-bg); overflow: hidden;
 }
 .rc-bar > i { display: block; height: 100%; background: var(--primary); border-radius: 2px; }
 .rc-due { flex: 0 0 auto; font-size: 11px; color: var(--text-3); font-family: var(--mono); }
@@ -1346,7 +1560,7 @@ table.weak-table .bar-cell { min-width: 110px; }
   animation: keycap-pulse .9s ease-in-out infinite;
 }
 @keyframes keycap-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(47,109,246,.35); }
+  0%, 100% { box-shadow: 0 0 0 0 var(--primary-a20); }
   50%      { box-shadow: 0 0 0 4px rgba(47,109,246,0); }
 }
 .checkbox.is-disabled { opacity: .45; cursor: not-allowed; }

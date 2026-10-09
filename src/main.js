@@ -27,11 +27,12 @@ import {
   acceptableKeys, SCHEME_META
 } from './core/scheme.js';
 import { renderKeymap } from './ui/keymap.js';
-import { drawLine, drawBars } from './ui/chart.js';
+import { drawLine, drawBars, setTheme as setChartTheme } from './ui/chart.js';
 import { play as playSound, prime as primeSound, resetErrorFatigue,
          isSupported as soundSupported } from './ui/sound.js';
 import {
   prefersReducedMotion, watchReducedMotion, motionClass,
+  prefersDark, watchColorScheme, applyTheme,
   mergeShortcuts, validateShortcuts, normalizeShortcutKey, prettyKey,
   matchesShortcut, letterFromEvent, announce, SHORTCUT_ACTIONS,
   DEFAULT_SHORTCUTS
@@ -167,6 +168,9 @@ function boot() {
     app.settings.shortcuts = mergeShortcuts(app.settings.shortcuts);
     // 先确保 [hidden] 兜底规则生效，再渲染任何东西
     ensureHiddenRule();
+    // 主题要在**第一次绘制之前**定下来，否则深色用户会看到一帧浅色闪烁。
+    // initTheme() 放在最前面，后面 initA11y 的回调也要能重绘图表。
+    initTheme();
     renderStorageBadge();
     if (!S.isStorageAvailable()) {
       toast('浏览器存储不可用，本次记录不会被保存', 'err', 5000);
@@ -289,6 +293,50 @@ function switchView(view) {
   // 进设置页时刷新存储状态：配额可能在练习途中写满，
   // 而设置页那段文案是「数据安全」承诺的唯一出处。
   if (v === 'settings') watchStorageMode();
+}
+
+/* ============================================================
+   主题（明暗）
+   ============================================================ */
+
+/**
+ * 应用主题，并在需要时重绘那些**不走 CSS 变量**的画布。
+ *
+ * 图表是 Canvas 手绘的，颜色写死在 chart.js 的 THEME 常量里 ——
+ * 切主题不会让它们自动变色，必须显式重画。所以这里两件事都要做：
+ *   ① 写 <html data-theme>（CSS 变量换掉，其余部分自动生效）
+ *   ② 通知 chart.js 重新读取配色并重绘
+ * 设置页的 select 在这里一并绑定，改完立刻生效并落盘。
+ */
+function applyThemeNow(pref) {
+  const resolved = applyTheme(pref);
+  app.theme = resolved;
+  // 图表的取色来自 CSS 变量，主题一变就该重新读一遍
+  setChartTheme(resolved);
+  // 键位图是 SVG（走 CSS 变量，自动变色），但热力层的文字色由
+  // setHeat 写死在 fill 属性上，所以要重画
+  redrawKeymapTheme();
+  if (app.view === 'stats') renderStatsView();
+  return resolved;
+}
+
+function initTheme() {
+  applyThemeNow(app.settings.theme || 'auto');
+  // 跟随系统时，用户在系统里改配色要立刻生效（不要求刷新）
+  watchColorScheme(() => {
+    if ((app.settings.theme || 'auto') === 'auto') applyThemeNow('auto');
+  });
+}
+
+/** 主题切换后重画三个键位图控制器（它们各自缓存了 fill 属性） */
+function redrawKeymapTheme() {
+  try {
+    for (const km of [app.keymap, app.fullKeymap, app.heatKeymap]) {
+      if (km && typeof km.repaint === 'function') km.repaint();
+    }
+  } catch (err) {
+    console.error('[theme] 键位图重绘失败', err);
+  }
 }
 
 /* ============================================================
@@ -2016,7 +2064,13 @@ function renderStatsView() {
         if (ctx) {
           scoreCanvas.width = scoreCanvas.width || 920;
           ctx.clearRect(0, 0, scoreCanvas.width, scoreCanvas.height);
-          ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-3') || '#8a94a6';
+          // 这里的颜色跟着主题走 —— 空态文案不该在深色下用浅色主题的灰。
+          // getPropertyValue 对自定义属性会保留首尾空白，必须 trim；
+          // 兜底色要和 style.css 的 --text-3 保持一致，否则取不到时会
+          // 出现一个「两个主题都对不上」的第三种灰。
+          const cssText3 = getComputedStyle(document.documentElement)
+            .getPropertyValue('--text-3').trim();
+          ctx.fillStyle = cssText3 || '#7d899a';
           ctx.font = '14px sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText(ss.total ? '已完成的测验都不满足计分条件（无提示或字数不足）' : '还没有做过能力测验', 460, 110);
@@ -2602,6 +2656,20 @@ function initSettingsView() {
     });
   }
 
+  /* ---- 外观：主题（明暗）----
+     改完立刻生效（重绘图表与键位图），并落盘。 */
+  const setThemeSel = $('#setTheme');
+  if (setThemeSel) {
+    setThemeSel.value = app.settings.theme || 'auto';
+    setThemeSel.addEventListener('change', () => {
+      const v = setThemeSel.value;
+      app.settings.theme = (v === 'light' || v === 'dark') ? v : 'auto';
+      saveSettingsDebounced();
+      applyThemeNow(app.settings.theme);
+      announce(app.theme === 'dark' ? '已切换到深色主题' : '已切换到浅色主题', 'polite');
+    });
+  }
+
   /* ---- 无障碍：减少动态效果 ---- */
   const setReduceMotion = $('#setReduceMotion');
   if (setReduceMotion) {
@@ -2878,7 +2946,8 @@ function syncSettingsUI() {
     ['#selCharTier', 'charTier'],
     ['#selTrainingPolicy', 'trainingPolicy'], ['#selPhraseCategory', 'phraseCategory'], ['#selPhraseLength', 'phraseLength'],
     ['#setHintDelay', 'hintDelay'], ['#setRevealDelay', 'revealDelay'],
-    ['#setReduceMotion', 'reduceMotion']
+    ['#setReduceMotion', 'reduceMotion'],
+    ['#setTheme', 'theme']
   ];
   selects.forEach(([sel, key]) => {
     const el = $(sel);

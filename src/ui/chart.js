@@ -6,18 +6,61 @@
  * 自动处理：空数据、单点、全等值、高低 DPI、主题色。
  */
 
-const THEME = {
-  axis: '#cfd8e3',
-  grid: '#eef1f6',
-  text: '#93a0b4',
-  textStrong: '#5a6577',
-  line: '#2f6df6',
-  lineFill: 'rgba(47,109,246,.10)',
-  bar: '#2f6df6',
-  barSoft: '#c3d5fb',
-  barToday: '#e0863a',
-  avg: '#e0863a'
+/* ============================================================
+   主题
+   ------------------------------------------------------------
+   Canvas 画的颜色不会跟着 CSS 变量走（getComputedStyle 拿不到 var() 的
+   展开值，而且这里只需要十来个色，没必要每帧去读 DOM），所以这里维护
+   一份与 style.css 对应的配色，由 setTheme() 在切换时整体换掉。
+
+   两套配色必须与 assets/style.css 的 :root / [data-theme=dark] 保持一致。
+   verify.mjs 里有断言守着这一点（比对本文件的色值与 CSS 变量），改了
+   其中一边忘了另一边会被 CI 拦下。
+   ============================================================ */
+
+const THEMES = {
+  light: {
+    axis: '#cfd8e3',
+    grid: '#eef1f6',   // = --bg-soft（不是 --surface-2，网格要比卡片底更深一点）
+    text: '#93a0b4',
+    textStrong: '#5a6577',
+    line: '#2f6df6',
+    lineFill: 'rgba(47,109,246,.10)',
+    bar: '#2f6df6',
+    barSoft: '#c3d7fb',
+    barToday: '#e0863a',
+    avg: '#e0863a'
+  },
+  dark: {
+    axis: '#3b4453',
+    grid: '#232935',
+    text: '#7d899a',
+    textStrong: '#a9b4c4',
+    line: '#5b8cff',
+    lineFill: 'rgba(91,140,255,.16)',
+    bar: '#5b8cff',
+    barSoft: '#2f4272',
+    barToday: '#e8a15c',
+    avg: '#e8a15c'
+  }
 };
+
+let THEME = THEMES.light;
+
+/**
+ * 切换配色。
+ * @param {'light'|'dark'} name
+ * @returns {string} 实际生效的主题名
+ */
+export function setTheme(name) {
+  THEME = THEMES[name] || THEMES.light;
+  return name in THEMES ? name : 'light';
+}
+
+/** 当前配色（测试用） */
+export function currentTheme() {
+  return THEME;
+}
 
 /**
  * 准备画布（处理 DPI 缩放）

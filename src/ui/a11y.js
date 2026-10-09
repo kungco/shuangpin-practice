@@ -69,6 +69,85 @@ export function motionClass(reduced) {
 }
 
 /* ============================================================
+   2. 主题（明暗）
+   ------------------------------------------------------------
+   为什么用 [data-theme] 属性而不是 @media (prefers-color-scheme) 写两套：
+   设置里要能手动覆盖，而「跟随系统」只是 auto 的一个取值。若 CSS 里写
+   两套 @media，手动切换就得靠额外的选择器去覆盖，优先级很难理清。
+   统一收敛到 data-theme，切换只是改一个属性，不重载样式表。
+
+   同时给 <meta name="theme-color"> 换色：地址栏/标签页跟着变，
+   否则深色页面配一条浅色标题栏，在夜里很扎眼。
+   ============================================================ */
+
+/** 系统是否偏好深色 */
+export function prefersDark() {
+  try {
+    return typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * 监听系统配色变化。
+ * 与 watchReducedMotion 同理：用户在系统里改了主题，应用要立刻跟上，
+ * 不能要求刷新。
+ *
+ * @param {(dark:boolean)=>void} cb
+ * @returns {() => void} 取消监听
+ */
+export function watchColorScheme(cb) {
+  try {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => {};
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = (e) => { try { cb(!!e.matches); } catch (_) {} };
+    if (typeof mq.addEventListener === 'function') {
+      mq.addEventListener('change', handler);
+      return () => mq.removeEventListener('change', handler);
+    }
+    if (typeof mq.addListener === 'function') {
+      mq.addListener(handler);
+      return () => mq.removeListener(handler);
+    }
+  } catch (_) {}
+  return () => {};
+}
+
+/** 深色下地址栏/标签页要跟着变，否则浅色标题栏在夜里很扎眼 */
+const THEME_COLORS = { light: '#f5f7fa', dark: '#14171d' };
+
+/**
+ * 把主题写到 <html data-theme> 上。
+ * @param {'auto'|'light'|'dark'} pref
+ * @returns {'light'|'dark'} 实际生效的主题
+ */
+export function applyTheme(pref) {
+  const resolved = pref === 'dark' ? 'dark'
+    : pref === 'light' ? 'light'
+    : (prefersDark() ? 'dark' : 'light');
+  try {
+    if (typeof document !== 'undefined' && document.documentElement) {
+      document.documentElement.setAttribute('data-theme', resolved);
+      // color-scheme 告诉浏览器表单控件、滚动条该用深色
+      document.documentElement.style.colorScheme = resolved;
+    }
+    if (typeof document !== 'undefined') {
+      let meta = document.querySelector('meta[name="theme-color"]');
+      if (!meta && document.head) {
+        meta = document.createElement('meta');
+        meta.setAttribute('name', 'theme-color');
+        document.head.appendChild(meta);
+      }
+      if (meta) meta.setAttribute('content', THEME_COLORS[resolved] || THEME_COLORS.light);
+    }
+  } catch (_) {}
+  return resolved;
+}
+
+/* ============================================================
    2. 快捷键配置
    ============================================================ */
 

@@ -30,10 +30,40 @@ const listeners = [];
 let mqMatches = false;
 
 const documentStub = {
-  documentElement: { classList: { _s: new Set(), toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); }, contains(c) { return this._s.has(c); } } },
+  documentElement: {
+    _attrs: {},
+    style: {},
+    classList: { _s: new Set(), toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); }, contains(c) { return this._s.has(c); } },
+    setAttribute(k, v) { this._attrs[k] = v; },
+    getAttribute(k) { return this._attrs[k]; }
+  },
   _nodes: {},
+  _headChildren: [],
   getElementById(id) { return this._nodes[id] || null; },
-  createElement() { return { id: '', className: '', setAttribute() {}, appendChild() {} }; },
+  // createElement 的返回值要真的记住 setAttribute 的内容 ——
+  // applyTheme 会新建 meta[name=theme-color] 并写入 color，
+  // 桩里若丢弃它就测不到「地址栏颜色是否跟着变」。
+  createElement() {
+    const attrs = {};
+    return {
+      id: '', className: '',
+      setAttribute(k, v) { attrs[k] = String(v); },
+      getAttribute(k) { return attrs[k] ?? null; },
+      removeAttribute(k) { delete attrs[k]; },
+      appendChild() {}
+    };
+  },
+  // applyTheme 会先 querySelector 找已有的 meta，找不到才新建。
+  // 桩若一律返回 null，每次调用都会新建一个 —— 那就测不出
+  // 「第二次调用是否复用了同一个 meta」。
+  querySelector(sel) {
+    if (sel === 'meta[name="theme-color"]') {
+      return this._headChildren.find(n => n.getAttribute && n.getAttribute('name') === 'theme-color') || null;
+    }
+    return null;
+  },
+  querySelectorAll() { return []; },
+  head: { appendChild(n) { documentStub._headChildren.push(n); } },
   body: { appendChild(n) { if (n && n.id) this._owner._nodes[n.id] = n; }, _owner: null }
 };
 documentStub.body._owner = documentStub;
@@ -81,6 +111,58 @@ a11y.motionClass(undefined);   // 不应抛
 ok(true, 'motionClass(undefined) 不抛异常');
 
 mqMatches = false;
+
+/* ============================================================
+   1b. 主题（明暗）
+   ============================================================ */
+section('1b. 主题（明暗）');
+
+// 系统偏好探测
+eq(a11y.prefersDark(), false, '系统不偏好深色时返回 false');
+mqMatches = true;
+eq(a11y.prefersDark(), true, '系统偏好深色时返回 true');
+
+// 显式指定优先于系统：系统是深色但用户选了 light → 必须浅色
+mqMatches = true;
+eq(a11y.applyTheme('light'), 'light', '显式 light 覆盖系统的 dark');
+eq(documentStub.documentElement.getAttribute('data-theme'), 'light', 'data-theme 写成 light');
+eq(documentStub.documentElement.style.colorScheme, 'light', 'color-scheme 同步（让表单控件/滚动条跟随）');
+mqMatches = false;
+eq(a11y.applyTheme('dark'), 'dark', '显式 dark 覆盖系统的 light');
+eq(documentStub.documentElement.getAttribute('data-theme'), 'dark', 'data-theme 写成 dark');
+eq(documentStub.documentElement.style.colorScheme, 'dark', 'color-scheme 同步');
+
+// auto = 跟随系统，两种系统设置都要跟
+mqMatches = true;
+eq(a11y.applyTheme('auto'), 'dark', 'auto 在系统深色时解析为 dark');
+mqMatches = false;
+eq(a11y.applyTheme('auto'), 'light', 'auto 在系统浅色时解析为 light');
+
+// 非法值不能变成「无主题」——那会让整页退回 UA 默认样式
+eq(a11y.applyTheme('nonsense'), 'light', '非法值安全回落（不会留下无 data-theme 的状态）');
+eq(a11y.applyTheme(undefined), 'light', 'undefined 安全回落');
+eq(a11y.applyTheme(null), 'light', 'null 安全回落');
+
+// theme-color：地址栏/标签页要跟着变，否则深色页面配浅色标题栏很扎眼
+mqMatches = true;
+a11y.applyTheme('dark');
+const meta = documentStub._headChildren[documentStub._headChildren.length - 1];
+ok(!!meta, '注入了 meta[name=theme-color]');
+eq(meta && meta.getAttribute('content'), '#14171d', '深色下的 theme-color 是深底色');
+a11y.applyTheme('light');
+eq(meta && meta.getAttribute('content'), '#f5f7fa', '浅色下的 theme-color 是浅底色');
+mqMatches = false;
+
+// 监听系统配色变化
+const schemeSeen = [];
+listeners.length = 0;
+a11y.watchColorScheme(v => schemeSeen.push(v));
+ok(listeners.length >= 1, '注册了配色 change 监听');
+if (listeners.length) {
+  listeners[listeners.length - 1].cb({ matches: true });
+  listeners[listeners.length - 1].cb({ matches: false });
+}
+eq(schemeSeen.join(','), 'true,false', '回调收到系统配色变化');
 
 /* ============================================================
    2. 快捷键规范化

@@ -8,6 +8,11 @@ import { ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS } from '../src/data/pinyin.js'
 import { generateQuestions, generateReviewQuestions, isPunct,
          LEVELS, LEVEL_MAP, defaultCountFor, annotatePassage } from '../src/core/questions.js';
 import { scoreExam, gradeOf, SCORE_CONFIG } from '../src/core/score.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 let fail = 0;
 const ok = (cond, msg) => {
@@ -320,6 +325,126 @@ ok(empty.length === 20, `count=0 应回退到 20 题，实际 ${empty.length}`);
 const neg = generateQuestions({ mode: 'char', count: -5 });
 ok(neg.length === 20, `负数 count 应回退，实际 ${neg.length}`);
 console.log(`  空值 / 非法输入 / 异常参数均被安全处理`);
+
+/* ============================================================
+   主题：CSS 变量与图表配色必须一致
+   ============================================================ */
+console.log('\n【10b】主题配色的一致性');
+
+{
+  // verify.mjs 的 ok() 只在失败时打印，所以这里自己数一遍并汇总输出，
+  // 否则整节通过时是静默的，看不出它到底跑了没有。
+  let checked = 0;
+  const checkedOk = (cond, msg) => { checked++; ok(cond, msg); };
+  /* 深色主题是「另写一份配色」，不是把浅色调暗。两边一旦漂移，
+     切到深色后就会出现「某个块还是浅色」或「文字糊在背景上看不清」。
+     这里把 assets/style.css 的变量与 src/ui/chart.js 的配色做交叉校验：
+     凡是 chart.js 里出现的色值，都必须能在 style.css 里找到对应变量。 */
+  const css = readFileSync(resolve(ROOT, 'assets/style.css'), 'utf8');
+  const rootAt = css.indexOf(':root');
+  const rootBlock = css.slice(rootAt, css.indexOf('\n}', rootAt));
+  const darkAt = css.indexOf('[data-theme="dark"]');
+  checkedOk(rootAt >= 0 && darkAt >= 0, 'style.css 同时定义了 :root 与 [data-theme="dark"]');
+  const darkBlock = css.slice(darkAt, css.indexOf('\n}', darkAt));
+
+  const varOf = (block, name) => {
+    const m = block.match(new RegExp('--' + name + '\\s*:\\s*(#[0-9a-fA-F]{3,8})'));
+    return m ? m[1] : null;
+  };
+  // chart.js 的配色键 ↔ CSS 变量名：[lightVar, darkVar]
+  const CHART_VARS = {
+    axis: ['border-strong', 'border-strong'],
+    grid: ['bg-soft', 'surface-2'],   // 浅色下网格用 bg-soft，深色下用 surface-2
+    text: ['text-3', 'text-3'],
+    textStrong: ['text-2', 'text-2'],
+    line: ['primary', 'primary'],
+    bar: ['primary', 'primary'],
+    barToday: ['yun', 'yun'],
+    avg: ['yun', 'yun']
+  };
+  const chartSrc = readFileSync(resolve(ROOT, 'src/ui/chart.js'), 'utf8');
+  const paletteOf = (theme) => {
+    const i = chartSrc.indexOf(`${theme}: {`);
+    checkedOk(i > 0, `chart.js 里有 ${theme} 配色`);
+    const seg = chartSrc.slice(i, chartSrc.indexOf('}', i));
+    const out = {};
+    for (const m of seg.matchAll(/(\w+):\s*'([^']+)'/g)) out[m[1]] = m[2];
+    return out;
+  };
+  const light = paletteOf('light');
+  const dark = paletteOf('dark');
+  for (const key of Object.keys(CHART_VARS)) {
+    const [lVar, dVar] = CHART_VARS[key];
+    checkedOk(light[key] === varOf(rootBlock, lVar),
+      `★ 图表 ${key} 浅色 = --${lVar}（chart ${light[key]} / css ${varOf(rootBlock, lVar)}）`);
+    checkedOk(dark[key] === varOf(darkBlock, dVar),
+      `★ 图表 ${key} 深色 = --${dVar}（chart ${dark[key]} / css ${varOf(darkBlock, dVar)}）`);
+  }
+
+  // 深色主题必须覆盖浅色主题里定义的每一个颜色变量，
+  // 否则切换后该元素会静默沿用浅色值（看不出来，但就是不对）。
+  const lightVars = [...rootBlock.matchAll(/^\s*(--[a-z0-9-]+)\s*:/gm)].map(m => m[1]);
+  const darkVars = new Set([...darkBlock.matchAll(/^\s*(--[a-z0-9-]+)\s*:/gm)].map(m => m[1]));
+  // 圆角与字体本来就不该随主题变
+  const themeAgnostic = ['--radius', '--radius-sm', '--mono', '--sans'];
+  const missing = lightVars.filter(v => !darkVars.has(v) && !themeAgnostic.includes(v));
+  checkedOk(missing.length === 0, `★ 深色覆盖全部颜色变量（缺 ${missing.length} 个：${missing.slice(0, 6).join(', ') || '无'}）`);
+
+  // 用了但从未定义的变量 → 该声明失效为 unset（渲染成继承色或透明）
+  const used = new Set([...css.matchAll(/var\((--[a-z0-9-]+)/g)].map(m => m[1]));
+  const undef = [...used].filter(v => !lightVars.includes(v) && !darkVars.has(v));
+  checkedOk(undef.length === 0, `没有「用了却没定义」的变量（${undef.join(', ') || '无'}）`);
+
+  // 深色下若沿用 rgba(255,255,255,.8) 这类半透明白，底色会整体变亮
+  const whiteInDark = darkBlock.match(/rgba\(255,\s*255,\s*255/g);
+  checkedOk(!whiteInDark || whiteInDark.length <= 3,
+    `深色主题里没有大面积半透明白（${whiteInDark ? whiteInDark.length : 0} 处，应只是行内代码等局部高光）`);
+
+  // 键位图（SVG）必须完全交给 CSS 上色。
+  // SVG 的 fill/stroke 是「表现属性」，优先级低于任何 CSS 声明 ——
+  // 在 JS 里逐个 setAttribute 上色注定会漏。早先就因为用了 querySelector
+  // 而非 querySelectorAll，26 个键里只有第一个换色，深色主题下其余 25 个
+  // 仍是白底，截图上一眼就能看出来。所以这里直接查源码：不允许有 fill/stroke。
+  const keymapSrc = readFileSync(resolve(ROOT, 'src/ui/keymap.js'), 'utf8');
+  const attrFills = keymapSrc.match(/setAttribute\(\s*'(fill|stroke)'/g) || [];
+  checkedOk(attrFills.length === 0,
+    `★ 键位图不在 JS 里写死颜色（发现 ${attrFills.length} 处 setAttribute('fill'/'stroke')）`);
+  // 相应的类名必须在样式表里有对应规则
+  for (const cls of ['kb-body', 'kb-main', 'kb-pinyin', 'kb-sub', 'kb-note', 'kb-heat-num']) {
+    const re = new RegExp('\\.' + cls + '\\s*\\{[^}]*fill:');
+    checkedOk(re.test(css), `★ .${cls} 在 style.css 里有 fill 规则`);
+  }
+
+  // 对比度：深色主题是自己选过色的，必须实测而不是「看着还行」
+  const lum = (hex) => {
+    const m = hex.replace('#', '').match(/../g).map(h => parseInt(h, 16) / 255);
+    const c = m.map(v => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const ratio = (a, b) => {
+    const l1 = lum(a), l2 = lum(b);
+    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  };
+  for (const [block, label] of [[darkBlock, '深色'], [rootBlock, '浅色']]) {
+    const bg = varOf(block, 'surface');
+    checkedOk(ratio(varOf(block, 'text'), bg) >= 4.5,
+      `★ ${label}主题正文对比度 ${ratio(varOf(block, 'text'), bg).toFixed(2)}:1 ≥ 4.5（AA）`);
+    checkedOk(ratio(varOf(block, 'text-2'), bg) >= 4.5,
+      `★ ${label}主题次要文字对比度 ${ratio(varOf(block, 'text-2'), bg).toFixed(2)}:1 ≥ 4.5（AA）`);
+    // 状态色分两类：
+    //   - 承载信息的**非文本**元素（--warn 的虚线下划线、边框）：
+    //     WCAG 1.4.11 要求 3:1。这个字是「等提示才打对的」的唯一提示，
+    //     对比度不够就等于这个信息没传达出去。
+    //   - 纯装饰的强调色：3:1 是底线（AA 图形）。
+    for (const [s, min] of [['primary', 3], ['ok', 3], ['err', 3.5], ['warn', 3], ['exam', 3]]) {
+      const c = varOf(block, s);
+      checkedOk(ratio(c, bg) >= min,
+        `${label}主题 ${s} 对比度 ${ratio(c, bg).toFixed(2)}:1 ≥ ${min}` +
+        (s === 'warn' ? '（虚线下划线要能看见「这字靠提示」）' : ''));
+    }
+  }
+  console.log(`  已校验 ${checked} 项：图表配色对齐 CSS 变量、深色覆盖完整、无未定义变量、对比度达标`);
+}
 
 /* ============================================================
    测验模式（exam）：出题与评分
