@@ -883,7 +883,8 @@ function persistRecord(summary) {
       // 记录键维度错误（错误热力图的数据来源）。
       // 与字词表分开存：字词表是「哪些字不会」，热力图是「哪些键不熟」。
       if (s.keyErrors && Object.keys(s.keyErrors).length) {
-        S.recordKeyErrors(s.keyErrors);
+        // 带上模式：统计页的模式筛选要覆盖热力图，就必须能按模式取数
+        S.recordKeyErrors(s.keyErrors, s.mode);
       }
     }
 
@@ -2038,6 +2039,14 @@ function renderStatsView() {
     }
 
     /* ---- 错误热力图 ---- */
+    // 标题跟着模式筛选走：全部模式时不必再加「（全部模式）」后缀
+    const heatTitle = $('#heatTitle');
+    if (heatTitle) {
+      const label = app.stats.mode === 'all'
+        ? '错误热力图'
+        : `错误热力图（${LEVEL_MAP[app.stats.mode] ? LEVEL_MAP[app.stats.mode].name : app.stats.mode}）`;
+      heatTitle.textContent = label;
+    }
     renderHeatmap();
 
     /* ---- 易错表 ---- */
@@ -2168,7 +2177,7 @@ function renderHeatmap() {
   if (!wrap) return;
 
   try {
-    const heat = keyHeatmap({ range: app.stats.heatRange });
+    const heat = keyHeatmap({ range: app.stats.heatRange, mode: app.stats.mode });
 
     /* 范围 chip 高亮 */
     $$('#heatRangeChips .chip').forEach(c =>
@@ -2199,9 +2208,14 @@ function renderHeatmap() {
     const summary = $('#heatSummary');
     if (summary) {
       const hot = heat.hottest;
+      // 选中了某个模式、但该模式还没有专属数据（老记录没存模式）时，
+      // 实际显示的是全量。必须说出来，否则「筛选看起来生效了其实没有」。
+      const fallback = app.stats.mode !== 'all' && !heat.byMode
+        ? '<span class="heat-fallback-note">该模式暂无专属数据，此处仍为全部模式累计</span>'
+        : '';
       summary.innerHTML =
         `共 <b>${heat.total}</b> 次按键错误，涉及 <b>${heat.items.length}</b> 个键` +
-        (hot ? `　最集中：<b>${escapeHtml(hot.key)}</b> 键（${hot.count} 次）` : '');
+        (hot ? `　最集中：<b>${escapeHtml(hot.key)}</b> 键（${hot.count} 次）` : '') + fallback;
     }
 
     /* TOP 排行 */

@@ -1,0 +1,43 @@
+name: tests
+
+# README 与 _test/README.md 里描述了「Node 18 / 20 / 22 各跑一遍七套自检」，
+# 但这个文件之前并不存在 —— 文档在讲一件没有发生的事。这里补上。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selfcheck:
+    name: self-check (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      # 任何一版挂了都要能看到全部结果，而不是第一个失败就停
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 只有 integration.mjs 需要 linkedom。走 package-lock.json 的 npm ci
+      # 是为了「换个环境 / 换个人跑结果都一样」；npm install 每次都可能解析出
+      # 不同的依赖树，那样 CI 通过与否就变成了运气。
+      - name: Install test dependencies
+        working-directory: _test
+        run: npm ci
+
+      - name: Run all seven self-check suites
+        working-directory: _test
+        run: npm test
+
+      # 各套件在失败时以非零退出码结束，但把日志留下便于定位
+      - name: Show launcher self-check output
+        if: always()
+        working-directory: _test
+        run: node launcher.mjs

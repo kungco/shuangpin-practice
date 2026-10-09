@@ -901,6 +901,70 @@ console.log('【新增】题量边界与近期内容');
     '续练存储保留累计题量和生成设置');
 }
 
+console.log('\n【16】键位错误按模式取数（统计页的模式筛选要覆盖热力图）');
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+  S.recordKeyErrors({ v: 3, h: 1 }, 'phrase');
+  S.recordKeyErrors({ a: 2 }, 'char');
+  S.recordKeyErrors({ j: 4 }, 'phrase');
+
+  const all = S.getKeyErrorTotals('all');
+  ok(all.byMode === false, '不指定模式时不声称按模式取数');
+  ok(all.counts.V === 3 && all.counts.J === 4 && all.counts.A === 2,
+    `全量累计各键正确（V=${all.counts.V} J=${all.counts.J} A=${all.counts.A}）`);
+
+  const phrase = S.getKeyErrorTotals('all', 'phrase');
+  ok(phrase.byMode === true, '按模式取数时标记 byMode');
+  ok(phrase.counts.V === 3 && phrase.counts.J === 4, '词组模式只含该模式的键');
+  ok(!phrase.counts.A, '词组模式不含单字模式的键（A 不应出现）');
+
+  const char = S.getKeyErrorTotals('all', 'char');
+  ok(char.byMode === true && char.counts.A === 2 && !char.counts.V,
+    '单字模式只含自己的键');
+
+  // 老数据（没有 byMode 层）必须如实报告 byMode=false，让 UI 能说明「仍为全量」
+  ls.setItem('shuangpin.v1.keyErrors', JSON.stringify({
+    all: { V: 9, A: 8 }, recent: [{ ts: 1, keys: { V: 9 }, total: 9 }]
+  }));
+  const legacy = S.getKeyErrorTotals('all', 'phrase');
+  ok(legacy.byMode === false, '没有按模式数据时 byMode 为 false');
+  ok(legacy.counts.V === 9, '退回全量而不是返回空图');
+  ok(legacy.total === 17, `全量总额正确（${legacy.total}）`);
+
+  // 「最近 N 次」按模式过滤
+  const ls2 = makeLocalStorage();
+  installWindow(ls2);
+  const S2 = await freshStorage();
+  S2.recordKeyErrors({ v: 5 }, 'phrase');
+  S2.recordKeyErrors({ v: 5 }, 'char');
+  S2.recordKeyErrors({ v: 5 }, 'phrase');
+  const recentPhrase = S2.getKeyErrorTotals('10', 'phrase');
+  ok(recentPhrase.byMode === true, '近 N 次也能按模式过滤');
+  ok(recentPhrase.counts.V === 10, `近 N 次只算该模式（V=${recentPhrase.counts.V}，应为 10）`);
+  const recentAll = S2.getKeyErrorTotals('10');
+  ok(recentAll.counts.V === 15, `不筛模式时全算（V=${recentAll.counts.V}，应为 15）`);
+
+  // 会话明细带上模式，便于按模式回溯
+  const data = S2.loadKeyErrors();
+  ok(data.recent.every(s => typeof s.mode === 'string'), '会话明细记录了模式');
+  ok(data.recent.filter(s => s.mode === 'phrase').length === 2, '明细里能数出该模式的会话数');
+
+  // 导入合并：byMode 必须跟着明细一起累加，否则导入后按模式筛选莫名失效
+  const backup = JSON.parse(JSON.stringify(S2.exportAll()));
+  const S3 = await freshStorage();
+  S3.importAll(backup);
+  S3.importAll(backup);   // 幂等
+  const merged = S3.getKeyErrorTotals('all', 'phrase');
+  ok(merged.byMode === true, '导入后该模式仍有专属数据');
+  ok(merged.counts.V === 10, `按模式累计与 all 同步累加且不重复（V=${merged.counts.V}，应为 10）`);
+  const mergedAll = S3.getKeyErrorTotals('all');
+  ok(mergedAll.counts.V === 15, `全量也没被重复累加（V=${mergedAll.counts.V}，应为 15）`);
+  const mergedChar = S3.getKeyErrorTotals('all', 'char');
+  ok(mergedChar.counts.V === 5, `单字模式独立计数（V=${mergedChar.counts.V}，应为 5）`);
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 存储层自检全部通过'
   : `❌ 存储层自检共 ${fail} 项未通过`));

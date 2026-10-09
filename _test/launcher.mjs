@@ -168,6 +168,27 @@ ok(bat.includes('probe-service.ps1') && probe.includes('SHA256'),
 ok(bat.includes('已有服务正在运行') && bat.includes('端口已被其他服务占用'),
   '已有本项目服务可复用，其他服务占用有明确提示');
 
+console.log('\n【G】CI 工作流（README 描述的三版本自检必须真的存在）');
+{
+  /* README 与 _test/README.md 都在讲「Node 18/20/22 各跑一遍七套自检」，
+     但 .github/workflows/ 曾经根本不存在 —— 文档在描述一件没发生的事。
+     文档承诺的东西要么兑现，要么删掉；这里选择兑现。 */
+  const wfPath = resolve(ROOT, '.github/workflows/tests.yml');
+  const hasWf = existsSync(wfPath);
+  ok(hasWf, 'CI 工作流文件存在');
+  if (hasWf) {
+    const wf = readFileSync(wfPath, 'utf8');
+    for (const v of ['18', '20', '22']) {
+      ok(new RegExp(`['"]${v}['"]`).test(wf), `CI 矩阵含 Node ${v}`);
+    }
+    ok(/npm ci/.test(wf), 'CI 用 npm ci（按锁文件还原依赖树）');
+    ok(/npm test/.test(wf), 'CI 跑 npm test');
+    ok(/working-directory:\s*_test/.test(wf), 'CI 在 _test 目录下执行');
+    ok(!/run:\s*npm install(\s|$)/m.test(wf),
+      'CI 不用 npm install（会解析出不同的依赖树，通过与否就成了运气）');
+  }
+}
+
 console.log('\n' + (fail === 0
   ? `✅ 启动脚本自检全部通过（${pass} 项）`
   : `❌ 启动脚本自检共 ${fail} 项未通过（${pass} 通过）`));

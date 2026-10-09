@@ -383,7 +383,7 @@ export function reviewAdvice(summary, weakItems) {
  */
 export function keyHeatmap(opts = {}) {
   const range = ['all', '30', '10'].includes(String(opts.range)) ? String(opts.range) : 'all';
-  const { counts, sessions, total } = getKeyErrorTotals(range);
+  const { counts, sessions, total, byMode } = getKeyErrorTotals(range, opts.mode || 'all');
 
   const entries = Object.entries(counts)
     .map(([k, v]) => [String(k).toUpperCase(), Math.max(0, Math.floor(Number(v) || 0))])
@@ -414,6 +414,9 @@ export function keyHeatmap(opts = {}) {
     p90: scale,
     total,
     sessions,
+    // 该模式下有没有专属数据。false = 老记录没带模式，这里退回的是全量，
+    // UI 必须说明，否则「按模式筛选」看起来生效了其实没有。
+    byMode,
     hottest: items.length ? items[0] : null
   };
 }

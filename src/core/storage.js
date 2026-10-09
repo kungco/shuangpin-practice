@@ -922,23 +922,26 @@ export function clearWeak() {
    ============================================================ */
 
 const KEY_ERROR_RECENT_MAX = 60;   // 明细最多保留 60 次会话
+const KEY_ERROR_MODES_MAX = 12;    // 按模式的累计表最多保留 12 种模式
 
 export function loadKeyErrors() {
   const obj = readJSON(KEYS.keyErrors, null);
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-    return { all: {}, recent: [] };
+    return { all: {}, byMode: {}, recent: [] };
   }
   const all = (obj.all && typeof obj.all === 'object' && !Array.isArray(obj.all)) ? obj.all : {};
+  const byMode = (obj.byMode && typeof obj.byMode === 'object' && !Array.isArray(obj.byMode)) ? obj.byMode : {};
   const recent = Array.isArray(obj.recent) ? obj.recent.filter(s => s && typeof s === 'object') : [];
-  return { all, recent };
+  return { all, byMode, recent };
 }
 
 /**
  * 合并一次会话的键错误明细
  * @param {object} keyErrors { 小写键: 次数 }
+ * @param {string} [mode] 本次练习的模式，用于统计页的「按模式查看」
  * @returns {boolean} 是否写入成功
  */
-export function recordKeyErrors(keyErrors) {
+export function recordKeyErrors(keyErrors, mode = '') {
   if (!keyErrors || typeof keyErrors !== 'object') return false;
   const clean = {};
   let total = 0;
@@ -958,8 +961,25 @@ export function recordKeyErrors(keyErrors) {
     for (const [k, n] of Object.entries(clean)) {
       data.all[k] = (Number(data.all[k]) || 0) + n;
     }
+    // 按模式的累计。统计页的模式筛选要覆盖热力图，就必须有这一层 ——
+    // 否则选中「词组」时热力图仍是全模式的数字，看起来像筛选失灵。
+    // 老数据没有这层，按模式筛选时只能退回全量（见 getKeyErrorTotals）。
+    const modeKey = String(mode || '').trim();
+    if (modeKey) {
+      const bucket = (data.byMode[modeKey] && typeof data.byMode[modeKey] === 'object') ? data.byMode[modeKey] : {};
+      for (const [k, n] of Object.entries(clean)) {
+        bucket[k] = (Number(bucket[k]) || 0) + n;
+      }
+      data.byMode[modeKey] = bucket;
+      const names = Object.keys(data.byMode);
+      if (names.length > KEY_ERROR_MODES_MAX) {
+        // 模式是固定枚举（8 个），12 足够；超了只可能是脏数据
+        names.filter(nm => nm !== modeKey).slice(0, names.length - KEY_ERROR_MODES_MAX)
+          .forEach(nm => delete data.byMode[nm]);
+      }
+    }
     // 明细（用于「最近 N 次」范围）
-    data.recent.push({ ts: Date.now(), keys: clean, total });
+    data.recent.push({ ts: Date.now(), keys: clean, total, mode: modeKey });
     if (data.recent.length > KEY_ERROR_RECENT_MAX) {
       data.recent = data.recent.slice(data.recent.length - KEY_ERROR_RECENT_MAX);
     }
@@ -973,24 +993,57 @@ export function recordKeyErrors(keyErrors) {
 /**
  * 取某个范围的键错误次数
  * @param {string} range 'all' | '30' | '10'
- * @returns {{counts:Object<string,number>, sessions:number, total:number}}
+ * @param {string} [mode] 按模式过滤（'all' 或省略 = 不限）
+ * @returns {{counts:Object<string,number>, sessions:number, total:number, byMode:boolean}}
+ *   byMode=false 表示该模式下**没有**专属数据（老版本记录没带模式），
+ *   调用方应如实说明「本次按全量统计」，而不是让用户以为筛选生效了。
  */
-export function getKeyErrorTotals(range = 'all') {
+export function getKeyErrorTotals(range = 'all', mode = 'all') {
   const data = loadKeyErrors();
   const counts = {};
   let sessions = 0;
+  let byMode = false;
+  const wantMode = mode && mode !== 'all' ? String(mode) : '';
 
   if (range === 'all') {
-    for (const [k, v] of Object.entries(data.all)) {
-      const n = Number(v) || 0;
-      if (n > 0) counts[k] = n;
+    if (wantMode) {
+      const bucket = data.byMode[wantMode];
+      if (bucket && typeof bucket === 'object') {
+        byMode = true;
+        for (const [k, v] of Object.entries(bucket)) {
+          const n = Number(v) || 0;
+          if (n > 0) counts[k] = n;
+        }
+      }
+      // 没有该模式的专属数据 → 退回全量，但 byMode 保持 false 供 UI 说明
+      if (!byMode) {
+        for (const [k, v] of Object.entries(data.all)) {
+          const n = Number(v) || 0;
+          if (n > 0) counts[k] = n;
+        }
+      }
+    } else {
+      for (const [k, v] of Object.entries(data.all)) {
+        const n = Number(v) || 0;
+        if (n > 0) counts[k] = n;
+      }
     }
     sessions = data.recent.length;
   } else {
     const n = Math.max(1, parseInt(range, 10) || 10);
-    const slice = data.recent.slice(Math.max(0, data.recent.length - n));
+    let slice = data.recent.slice(Math.max(0, data.recent.length - n));
+    if (wantMode) {
+      const filtered = slice.filter(s => s && s.mode === wantMode);
+      if (filtered.length) {
+        byMode = true;
+        slice = filtered;
+      } else {
+        // 近 N 次里恰好没有该模式的记录：宁可退回这 N 次的全量，
+        // 也不要返回空图让用户以为「这个模式最近没按错键」
+      }
+    }
     for (const s of slice) {
-      for (const [k, v] of Object.entries(s.keys || {})) {
+      for (const [k, v] of Object.entries((s && s.keys) || {})) {
         counts[k] = (counts[k] || 0) + (Number(v) || 0);
       }
     }
@@ -998,7 +1051,7 @@ export function getKeyErrorTotals(range = 'all') {
   }
 
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  return { counts, sessions, total };
+  return { counts, sessions, total, byMode };
 }
 
 /** 全部记录里的总错误数（用于卡片展示） */
@@ -1008,7 +1061,7 @@ export function keyErrorGrandTotal() {
 }
 
 export function clearKeyErrors() {
-  writeJSON(KEYS.keyErrors, { all: {}, recent: [] });
+  writeJSON(KEYS.keyErrors, { all: {}, byMode: {}, recent: [] });
 }
 
 /* ============================================================
@@ -1228,6 +1281,17 @@ export function importAll(payload) {
       const seenTs = new Set(cur.recent.map(s => s && s.ts));
       const fresh = incomingRecent.filter(s => s && Number(s.ts) > 0 && !seenTs.has(s.ts));
 
+      // 按模式的累计要**跟着会话明细一起**合并，否则「按模式筛选」在导入后
+      // 会莫名失效：all 增加了，byMode 没动。用与 all 完全相同的那次累加，
+      // 幂等性由 seenTs 保证（同一批明细只进一次）。
+      const addToMode = (mode, key, num) => {
+        const modeKey = String(mode || '').trim();
+        if (!modeKey) return;
+        const bucket = (cur.byMode[modeKey] && typeof cur.byMode[modeKey] === 'object')
+          ? cur.byMode[modeKey] : (cur.byMode[modeKey] = {});
+        bucket[key] = (Number(bucket[key]) || 0) + num;
+      };
+
       if (fresh.length) {
         for (const s of fresh) {
           const keys = (s.keys && typeof s.keys === 'object') ? s.keys : {};
@@ -1237,6 +1301,7 @@ export function importAll(payload) {
             const num = Math.floor(Number(v)) || 0;
             if (num <= 0) continue;
             cur.all[key] = (Number(cur.all[key]) || 0) + num;
+            addToMode(s.mode, key, num);
           }
           cur.recent.push(s);
           seenTs.add(s.ts);

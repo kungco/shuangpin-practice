@@ -1600,6 +1600,38 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
     ok(q('#scoreNote').textContent.includes('平均'), '说明里给出平均分');
   }
 
+  // 热力图跟随模式筛选；没有该模式数据时如实说明
+  sMod.clearKeyErrors();
+  sMod.recordKeyErrors({ v: 3, h: 1 }, 'phrase');
+  sMod.recordKeyErrors({ a: 2 }, 'char');
+  fire(q('[data-view="stats"]'), 'click');
+  await new Promise(r => setTimeout(r, 30));
+  q('#statsMode').value = 'all'; fire(q('#statsMode'), 'change');
+  await new Promise(r => setTimeout(r, 20));
+  // V×3 + H×1 + A×2 = 6 次，3 个键。断言总额比逐键断言更能说明「是全量」
+  ok(/共\s*6\s*次按键错误/.test(q('#heatSummary').textContent) &&
+    /涉及\s*3\s*个键/.test(q('#heatSummary').textContent),
+    `全部模式下热力图是全量累计（${q('#heatSummary').textContent.replace(/\s+/g, ' ').trim().slice(0, 40)}）`);
+  q('#statsMode').value = 'phrase'; fire(q('#statsMode'), 'change');
+  await new Promise(r => setTimeout(r, 20));
+  const phraseHeat = q('#heatSummary').textContent;
+  // 词组模式只有 V×3 + H×1 = 4 次、2 个键；A×2 属于单字模式，不该出现
+  ok(/共\s*4\s*次按键错误/.test(phraseHeat) && /涉及\s*2\s*个键/.test(phraseHeat) &&
+    !phraseHeat.includes('A'),
+    `选中词组后热力图只含该模式（${phraseHeat.replace(/\s+/g, ' ').trim().slice(0, 46)}）`);
+  ok(!q('#heatSummary').querySelector('.heat-fallback-note'),
+    '有专属数据时不显示「仍为全量」的提示');
+  ok(q('#heatTitle').textContent.includes('词组'), '热力图标题跟着模式走');
+  // 老数据（没有按模式层）必须说明，而不是静默显示全量
+  sMod.clearKeyErrors();
+  sMod.recordKeyErrors({ v: 7 }, '');
+  q('#statsMode').value = 'char'; fire(q('#statsMode'), 'change');
+  await new Promise(r => setTimeout(r, 20));
+  ok(!!q('#heatSummary').querySelector('.heat-fallback-note'),
+    '该模式无专属数据时明确说明此处仍为全量累计');
+  q('#statsMode').value = 'all'; fire(q('#statsMode'), 'change');
+  sMod.clearKeyErrors();
+
   // 迷你键位图开关不再被 renderSession 覆盖
   cleanup();
   fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char'), 'click');

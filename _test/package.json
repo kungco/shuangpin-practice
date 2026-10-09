@@ -11,6 +11,7 @@
     "test:storage": "node storage.mjs",
     "test:a11y": "node a11y.mjs",
     "test:launcher": "node launcher.mjs",
+    "test:training": "node training.mjs",
     "test:integration": "node integration.mjs",
     "serve": "node serve.mjs"
   },
