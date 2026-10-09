@@ -37,6 +37,66 @@ console.log('\n【2】键位模式：单键作答');
   ok(s.wrongKeystrokes === 1 && s.keystrokes === 2, `按键统计正确（${s.keystrokes} 键 / ${s.wrongKeystrokes} 错）`);
 }
 
+console.log('\n【2b】严格模式：输错必须修正当前键');
+{
+  // 严格模式是默认值：按错原地不动，统计照记。
+  const qs = generateQuestions({ mode: 'char', count: 1 });
+  const eng = new PracticeEngine({ questions: qs, mode: 'char' });
+  ok(eng.strict === true, '默认严格模式');
+  eng.start();
+  const t0 = eng.currentTarget();
+  const r = eng.pressKey('x' === t0.keys[0].toLowerCase() ? 'q' : 'x');
+  ok(r.correct === false && r.advanced === false, '按错不推进');
+  ok(eng.charIndex === 0 && eng.keyIndex === 0, '位置完全不变');
+  ok(eng.stats.wrongKeystrokes === 1, '错键仍然计数');
+  ok(eng.stats.correctChars === 0, '不算正确字符');
+  eng.pressKey(String(t0.keys[0]).toLowerCase());
+  ok(eng.keyIndex === 1 || eng.stats.correctChars === 1, '改正后正常推进');
+  eng.destroy();
+}
+
+console.log('\n【2c】非严格模式：输错即跳到下一个');
+{
+  const qs = generateQuestions({ mode: 'char', count: 3 });
+  const eng = new PracticeEngine({ questions: qs, mode: 'char', strict: false });
+  ok(eng.strict === false, '非严格模式生效');
+  eng.start();
+  const t0 = eng.currentTarget();
+  const wrong = t0.keys[0].toLowerCase() === 'x' ? 'q' : 'x';
+  const r = eng.pressKey(wrong);
+  ok(r.correct === false && r.advanced === true, '按错后推进');
+  ok(r.feedback.skipped === true, '反馈标明已跳过（UI 要如实告知，不能让人以为按键失灵）');
+  ok(eng.stats.wrongKeystrokes === 1, '错键仍然计数（口径与严格模式一致）');
+  ok(eng.stats.correctChars === 0, '被跳过的字不算正确字符');
+  // 剩下的字照常打对
+  for (let i = 0; i < 8; i++) {
+    if (eng.state !== STATE.RUNNING) break;
+    const t = eng.currentTarget();
+    if (!t || !t.keys || !t.keys.length) break;
+    for (const k of t.keys) eng.pressKey(String(k).toLowerCase());
+  }
+  const s = eng.summary();
+  ok(s.correctChars >= 1, `其余字正常计入正确（${s.correctChars}）`);
+  ok(s.wrongChars >= 1, '被跳过的字计入错误字数');
+  ok(s.wrongKeystrokes === 1 && s.totalChars === s.correctChars + s.wrongChars,
+    '正确+错误=总数，跳过没有污染分母');
+  eng.destroy();
+}
+
+console.log('\n【2d】测验强制严格模式');
+{
+  // 分数是测量结果：放着错不改，测的就不是这个人的水平了
+  const eng = new PracticeEngine({
+    questions: generateQuestions({ mode: 'char', count: 2 }),
+    mode: 'char', strict: false, examMode: true
+  });
+  eng.start();
+  const t = eng.currentTarget();
+  const r = eng.pressKey(t.keys[0].toLowerCase() === 'x' ? 'q' : 'x');
+  ok(r.advanced === false, '测验中按错不跳过');
+  eng.destroy();
+}
+
 console.log('\n【3】单字模式：音节输入推进');
 {
   const qs = generateQuestions({ mode: 'char', count: 1 });

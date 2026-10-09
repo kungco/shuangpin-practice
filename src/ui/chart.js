@@ -92,6 +92,12 @@ export function drawLine(canvas, points, opts = {}) {
     min -= span * 0.12;
     if (opts.metric !== 'acc' && min < 0) min = 0;
   }
+  // 综合分有既定的 0–100 刻度：不要让余量把它撑出这个范围，
+  // 否则同一分数在不同批数据里会落在不同高度，趋势就不可比了。
+  if (opts.metric === 'score') {
+    max = Math.min(100, Math.max(max, 10));
+    min = Math.max(0, min);
+  }
   if (max <= min) max = min + 1;
 
   const X = (i) => points.length === 1
@@ -312,6 +318,8 @@ function roundRect(ctx, x, y, w, h, r) {
 
 function fmtTick(v, metric) {
   if (metric === 'acc') return `${Math.round(v)}%`;
+  // 测验综合分：0–100 的绝对量，加「分」以免和速度（字/分）混淆
+  if (metric === 'score') return `${Math.round(v)}`;
   const n = Math.round(v);
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }

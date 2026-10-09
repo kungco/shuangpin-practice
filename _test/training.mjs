@@ -3,7 +3,7 @@ import { performance } from 'node:perf_hooks';
 import { createTraining, observeTraining } from '../src/core/training.js';
 import { generateQuestions, annotatePassage, KEY_COMPONENTS, phrasePool, PHRASES } from '../src/core/questions.js';
 import { PracticeEngine } from '../src/core/engine.js';
-import { summarize, historySeries, dailySeries } from '../src/core/stats.js';
+import { summarize, historySeries, dailySeries, scoreSeries } from '../src/core/stats.js';
 import * as S from '../src/core/storage.js';
 
 // 共享的假存储：后面几组用例会各自重设 localStorage 指向它
@@ -314,6 +314,35 @@ console.log('✓ per-mode series/daily totals and duration/character weighted av
   const acc = historySeries({ metric: 'acc', range: 'all' });
   assert.equal(acc.avg, 50.3, 'accuracy average is character-weighted');
   console.log('✓ curve average is labelled as weighted and exposes the plain mean');
+}
+
+/* ④ 测验成绩曲线：只取有效分数，无效的不能画成 0 分深坑 */
+{
+  const examRec = (score, valid, day) => {
+    const r = S.makeRecord({ mode: 'exam', speed: 60, accuracy: 90, totalChars: 40, durationSec: 40, date: day });
+    r.score = score; r.scoreValid = valid; r.grade = 'B';
+    return r;
+  };
+  store.set(S.KEYS.history, JSON.stringify([
+    examRec(72, true, date),
+    examRec(0, false, date),      // 字数不足，没资格评分
+    examRec(88, true, date)
+  ]));
+  const ss = scoreSeries({ range: 'all' });
+  assert.equal(ss.points.length, 2, '只有有效分数进入曲线');
+  assert.deepEqual(ss.points.map(p => p.score), [72, 88]);
+  assert.equal(ss.avg, 80, '分数用算术平均（绝对量，无需加权）');
+  assert.equal(ss.invalid, 1, '无效次数单独报出，用于说明点数为何偏少');
+  assert.equal(ss.min, 72);
+  assert.equal(ss.max, 88);
+  assert.equal(ss.points[0].grade, 'B', '等级随点保留，便于单独渲染');
+  // 非测验记录不能混进来
+  store.set(S.KEYS.history, JSON.stringify([
+    S.makeRecord({ mode: 'char', speed: 60, accuracy: 90, totalChars: 40, durationSec: 40, date }),
+    examRec(66, true, date)
+  ]));
+  assert.equal(scoreSeries({ range: 'all' }).points.length, 1, '练习成绩不混入测验曲线');
+  console.log('✓ the exam score curve only plots valid, scored sessions');
 }
 
 /* ④ 每日练习量必须回落到日报：成绩记录上限 2000 条，日报才是长期累积的 */

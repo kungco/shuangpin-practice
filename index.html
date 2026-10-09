@@ -193,12 +193,9 @@
             <div class="decode-empty" id="decodeEmpty">按下第一个键开始</div>
           </div>
 
-          <!-- 卡住提示条 -->
-          <div class="hintbar" id="hintBar" hidden>
-            <span class="hintbar-icon">💡</span>
-            <span class="hintbar-text" id="hintBarText"></span>
-            <button class="btn btn-ghost btn-sm" id="btnHintNow">看提示（Tab）</button>
-          </div>
+          <!-- 卡住提示条。内容由 renderHint() 重写（含「看提示」按钮），
+               点击用事件委托绑在 #hintBar 上（见 main.js）。 -->
+          <div class="hintbar" id="hintBar" hidden></div>
 
           <!-- 错误提示 -->
           <div class="feedback" id="feedback" hidden></div>
@@ -487,6 +484,13 @@
         <div class="chart-wrap"><canvas id="historyChart" width="920" height="260"></canvas></div>
         <p class="panel-sub" id="chartAvgNote" aria-live="polite" hidden></p>
 
+        <h3 class="sub-title">能力测验成绩</h3>
+        <p class="panel-sub" style="margin-top:-6px">
+          综合分满分 100，只有<strong>全程无提示</strong>且完成足够字数的测验才计入（无效的会被排除）。
+        </p>
+        <div class="chart-wrap"><canvas id="scoreChart" width="920" height="220"></canvas></div>
+        <p class="panel-sub" id="scoreNote" aria-live="polite" hidden></p>
+
         <h3 class="sub-title">每日练习量</h3>
         <div class="chart-wrap"><canvas id="dailyChart" width="920" height="200"></canvas></div>
 
@@ -560,6 +564,10 @@
         <div class="settings-toggles">
           <label class="checkbox"><input type="checkbox" id="setMiniKeymap" checked /><i></i>练习时显示迷你键位图</label>
           <label class="checkbox"><input type="checkbox" id="setSound" /><i></i>按键音效（答对轻响、答错低响、完成提示音）</label>
+          <!-- 严格模式：开 = 按错原地修正；关 = 按错跳到下一个。
+               两种模式的统计口径完全一致（错键都算错、连击都清零、
+               跳过的字都不算「一次未错」），所以切换这个开关
+               不会让历史数据的含义发生变化。能力测验强制严格。 -->
           <label class="checkbox"><input type="checkbox" id="setStrict" checked /><i></i>严格模式（输错必须修正当前键）</label>
           <label class="checkbox"><input type="checkbox" id="setSkipPunct" checked /><i></i>短文跟打时自动跳过标点</label>
           <label class="checkbox"><input type="checkbox" id="setHint" checked /><i></i>卡住时自动提示（在键位图上闪烁该键）</label>

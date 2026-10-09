@@ -1485,6 +1485,149 @@ console.log('【新增】会话用时与反应时间同源、切回前台结算�
   cleanup();
 }
 
+console.log('【新增】词组易错归组、完成音效、测验成绩曲线、键位图开关');
+{
+  const cleanup = () => { if (app.engine) app.engine.destroy(); app.engine = null; app.sessionActive = false; };
+  cleanup();
+  sMod.clearWeak();
+
+  // 词组出错要同时进「易错单字」和「易错词语」两组
+  q('#selPhraseCategory').value = 'all'; fire(q('#selPhraseCategory'), 'change');
+  q('#selPhraseLength').value = '2'; fire(q('#selPhraseLength'), 'change');
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'phrase'), 'click');
+  // 题量要够：3 个二字词只够 6 个字，40ms/字 走不满 1 秒就会提前结束，
+  // 而 persistRecord 只在 durationSec >= 1 时落库。
+  q('#selCount').value = '30'; fire(q('#selCount'), 'change');
+  app.settings.weakBoost = false;
+  fire(q('#btnStart'), 'click');
+  const eng = app.engine;
+  // 第一题按一个错键
+  const t = eng.currentTarget();
+  eng.pressKey(t.keys[0].toLowerCase() === 'x' ? 'q' : 'x');
+  const word = eng.currentQuestion().text;
+  /* 必须让真实时间走够 1 秒：persistRecord 只在 durationSec >= 1 时才落库，
+     headless 里按键循环是瞬时的，不 sleep 就什么都不会写进易错表。 */
+  for (let i = 0; i < 40 && (eng.stats.totalChars < 5 || eng.elapsedSec < 1.2); i++) {
+    const x = eng.currentTarget();
+    if (!x || !x.keys || !x.keys.length) break;
+    for (const k of x.keys) eng.pressKey(String(k).toLowerCase());
+    await new Promise(r => setTimeout(r, 40));
+  }
+  const s = eng.summary();
+  ok(s.durationSec >= 1, `用时已累计（${s.durationSec}s / state=${eng.state} / ticker=${!!eng._ticker}），否则不会落库`);
+  ok(Object.keys(s.perWordErrors || {}).length >= 1, `按整条记录了词组错误（${JSON.stringify(s.perWordErrors)}）`);
+  eng.finish('user');
+  await new Promise(r => setTimeout(r, 30));
+  const weak = sMod.loadWeak();
+  ok(!!weak[word], `词组「${word}」进了易错表`);
+  ok(!!weak[word]?.word && weak[word].word === word, '整条记录的 word 字段非空（分组靠它）');
+  ok(!!weak[word]?.pinyin && weak[word].pinyin.includes(' '), '词组拼音逐字保存，能显示编码');
+  // 复习页分组。要先关掉「只练到期项」：刚记错的词按 SM-2 排在明天到期，
+  // 开着开关时列表本就该是空的（那是正确行为，不是 bug）。
+  const realDueOnly = app.settings.reviewDueOnly;
+  app.settings.reviewDueOnly = false;
+  fire(q('[data-view="review"]'), 'click');
+  await new Promise(r => setTimeout(r, 20));
+  const reviewHtml = q('#reviewBody').innerHTML;
+  ok(reviewHtml.includes('易错词语'), '复习页出现「易错词语」分组（此前永远为空）');
+  const phraseGroupHtml = reviewHtml.split('易错词语')[1] || '';
+  ok(phraseGroupHtml.includes(word), '词组出现在「易错词语」分组里');
+  ok(!phraseGroupHtml.includes('—'), '词组条目显示自己的拼音与编码，不再是「—」');
+  ok(!/易错单字[\s\S]{0,300}rc-char[^>]*>\s*精度/.test(reviewHtml),
+    '词组没有被误归到「易错单字」');
+  app.settings.reviewDueOnly = realDueOnly;
+  const done = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'again');
+  if (done) fire(done, 'click');
+  await new Promise(r => setTimeout(r, 20));
+
+  /* 完成音效：一次有效练习结束要发声（此前 playFinish 从没被调用过）。
+     ES module 的命名空间是只读的，不能改写 soundMod.play；
+     改为在 window.AudioContext 上装桩：合成一定会经过 createOscillator，
+     数「振荡器个数」就能判断播没播 —— finish 是 3 音、soften 是 2 音。 */
+  cleanup();
+  const audio = { oscillators: 0 };
+  const realAudio = fakeWindow.AudioContext;
+  fakeWindow.AudioContext = class {
+    constructor() { this.state = 'running'; this.currentTime = 0; this.destination = {}; }
+    resume() { return Promise.resolve(); }
+    createOscillator() { audio.oscillators++; return {
+      type: '', frequency: { setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+      connect() {}, start() {}, stop() {}
+    }; }
+    createGain() { return {
+      gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+      connect() {}
+    }; }
+  };
+  const { _resetForTest } = await import('../src/ui/sound.js');
+  _resetForTest();   // 丢弃之前用例可能已建的播放器单例
+  try {
+    app.settings.sound = true;
+    fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char'), 'click');
+    q('#selCount').value = '30'; fire(q('#selCount'), 'change');
+    fire(q('#btnStart'), 'click');
+    const e2 = app.engine;
+    // 同样要让真实时间走够 1 秒，否则成绩无效、不会触发收尾音
+    for (let i = 0; i < 60 && e2.state === 'running' && e2.elapsedSec < 1.2; i++) {
+      const x = e2.currentTarget();
+      if (!x || !x.keys || !x.keys.length) break;
+      for (const k of x.keys) e2.pressKey(String(k).toLowerCase());
+      await new Promise(r => setTimeout(r, 40));
+    }
+    e2.finish('user');   // 主动结束，走与时间到/打完相同的结算路径
+    ok(e2.state === 'finished', '练习已结束（有效成绩才会触发收尾音）');
+    ok(audio.oscillators > 0, `有效练习结束会播收尾音（合成 ${audio.oscillators} 个振荡器）`);
+    ok(audio.oscillators >= 2, '收尾音是多音（finish 三音 / soften 两音）');
+  } finally {
+    _resetForTest();
+    fakeWindow.AudioContext = realAudio;
+  }
+  cleanup();
+  const again2 = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'again');
+  if (again2) fire(again2, 'click');
+  await new Promise(r => setTimeout(r, 20));
+
+  // 测验成绩曲线
+  fire(q('[data-view="stats"]'), 'click');
+  await new Promise(r => setTimeout(r, 30));
+  ok(!!q('#scoreChart'), '统计页有测验成绩曲线画布');
+  ok(!!q('#scoreNote'), '测验成绩曲线有口径说明节点');
+  const hist = sMod.loadHistory();
+  const validExams = hist.filter(r => r.mode === 'exam' && r.scoreValid === true);
+  ok(validExams.length >= 1, `样本池里有有效测验（${validExams.length} 次）`);
+  if (validExams.length) {
+    ok(!q('#scoreNote').hidden, '有效测验存在时显示说明');
+    ok(q('#scoreNote').textContent.includes('平均'), '说明里给出平均分');
+  }
+
+  // 迷你键位图开关不再被 renderSession 覆盖
+  cleanup();
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char'), 'click');
+  app.settings.showMiniKeymap = true;
+  app.keymapHidden = null;
+  fire(q('#btnStart'), 'click');
+  await new Promise(r => setTimeout(r, 20));
+  const km = q('#miniKeymap');
+  ok(!km.hidden, '默认可见');
+  const btnKm = q('#btnToggleKeymap');
+  ok(btnKm.textContent === '隐藏', '按钮文案与实际一致');
+  fire(btnKm, 'click');
+  await new Promise(r => setTimeout(r, 20));
+  ok(km.hidden, '点一次收起');
+  ok(btnKm.textContent === '显示', '收起后按钮文案正确');
+  // 再走一帧 renderSession，用户的选择必须活下来
+  const t2 = app.engine.currentTarget();
+  app.engine.pressKey(String(t2.keys[t2.pos]).toLowerCase());
+  await new Promise(r => setTimeout(r, 20));
+  ok(km.hidden, '重绘后仍然保持收起（此前会被每帧覆盖回去）');
+  ok(btnKm.textContent === '显示', '重绘后按钮文案仍然正确');
+  fire(btnKm, 'click');
+  await new Promise(r => setTimeout(r, 20));
+  ok(!km.hidden, '再点一次恢复显示');
+  cleanup();
+  sMod.clearWeak();
+}
+
 console.log('【新增】提示依赖度可见、存储降级如实告知');
 {
   const cleanup = () => { if (app.engine) app.engine.destroy(); app.engine = null; app.sessionActive = false; };

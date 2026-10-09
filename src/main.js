@@ -19,7 +19,7 @@ import {
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
-import { summarize, historySeries, dailySeries, weakRanking, groupWeakItems,
+import { summarize, historySeries, dailySeries, scoreSeries, weakRanking, groupWeakItems,
          reviewAdvice, formatDuration, formatClock, keyHeatmap } from './core/stats.js';
 import { scoreExam, gradeTier, SCORE_CONFIG } from './core/score.js';
 import {
@@ -50,6 +50,10 @@ const app = {
   heatKeymap: null,    // 统计页热力图控制器（与上面两个互不干扰）
   sessionMode: 'char',
   lastErrorTarget: null,
+  // 用户在练习中临时收起迷你键位图。null = 未表态（听设置的）。
+  // 必须独立于 settings.showMiniKeymap：后者是持久偏好，
+  // 这里是一轮练习里的临时动作，两者语义不同。
+  keymapHidden: null,   // true = 本轮收起；false = 本轮强制显示；null = 听设置
   stats: { mode: 'all', chartMetric: 'speed', chartRange: '20', dailyDays: 14, heatRange: 'all' },
   saveTimer: null,
   lastResumeSave: 0,
@@ -629,6 +633,9 @@ function startSession(questionsOverride, modeOverride) {
     renderSession();
 
     app.lastResumeSave = 0;
+    // 连错降音的计数跨会话不清零的话，第二轮的第一声错音就会接着上一轮
+    // 继续变轻 —— 用户会觉得「什么都没做，音量就变小了」。
+    try { resetErrorFatigue(); } catch (_) {}
     app.engine.start();
     rememberCurrentQuestion(app.engine);
 
@@ -698,7 +705,8 @@ function bindEngineEvents() {
     // 错误反馈：音效 + 屏幕阅读器播报（assertive：走打断队列，因为用户需要立刻知道按错了）
     playSound('error', app.settings.sound);
     if (!eng.examMode && eng.assistanceLevel() === 0 && fb && fb.expectedAll && fb.expectedAll.length) {
-      announce(`按错。应键入 ${fb.expectedAll.map(k => String(k).toUpperCase()).join(' 或 ')}`, 'assertive');
+      announce(`按错。应键入 ${fb.expectedAll.map(k => String(k).toUpperCase()).join(' 或 ')}` +
+        (fb.skipped ? '，非严格模式，已跳到下一个。' : ''), 'assertive');
     } else announce('按错，请重试。', 'assertive');
   });
 
@@ -857,11 +865,36 @@ function persistRecord(summary) {
         S.recordWeak({ char: k, word: '', pinyin: ALL_CHARS[k] || '' });
       });
 
+      /* 词组 / 短文按「整条」记一次。上面那条永远传 word: ''，所以复习页的
+       * 「易错词语」分组（groupWeakItems 靠 word 且多字判断）本来永远是空的，
+       * 词组出错的词全被当成单字混进「易错单字」—— 那一组里的多字键查不到
+       * 拼音，界面显示「—」，也没有对应编码。
+       * 整条内容才是词组练习真正该复习的粒度。 */
+      const perWord = s.perWordErrors || {};
+      Object.entries(perWord).forEach(([text, cnt]) => {
+        if (!cnt) return;
+        const entry = PHRASES.find(p => p.w === text);
+        const chars = Array.from(text);
+        const pys = entry ? entry.p : chars.map(c => ALL_CHARS[c]).filter(Boolean);
+        if (!entry && pys.length !== chars.length) return;   // 拼音不齐就不收，避免生成不出题
+        S.recordWeak({ char: chars[0], word: text, pinyin: (pys || []).join(' ') });
+      });
+
       // 记录键维度错误（错误热力图的数据来源）。
       // 与字词表分开存：字词表是「哪些字不会」，热力图是「哪些键不熟」。
       if (s.keyErrors && Object.keys(s.keyErrors).length) {
         S.recordKeyErrors(s.keyErrors);
       }
+    }
+
+    /* 收尾音。playFinish / playSoften 早就写好、index.html 也写着「完成提示音」，
+       但一直没有调用点 —— 声音开关管的是 per-keystroke 的两声，完成这一声
+       永远缺席。分数不理想时用两音下行的 soften：测验只是诊断，
+       不该让用户觉得被责备（见 sound.js 的注释）。
+       无效分数（样本不足）不出声：没资格评价就不评价。 */
+    if (meaningful) {
+      const lowScore = examResult && examResult.valid && examResult.score < SCORE_CONFIG.grades[3].min;
+      playSound(lowScore ? 'soften' : 'finish', app.settings.sound);
     }
 
     S.clearResume();
@@ -1040,9 +1073,10 @@ function initSessionPanel() {
     btnToggle.addEventListener('click', () => {
       const wrap = $('#miniKeymap');
       if (!wrap) return;
-      const hidden = wrap.style.display === 'none';
-      wrap.style.display = hidden ? '' : 'none';
-      btnToggle.textContent = hidden ? '隐藏' : '显示';
+      // 记住用户的意图，交给 applyMiniKeymapVisibility() 统一执行 ——
+      // 直接改 style.display 会被下一帧的 renderSession 覆盖掉。
+      app.keymapHidden = !wrap.hidden;
+      applyMiniKeymapVisibility();
     });
   }
 }
@@ -1349,7 +1383,9 @@ function showErrorFeedback(fb) {
   box.innerHTML =
     `<span class="fb-icon">✕</span>` +
     `<span>你按了 <code>${escapeHtml(fb.pressed)}</code>，这里应该是 <code>${escapeHtml(fb.expected)}</code>` +
-    `${fb.expectedAll && fb.expectedAll.length > 1 ? `（完整编码 <code>${escapeHtml(fb.codeText)}</code>）` : ''}</span>` +
+    `${fb.expectedAll && fb.expectedAll.length > 1 ? `（完整编码 <code>${escapeHtml(fb.codeText)}</code>）` : ''}` +
+    /* 非严格模式下会顺带跳到下一个字，不说清楚用户会以为按键失灵了 */
+    `${fb.skipped ? '<b>（非严格模式，已跳到下一个）</b>' : ''}</span>` +
     `<span class="fb-explain">${escapeHtml(fb.explain || '')}</span>`;
 
   // 自动淡出
@@ -1380,6 +1416,16 @@ function renderHint(p) {
   const note = $('#miniKeymapNote');
   const panes = $$('#decode .syl-block');
   if (!bar || !p) return;
+  // 重新渲染会换掉按钮节点，旧的委托目标随之失效 → 重新挂一次。
+  // 静态 HTML 里那个同名按钮已经不存在（这里每次都被 innerHTML 覆盖），
+  // 所以「只绑一次」的写法反而会漏掉后续点击。
+  if (!bar.dataset.hintBound) {
+    bar.dataset.hintBound = '1';
+    bar.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('#btnHintNow') : null;
+      if (btn) requestHintNow();
+    });
+  }
 
   const isReveal = p.level === 'reveal';
   const roleName = p.role === 'sheng' ? '声母' : (p.role === 'zero' ? '首字母' : '韵母');
@@ -1403,10 +1449,6 @@ function renderHint(p) {
       `还不会就按 <b>Tab</b> 看答案。</span>` +
       `<button class="btn btn-ghost btn-sm" id="btnHintNow">看提示（Tab）</button>`;
   }
-
-  // 重新绑定（innerHTML 会清掉旧监听）
-  const btnNow = $('#btnHintNow');
-  if (btnNow) btnNow.addEventListener('click', requestHintNow);
 
   // 顶部状态标记
   if (flag) {
@@ -1473,13 +1515,30 @@ function ensureMiniKeymap() {
  */
 function applyMiniKeymapVisibility() {
   const isExam = !!(app.engine && app.engine.examMode);
-  const visible = !isExam && app.settings.showMiniKeymap && (!app.engine || app.engine.assistanceLevel() === 0 || !!app.engine.hintLevel());
+  /* 三层可见性，从外到内：
+     ① 训练阶段 / 测验模式决定「该不该有」；
+     ② 用户的显示/隐藏开关决定「想不想看」（app.keymapHidden，可为 null）；
+     ③ 暂停/结束态强制收起。
+     之前按钮改的是 style.display，而本函数每次 renderSession 都跑、
+     只看设置项，于是每帧都把用户的选择覆盖回去 —— 按钮写着「显示」
+     键位图却可见，反之亦然。 */
+  const stageAllows = !isExam &&
+    (!app.engine || app.engine.assistanceLevel() === 0 || !!app.engine.hintLevel());
+  const stateAllows = !app.engine ||
+    (app.engine.state !== STATE.PAUSED && app.engine.state !== STATE.FINISHED);
+  // keymapHidden 为 null = 用户没表态，听持久设置；true/false = 本轮练习里的临时选择
+  const wants = app.keymapHidden === null ? app.settings.showMiniKeymap : !app.keymapHidden;
+  const visible = stageAllows && stateAllows && wants;
   const wrap = $('#miniKeymap');
   const outer = wrap && wrap.closest ? wrap.closest('.mini-keymap-wrap') : null;
   if (outer) outer.hidden = !visible;
   if (wrap) wrap.hidden = !visible;
   const btn = $('#btnToggleKeymap');
-  if (btn) btn.textContent = visible ? '隐藏' : '显示';
+  if (btn) {
+    btn.textContent = visible ? '隐藏' : '显示';
+    // 被阶段/状态强制收起时按钮不可点，否则用户点了会以为坏了
+    btn.disabled = !stageAllows || !stateAllows;
+  }
 }
 
 function highlightMiniKeymap() {
@@ -1943,6 +2002,35 @@ function renderStatsView() {
       }
     }
 
+    /* ---- 测验成绩曲线 ----
+       分数在落库时就写好了（rec.score），但一直没有这张图。
+       跟随上方的区间切换（20/50/全部），与历史曲线共用同一档位。 */
+    const scoreCanvas = $('#scoreChart');
+    if (scoreCanvas) {
+      const ss = scoreSeries({ range: app.stats.chartRange });
+      if (ss.points.length) {
+        drawLine(scoreCanvas, ss.points, { metric: 'score', avg: ss.avg, height: 220 });
+      } else {
+        const ctx = scoreCanvas.getContext ? scoreCanvas.getContext('2d') : null;
+        if (ctx) {
+          scoreCanvas.width = scoreCanvas.width || 920;
+          ctx.clearRect(0, 0, scoreCanvas.width, scoreCanvas.height);
+          ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-3') || '#8a94a6';
+          ctx.font = '14px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(ss.total ? '已完成的测验都不满足计分条件（无提示或字数不足）' : '还没有做过能力测验', 460, 110);
+        }
+      }
+      const sNote = $('#scoreNote');
+      if (sNote) {
+        sNote.textContent = ss.points.length
+          ? `${ss.points.length} 次有效测验，平均 ${ss.avg} 分` +
+            (ss.invalid ? `；另有 ${ss.invalid} 次因未达计分条件不计入` : '')
+          : '';
+        sNote.hidden = !sNote.textContent;
+      }
+    }
+
     /* ---- 每日柱状 ---- */
     const dailyCanvas = $('#dailyChart');
     if (dailyCanvas) {
@@ -2222,8 +2310,14 @@ function renderReviewView() {
           </div>
           <div class="review-items">
             ${items.map(w => {
-              const split = w.char ? primarySplit(w.pinyin) : null;
-              const keys = split ? split.code : '';
+              /* 词组条目的 pinyin 是逐字拼音拼起来的（如 "shuang pin"），
+                 primarySplit 只吃单字拼音，直接调会解析不出来 → 显示不出编码。
+                 逐字拆开各自出码，拼成完整序列。 */
+              const parts = String(w.pinyin || '').split(/\s+/).filter(Boolean);
+              const isPhrase = Array.from(w.key || '').length > 1;
+              const keys = isPhrase
+                ? parts.map(p => (primarySplit(p) || {}).code || '?').join(' ')
+                : (w.char && parts[0] ? (primarySplit(parts[0]) || {}).code || '' : '');
               // 间隔进度：一个条形，越满说明越接近掌握
               const prog = Math.min(100, Math.round((w.streak / 4) * 100));
               const dueText = w.isDue

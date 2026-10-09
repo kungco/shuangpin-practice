@@ -113,6 +113,51 @@ export function computeStreak(daySet) {
    ============================================================ */
 
 /**
+ * 能力测验成绩曲线。
+ *
+ * 分数在落库时就写进了记录（rec.score / rec.grade / rec.scoreValid，
+ * 注释里也写着「统计页才能画历史分数曲线」），但统计页一直没有这张图，
+ * 于是测验成绩存下来却无法回看趋势 —— 只能靠记忆。
+ *
+ * 口径上要当心两件事：
+ *   - 只取**有效**分数（scoreValid）。样本不足 20 字的测验本来就不评分，
+ *     把它们画成 0 分会让曲线出现毫无意义的深坑。
+ *   - 等级是文字，不进曲线；需要时由 main.js 从 rec.grade 单独渲染。
+ *
+ * @param {object} opts
+ *   - range: '20' | '50' | 'all'
+ * @returns {{points:Array<{ts,date,score,grade,value,mode}>, min, max, avg, total, invalid}}
+ */
+export function scoreSeries(opts = {}) {
+  const list = loadHistory()
+    .filter(r => r.mode === 'exam' && r.scoreValid === true)
+    .sort((a, b) => a.ts - b.ts);
+  const range = opts.range || '20';
+  const trimmed = range === 'all'
+    ? list
+    : list.slice(Math.max(0, list.length - Math.max(1, parseInt(range, 10) || 20)));
+  const points = trimmed.map(r => ({
+    ts: num(r.ts),
+    date: r.date || '',
+    score: num(r.score),
+    grade: r.grade || '',
+    mode: r.mode,
+    value: num(r.score)
+  }));
+  const values = points.map(p => p.value);
+  return {
+    points,
+    min: values.length ? Math.min(...values) : 0,
+    max: values.length ? Math.max(...values) : 0,
+    // 分数是绝对量（0–100），算术平均就是它该有的样子
+    avg: values.length ? round1(values.reduce((a, b) => a + b, 0) / values.length) : 0,
+    total: list.length,
+    // 同一段历史里被判为无效的次数，用于如实说明「为什么点数比测验次数少」
+    invalid: loadHistory().filter(r => r.mode === 'exam' && r.scoreValid !== true).length
+  };
+}
+
+/**
  * @param {object} opts
  *   - range: '20' | '50' | 'all'
  *   - metric: 'speed' | 'acc'

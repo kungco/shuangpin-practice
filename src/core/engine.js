@@ -187,7 +187,8 @@ export class PracticeEngine {
       wrongKeystrokes: 0,   // 错误按键数
       combo: 0,
       maxCombo: 0,
-      perCharErrors: {}     // charKey -> 错误次数
+      perCharErrors: {},   // charKey -> 错误次数
+      perWordErrors: {}     // 整条文本 -> 错误次数（词组/短文，供复习页分组）
     };
 
     /* 已出错的字符集合（用于判定 correctChars） */
@@ -703,7 +704,15 @@ export class PracticeEngine {
     if (key === expected) {
       return this._onCorrectKey(target, key);
     }
-    return this._onWrongKey(target, key, expected, expectedAll);
+    /* 严格模式（默认）：按错必须原地修正，不推进。
+       键位练习要的就是「错了就停下来想清楚」，一路跳过去会掩盖真正不熟的键。
+       非严格模式：按错等于「这个字我放弃了」，跳到下一个 ——
+       等同于主动按一次跳过键（Backspace），适合已经熟练、只想刷通篇的情况。
+       两种模式统计口径完全一致：错键都计入 wrongKeystrokes / perCharErrors，
+       都清零连击，被跳过的字都不算「一次未错的正确字符」。
+       测验强制严格 —— 分数是测量结果，放着错不改会让分数失去意义。 */
+    const skipOnWrong = !this.strict && !this.examMode;
+    return this._onWrongKey(target, key, expected, expectedAll, skipOnWrong);
   }
 
   /* ---- 按键正确 ---- */
@@ -748,12 +757,14 @@ export class PracticeEngine {
   }
 
   /* ---- 按键错误 ---- */
-  _onWrongKey(target, key, expected, expectedAll) {
-    this.stats.wrongKeystrokes += 1;
-    this.stats.combo = 0;
-
-    // 记录易错的字 / 词
-    const ch = this.currentChar();
+  /**
+   * 记录「本次错误要算到哪个易错条目上」。
+   *
+   * 两种粒度：单字（练哪个字最容易错）与整条（词组/短文里这条内容整体不稳）。
+   * 只记单字的话，复习页的「易错词语」那一组永远是空的 —— 因为分组靠 word
+   * 字段且要求多字，而整条粒度才是词组练习真正该复习的对象。
+   */
+  _recordWrongItem(target, ch) {
     if (target.kind === 'key' || target.kind === 'part') {
       // 单键类题目：以「题目文本」作为易错条目
       const key0 = target.char || '';
@@ -761,11 +772,28 @@ export class PracticeEngine {
       if (key0) {
         this.stats.perCharErrors[key0] = (this.stats.perCharErrors[key0] || 0) + 1;
       }
-    } else if (ch && ch.ch && !this._isSkippable(ch)) {
-      const charKey = ch.ch;
-      this.stats.perCharErrors[charKey] = (this.stats.perCharErrors[charKey] || 0) + 1;
-      this._erroredChars.add(`${this.index}:${this.charIndex}`);
+      return;
     }
+    if (!ch || !ch.ch || this._isSkippable(ch)) return;
+    this.stats.perCharErrors[ch.ch] = (this.stats.perCharErrors[ch.ch] || 0) + 1;
+    this._erroredChars.add(`${this.index}:${this.charIndex}`);
+    const q = this.currentQuestion();
+    const text = q && typeof q.text === 'string' ? q.text : '';
+    if (text && Array.from(text).length > 1) {
+      this.stats.perWordErrors[text] = (this.stats.perWordErrors[text] || 0) + 1;
+    }
+  }
+
+  /**
+   * @param {boolean} skipOnWrong 非严格模式下是否顺带跳到下一单元
+   * @returns {object} 反馈载荷（advanced 如实反映是否推进）
+   */
+  _onWrongKey(target, key, expected, expectedAll, skipOnWrong = false) {
+    this.stats.wrongKeystrokes += 1;
+    this.stats.combo = 0;
+
+    // 记录易错的字 / 词
+    this._recordWrongItem(target, this.currentChar());
 
     const split = target.split;
     const expectedDisplay = expectedAll.map(k => k.toUpperCase());
@@ -799,8 +827,19 @@ export class PracticeEngine {
     }
 
     this.emit('error', feedback);
+    /* 非严格模式：按错即跳过。推进放在 emit('error') 之后 ——
+       UI 的 error 处理器要靠 snapshot() 定位「刚才那个字」，
+       先推进会让它算到下一个字头上。 */
+    if (skipOnWrong) {
+      feedback.skipped = true;
+      // 被跳过的字必须**计入总数并算错**。不记的话它会从分母里消失，
+      // 非严格模式下的正确率反而比严格模式更高 —— 跳得越多分越高，
+      // 指标被彻底玩坏（这正是「独立正确率」要防的那类问题）。
+      this._countSkippedCharAsWrong(target);
+      this._advanceChar();
+    }
     this.emit('change', this.snapshot());
-    return { handled: true, correct: false, advanced: false, feedback };
+    return { handled: true, correct: false, advanced: !!skipOnWrong, feedback };
   }
 
   /** 生成人类可读的错误解释 */
@@ -944,6 +983,26 @@ export class PracticeEngine {
   }
 
   /**
+   * 非严格模式下被跳过的字：计入总字数并算作错误字符。
+   *
+   * 与 _markCharDone（标点/未收录字的自动跳过）相反 —— 那类字本来就不
+   * 需要打字，不该进分母；这里是用户主动放弃了一个**本该会**的字，
+   * 留着会让正确率虚高。
+   */
+  _countSkippedCharAsWrong(target) {
+    if (target.kind === 'key' || target.kind === 'part') {
+      this.stats.totalChars += 1;
+      this.stats.wrongChars += 1;
+      return;
+    }
+    const ch = this.currentChar();
+    if (ch && !this._isSkippable(ch)) {
+      this.stats.totalChars += 1;
+      this.stats.wrongChars += 1;
+    }
+  }
+
+  /**
    * 标记一个「无需打字」的字符已完成（供结果弹窗统计跳过数量）
    * 不影响 correctChars / wrongChars —— 跳过项不计入正确率分母。
    */
@@ -1024,11 +1083,8 @@ export class PracticeEngine {
     const target = this.currentTarget();
     if (!target) return false;
     if (target.kind === 'syllable') {
-      const ch = this.currentChar();
-      if (ch && ch.ch) {
-        this.stats.perCharErrors[ch.ch] = (this.stats.perCharErrors[ch.ch] || 0) + 1;
-        this._erroredChars.add(`${this.index}:${this.charIndex}`);
-      }
+      // 跳键与按错走同一条记账路径，跳过的字同样该进易错表
+      this._recordWrongItem(target, this.currentChar());
     } else if (target.kind === 'part' || target.kind === 'key') {
       // 单键类题目：整题记一次错，然后推进到下一题
       const mark = `key:${this.index}`;
@@ -1157,6 +1213,7 @@ export class PracticeEngine {
       questionCount: this.unlimited ? 0 : this.questions.length,
       doneQuestions: this.questionOffset + Math.min(this.index, this.questions.length),
       perCharErrors: Object.assign({}, this.stats.perCharErrors),
+      perWordErrors: Object.assign({}, this.stats.perWordErrors || {}),
       keyErrors: Object.assign({}, this.stats.keyErrors || {}),
       completed: !this.unlimited && this.index >= this.questions.length,
       unlimited: this.unlimited,
@@ -1219,6 +1276,7 @@ export class PracticeEngine {
         combo: this.stats.combo,
         maxCombo: this.stats.maxCombo,
         perCharErrors: this.stats.perCharErrors,
+        perWordErrors: this.stats.perWordErrors || {},
         keyErrors: this.stats.keyErrors || {}
       },
       settings: {
@@ -1276,6 +1334,9 @@ export class PracticeEngine {
         eng.stats.maxCombo = Math.max(0, Number(st.maxCombo) || 0);
         if (st.perCharErrors && typeof st.perCharErrors === 'object') {
           eng.stats.perCharErrors = Object.assign({}, st.perCharErrors);
+        }
+        if (st.perWordErrors && typeof st.perWordErrors === 'object') {
+          eng.stats.perWordErrors = Object.assign({}, st.perWordErrors);
         }
         if (st.keyErrors && typeof st.keyErrors === 'object') {
           eng.stats.keyErrors = Object.assign({}, st.keyErrors);
