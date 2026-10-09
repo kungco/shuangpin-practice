@@ -414,6 +414,8 @@ function createQuestionSource(config, initial = [], savedState = {}) {
     context[name].last = state?.last;
     context[name].cycles = Number(state?.cycles) || 0;
     context[name].draws = Number(state?.draws) || 0;
+    // 距上次易错键强化的抽数：续练后要接着算，否则会立刻补一题强化
+    context[name].weakAt = Number(state?.weakAt) || 0;
   }
   for (const q of initial) {
     context.used.add(q.text || q.promptText);
@@ -441,7 +443,27 @@ function createQuestionSource(config, initial = [], savedState = {}) {
     return out;
   };
   source.exportState = () => Object.fromEntries(Object.entries(context).map(([name, used]) =>
-    [name, { items: [...used], last: used.last, cycles: used.cycles || 0, draws: used.draws || 0 }]));
+    [name, {
+      items: [...used], last: used.last,
+      cycles: used.cycles || 0, draws: used.draws || 0, weakAt: used.weakAt || 0
+    }]));
+
+  /* 把一道从未真正作答的题还回候选池（自适应换档顶掉旧档题目时调用）。
+     去重集合是「一轮全覆盖」的依据，所以还回时必须用与生成时完全一致的
+     标记键，否则还回去的键和当初打的键不是同一个，等于没还。 */
+  source.releaseQuestion = (q) => {
+    if (!q) return;
+    if (q.kind === 'key') context.usedKeys.delete(`${q.role}:${q.promptText}`);
+    else {
+      context.used.delete(q.text || q.promptText);
+      context.usedPhrase.delete(q.text || q.promptText);
+      const py = q.pinyin || q.chars?.[0]?.pinyin;
+      if (py) context.usedPinyin.delete(q.kind === 'part' ? `${q.part}:${py}` : py);
+    }
+    // last 若指向被还回的题，下一题的「不重复上一题」检查会误判
+    if (q.kind === 'key' && context.usedKeys.last === `${q.role}:${q.promptText}`)
+      context.usedKeys.last = undefined;
+  };
   return source;
 }
 
@@ -1810,6 +1832,17 @@ function renderStatsView() {
         avg: series.avg,
         height: 260
       });
+      /* 均值线是加权值（速度按练习时长、正确率按完成字数），
+         曲线上的点仍是每轮原始值 —— 所以那条线不会等于各点的算术平均。
+         差异大时显式说明，免得被当成画错了。 */
+      const note = $('#chartAvgNote');
+      if (note) {
+        const gap = Math.abs(series.avg - series.plainAvg);
+        note.textContent = gap >= Math.max(1, Math.abs(series.plainAvg) * 0.02)
+          ? `虚线为加权均值 ${series.avg}（${series.metric === 'acc' ? '按完成字数' : '按练习时长'}加权，各点原始值算术平均为 ${series.plainAvg}）`
+          : '';
+        note.hidden = !note.textContent;
+      }
     }
 
     /* ---- 每日柱状 ---- */
@@ -2886,6 +2919,17 @@ function initGlobalGuards() {
       app.engine.pause();
       updatePauseButton();
     }
+    // 回到前台时先把被节流掉的那段时间结算掉，再恢复计时。
+    // pause() 已经同步过，这里覆盖的是「窗口失焦但未 hidden」的场景
+    // （visibilitychange 不触发，但定时器被节流到 1 次/秒）。
+    if (!document.hidden && app.engine && app.engine.state === STATE.RUNNING) {
+      app.engine.syncActiveTime();
+    }
+  });
+
+  // 窗口失焦/聚焦：非 hidden 的遮挡也会让定时器被节流。
+  window.addEventListener('pageshow', () => {
+    if (app.engine && app.engine.state === STATE.RUNNING) app.engine.syncActiveTime();
   });
 }
 

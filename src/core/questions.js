@@ -166,17 +166,31 @@ export const KEY_COMPONENTS = [
   ...Object.entries(KEY_TO_YUNMU).flatMap(([key, parts]) => parts.map(part => ({ key, part, role: 'yun' }))),
   ...Object.entries(KEY_TO_SHENGMU).flatMap(([key, parts]) => parts.map(part => ({ key, part, role: 'sheng' })))
 ];
+/* 每多少题最多插入一题易错键强化。
+   README 的措辞是「每五题**最多**插入一题」，所以这里用「距上次强化至少 5 题」
+   而不是 `draws % 5 === 0` 的硬等差 —— 后者在跨批续题或归零重来时会出现
+   间隔忽长忽短，且用户若恰好在某一抽已经抽到弱键，那一抽本就是强化，
+   不必再额外插一题。 */
+const WEAK_KEY_INTERVAL = 5;
+
 function makeKeymapQuestion(ctx, weights = {}) {
   const used = ctx.usedKeys ||= new Set();
   used.draws = (used.draws || 0) + 1;
-  const weak = used.cycles > 0 && used.draws % 5 === 0
+  // 距上次强化不足 N 题就让位；首轮全覆盖期间（cycles === 0）不插，
+  // 保证「先覆盖全部声母韵母」这条承诺不被强化题挤掉。
+  const due = used.cycles > 0 && (used.draws - (used.weakAt || 0)) >= WEAK_KEY_INTERVAL;
+  const weak = due
     ? KEY_COMPONENTS.filter(x => (Number(weights[x.key.toLowerCase()]) || 0) > 0 && `${x.role}:${x.part}` !== used.last) : [];
   let pick;
   if (weak.length) {
     const total = weak.reduce((sum, x) => sum + Math.min(20, Number(weights[x.key.toLowerCase()])), 0);
     let ticket = Math.random() * total;
     pick = weak.find(x => (ticket -= Math.min(20, Number(weights[x.key.toLowerCase()]))) < 0) || weak[0];
+    // 强化题是**插入**在覆盖轮次之间的额外题，不能算作「已覆盖」：
+    // 若把它也标进 used，这个成分在下一轮的剩余名单里就会消失，
+    // 覆盖率保证被破坏。所以只更新 last / weakAt，不动 used 集合。
     used.last = `${pick.role}:${pick.part}`;
+    used.weakAt = used.draws;
   } else pick = pickUnused(KEY_COMPONENTS, used, x => `${x.role}:${x.part}`, weights);
   const { key, part, role } = pick;
   const seq = role === 'sheng' ? (SHENGMU_TO_KEYS[part] || [key]) : [key];
@@ -458,13 +472,21 @@ function makeExamQuestion(i, target, ctx) {
  */
 export function annotatePassage(text, vettedReadings = null) {
   const arr = Array.from(String(text || ''));
-  const readings = Array.isArray(vettedReadings) && vettedReadings.length === arr.length
-    ? [] : tokenizeWithPinyin(text).flatMap(block => block.chars);
+  /* 人工标注（vettedReadings）只在长度完全对齐时采用。长度对不上意味着
+     数据本身出了问题（改词、漏字、多音字调整），而这里原本会**静默**回落
+     到自动标注 —— 产出的读音错得毫无痕迹，正是「重复/重新/成长」那批
+     多音字校对最要防的事。宁可响，也不要静默地错。 */
+  const vetted = Array.isArray(vettedReadings) && vettedReadings.length > 0;
+  if (vetted && vettedReadings.length !== arr.length) {
+    console.warn(`[questions] 人工注音长度不符（${vettedReadings.length} ≠ ${arr.length}），已忽略：${String(text).slice(0, 20)}…`);
+  }
+  const useVetted = vetted && vettedReadings.length === arr.length;
+  const readings = useVetted ? [] : tokenizeWithPinyin(text).flatMap(block => block.chars);
   return arr.map((ch, i) => {
     if (isPunct(ch)) {
       return { ch, pinyin: '', syl: null, punct: true, unknown: false };
     }
-    const py = Array.isArray(vettedReadings) && vettedReadings.length === arr.length
+    const py = useVetted
       ? vettedReadings[i] : (readings[i] ? readings[i].pinyin : '');
     if (!py || !splitSyllable(py).length) {
       // 未收录或无法拆分：标记为 unknown，引擎会跳过

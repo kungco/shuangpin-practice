@@ -1459,6 +1459,32 @@ console.log('【新增】训练阶段、分类筛选、自适应续练与模式�
   ok(q('#statCards').textContent.includes(`${onlyPhrase.length}`) && q('#statsMode').value === 'phrase', '统计可按词组模式查看');
 }
 
+console.log('【新增】会话用时与反应时间同源、切回前台结算、统计口径说明');
+{
+  const cleanup = () => { if (app.engine) app.engine.destroy(); app.engine = null; app.sessionActive = false; };
+  cleanup();
+  // 统计页的新说明节点存在，且在加权均值与算术平均一致时不显示
+  fire(q('[data-view="stats"]'), 'click');
+  ok(!!q('#chartAvgNote'), '曲线页有均值口径说明节点');
+
+  cleanup();
+  fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char'), 'click');
+  app.settings.trainingPolicy = 'progressive';
+  app.settings.charTier = 'progressive';
+  q('#selCount').value = '0'; fire(q('#selCount'), 'change');
+  app.settings.duration = 0;
+  fire(q('#btnStart'), 'click');
+  ok(!!app.engine, '自适应练习已启动');
+  const eng = app.engine;
+  // 标签页被节流 10 分钟后回到前台：一次结算不能把 600 秒整段吞进用时
+  const before = eng.activeSeconds();
+  eng._lastTickAt = Date.now() - 600000;
+  eng.syncActiveTime();
+  const added = eng.activeSeconds() - before;
+  ok(added > 0 && added <= 5.5, `切回前台只结算最多 5 秒，实际 ${added.toFixed(1)}s`);
+  cleanup();
+}
+
 /* ---------- 收尾 ---------- */
 console.log('\n【13】最终检查');
 ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);

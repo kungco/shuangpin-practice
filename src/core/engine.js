@@ -42,6 +42,25 @@ import {
 import { isPunct } from './questions.js';
 import { createTraining, observeTraining } from './training.js';
 
+/**
+ * 两次计时结算之间允许的最大间隔（秒）。
+ *
+ * 【为什么必须共用一个上限】引擎里有两个时间口径：elapsedSec（会话用时，
+ * 速度的分母）和 activeSeconds()（尚未结算的零头，反应时间的来源）。
+ * 历史上前者由 ticker 无上限累加、后者卡 5 秒，于是「后台挂起 5 分钟」这种
+ * 场景会走成两套答案：ticker 先跑的话 elapsedSec 直接 +300，下一个
+ * _unitStartedAt → activeSeconds() 的差值就是 300 秒，5 秒上限形同虚设，
+ * 那个样本会把自适应档位静默降下去。结算顺序取决于两个回调谁先触发，
+ * 所以这不是「概率问题」而是「行为不确定」。
+ *
+ * 反过来，无条件卡上限也会错：正常思考时两次 tick 只差 0.25 秒，
+ * 只有标签页被节流（后台/遮挡窗口）、或主线程被长任务卡住时才会超过 5 秒
+ * —— 那段时间用户并没有在练，不该计入。
+ *
+ * 所以：ticker、activeSeconds()、finish()、pause() 全部走这一个常量。
+ */
+const MAX_IDLE_GAP_SEC = 5;
+
 /* 默认提示时间线（毫秒）。可在 config 里覆盖；设为 0 即关闭该级提示。 */
 export const HINT_DEFAULTS = {
   hintDelayMs: 3000,     // 停留多久开始闪键位
@@ -235,8 +254,7 @@ export class PracticeEngine {
 
   pause() {
     if (this.state !== STATE.RUNNING) return this;
-    this.elapsedSec = this.activeSeconds();
-    this._lastTickAt = Date.now();
+    this.syncActiveTime();
     this.state = STATE.PAUSED;
     this._stopTicker();
     this._clearHintTimer();
@@ -268,11 +286,7 @@ export class PracticeEngine {
     // 把「最后一次 tick 之后的零头」补进用时。
     // 计时器每 250ms 才跳一次，若用户刚好在两次 tick 之间打完最后一题，
     // 直接结束会让用时偏少（极端情况下为 0），速度指标失真。
-    if (this.state === STATE.RUNNING && this._lastTickAt) {
-      const tail = Math.max(0, (Date.now() - this._lastTickAt) / 1000);
-      // 上限 5 秒，避免从暂停/后台切回时把休眠时间也算进去
-      this.elapsedSec += Math.min(tail, 5);
-    }
+    if (this.state === STATE.RUNNING) this.syncActiveTime();
     this._stopTicker();
     this._clearHintTimer();
     this.state = STATE.FINISHED;
@@ -295,7 +309,8 @@ export class PracticeEngine {
     this._ticker = timers.set(() => {
       try {
         const now = Date.now();
-        const delta = Math.max(0, (now - this._lastTickAt) / 1000);
+        // 与 activeSeconds() 共用同一上限，避免两套时钟口径分叉。
+        const delta = Math.min(MAX_IDLE_GAP_SEC, Math.max(0, (now - this._lastTickAt) / 1000));
         this._lastTickAt = now;
         if (this.state !== STATE.RUNNING) return;
         this.elapsedSec += delta;
@@ -973,10 +988,17 @@ export class PracticeEngine {
       return;
     }
 
-    // Already queued questions may belong to the previous adaptive tier.
+    /* Already queued questions may belong to the previous adaptive tier.
+       换题时必须把被顶掉的那道题的字符标记还回「未用」集合：
+       生成器是靠 pickUnused 打标记来保证一轮全覆盖的，直接丢弃会让那个字
+       整场都不出现 —— 七档来回切几次，题库的覆盖承诺就漏成筛子。 */
     if (this.adaptive && this.currentQuestion()?.meta?.tier !== this.training.tier && this.questionSource) {
+      const displaced = this.questions[this.index];
       const next = this.questionSource({ count: 1, adaptiveTier: this.training.tier, weakBoost: false });
-      if (next?.length) this.questions[this.index] = next[0];
+      if (next?.length) {
+        this.questions[this.index] = next[0];
+        try { this.questionSource.releaseQuestion?.(displaced); } catch (err) { console.error('[engine] 归还被替换题目失败', err); }
+      }
     }
     // 新题目的起始位置：若开头是标点/无拼音字符，直接跳过
     const q = this.currentQuestion();
@@ -1142,9 +1164,24 @@ export class PracticeEngine {
   /** 导出可续练的现场 */
   assistanceLevel() { return this.examMode ? 2 : this.training.stage; }
 
+  /** 自上次结算以来「仍在练习」的时间。节流/休眠按 MAX_IDLE_GAP_SEC 截断。 */
+  _pendingSeconds() {
+    if (this.state !== STATE.RUNNING || !this._lastTickAt) return 0;
+    return Math.min(MAX_IDLE_GAP_SEC, Math.max(0, (Date.now() - this._lastTickAt) / 1000));
+  }
+
   activeSeconds() {
-    return this.elapsedSec + (this.state === STATE.RUNNING && this._lastTickAt
-      ? Math.min(5, Math.max(0, (Date.now() - this._lastTickAt) / 1000)) : 0);
+    return this.elapsedSec + this._pendingSeconds();
+  }
+
+  /**
+   * 把「上次结算之后的零头」并入 elapsedSec 并重置基准。
+   * 暂停、交卷、页面切后台都走这里，保证用时和反应时间永远同源。
+   */
+  syncActiveTime() {
+    this.elapsedSec = this.activeSeconds();
+    this._lastTickAt = Date.now();
+    return this.elapsedSec;
   }
 
   exportResume() {

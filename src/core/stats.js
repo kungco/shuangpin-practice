@@ -33,19 +33,34 @@ export function summarize(history) {
   let totalSeconds = 0;
   let bestSpeed = 0;
   let bestAccuracy = 0;
-  let speedSum = 0;
-  let accSum = 0;
+  let speedSum = 0;      // Σ(速度 × 时长)
+  let accSum = 0;        // Σ(正确率 × 字数)
+  let speedWeight = 0;   // Σ 时长，即 speedSum 的权重和
+  let accWeight = 0;     // Σ 字数，即 accSum 的权重和
   let lastTs = 0;
 
   for (const r of list) {
-    totalChars += num(r.totalChars);
-    totalSeconds += num(r.durationSec);
+    const dur = num(r.durationSec);
+    const chars = num(r.totalChars);
+    totalChars += chars;
+    totalSeconds += dur;
     bestSpeed = Math.max(bestSpeed, num(r.speed));
     bestAccuracy = Math.max(bestAccuracy, num(r.accuracy));
-    speedSum += num(r.speed) * num(r.durationSec);
-    accSum += num(r.accuracy) * num(r.totalChars);
+    speedSum += num(r.speed) * dur;
+    speedWeight += dur;
+    accSum += num(r.accuracy) * chars;
+    accWeight += chars;
     lastTs = Math.max(lastTs, num(r.ts));
   }
+
+  /* 加权均值的权重来自记录自身，所以「权重全为 0」只可能是因为这批记录
+     缺 durationSec / totalChars（老版本写入的数据）。这种情况下加权分母
+     为 0，直接返回 0 会让总览凭空掉到零分 —— 那比口径不精确严重得多。
+     退回无权重算术平均，至少数字还在（也仍与旧版本行为一致）。 */
+  const avgSpeed = speedWeight > 0 ? speedSum / speedWeight
+    : list.reduce((s, r) => s + num(r.speed), 0) / list.length;
+  const avgAccuracy = accWeight > 0 ? accSum / accWeight
+    : list.reduce((s, r) => s + num(r.accuracy), 0) / list.length;
 
   // 连续练习天数
   const daySet = new Set(list.map(r => r.date).filter(Boolean));
@@ -59,8 +74,8 @@ export function summarize(history) {
     totalChars,
     totalSeconds,
     bestSpeed: round1(bestSpeed),
-    avgSpeed: totalSeconds > 0 ? round1(speedSum / totalSeconds) : 0,
-    avgAccuracy: totalChars > 0 ? round1(accSum / totalChars) : 0,
+    avgSpeed: round1(avgSpeed),
+    avgAccuracy: round1(avgAccuracy),
     bestAccuracy: round1(bestAccuracy),
     streakDays: computeStreak(daySet),
     totalDays,
@@ -127,10 +142,19 @@ export function historySeries(opts = {}) {
   const values = points.map(p => p.value);
   const min = values.length ? Math.min(...values) : 0;
   const max = values.length ? Math.max(...values) : 0;
+  /* 均值走 summarize()，与总览卡片同一口径（速度按时长加权、正确率按字数
+     加权）。注意它**不等于**各点的算术平均：一条 1 秒的练习和一条 10 分钟的
+     练习权重不同，曲线上的点仍是每轮原始值。所以图上那条均值线看起来
+     「对不上」是正常的，avgWeighted 会让 UI 如实说明，别让人以为是 bug。 */
   const summary = summarize(trimmed);
   const avg = metric === 'acc' ? summary.avgAccuracy : summary.avgSpeed;
+  const plainAvg = values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
 
-  return { points, min, max, avg: round1(avg), metric };
+  return {
+    points, min, max, avg: round1(avg), metric,
+    avgWeighted: true,
+    plainAvg: round1(plainAvg)
+  };
 }
 
 /**
@@ -138,14 +162,49 @@ export function historySeries(opts = {}) {
  * @param {number} days 最近多少天（默认 14）
  */
 export function dailySeries(days = 14, mode = 'all') {
-  // Use the same retained history for overview, trends and daily totals.
+  /* 数据源：优先用日报（loadDaily），回落到保留的成绩记录。
+   *
+   * 为什么不能只读 loadHistory()：成绩记录上限 2000 条（storage.js），
+   * 日报却是按天长期累积的。只读历史的话，2000 条一过，最早那些天的
+   * 每日练习量会静默变成 0 —— 数据没丢（还在日报里），但图表不再显示它，
+   * 用户只会以为那天没练过。 */
+  const fromDaily = loadDaily();
   const daily = {};
-  for (const rec of loadHistory().filter(r => mode === 'all' || r.mode === mode)) {
-    const day = daily[rec.date] ||= { chars: 0, sessions: 0, durationSec: 0, bestSpeed: 0, speedSum: 0 };
-    day.chars += num(rec.totalChars); day.sessions++;
-    day.durationSec += num(rec.durationSec);
+  const touch = date => daily[date] ||= {
+    chars: 0, sessions: 0, durationSec: 0, bestSpeed: 0,
+    speedSecSum: 0,   // Σ(速度 × 时长)，按模式过滤时才有
+    speedSum: 0      // Σ速度，日报口径（跨模式，无法加权）
+  };
+
+  /* ① 日报优先：它按天长期累积，覆盖范围比成绩记录更早。 */
+  if (mode === 'all') {
+    for (const [date, rec] of Object.entries(fromDaily)) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !rec || typeof rec !== 'object') continue;
+      const day = touch(date);
+      day.chars = num(rec.chars);
+      day.sessions = num(rec.sessions);
+      day.durationSec = num(rec.durationSec);
+      day.bestSpeed = num(rec.bestSpeed);
+      day.speedSum = num(rec.speedSum);
+    }
+  }
+
+  /* ② 成绩记录补漏：只处理日报里没有的那几天，否则会重复计数
+     （日报本身就是从同一批成绩记录累加出来的）。
+     日报那天若写入曾失败，宁可少算也不与日报叠加 —— 宁可保守，
+     不要把同一天算成两倍。
+     按模式过滤时日报没有模式维度，全部走这条路径。 */
+  for (const rec of loadHistory()) {
+    if (mode !== 'all' && rec.mode !== mode) continue;
+    if (!rec.date) continue;
+    if (fromDaily[rec.date] && mode === 'all') continue;
+    const day = touch(rec.date);
+    const dur = num(rec.durationSec);
+    day.chars += num(rec.totalChars);
+    day.sessions += 1;
+    day.durationSec += dur;
     day.bestSpeed = Math.max(day.bestSpeed, num(rec.speed));
-    day.speedSum += num(rec.speed) * num(rec.durationSec);
+    day.speedSecSum += num(rec.speed) * dur;
   }
   const n = Math.max(1, Math.min(365, Number(days) || 14));
   const out = [];
@@ -168,7 +227,12 @@ export function dailySeries(days = 14, mode = 'all') {
       sessions: rec ? num(rec.sessions) : 0,
       durationSec: rec ? num(rec.durationSec) : 0,
       bestSpeed: rec ? num(rec.bestSpeed) : 0,
-      avgSpeed: rec && num(rec.durationSec) > 0 ? round1(num(rec.speedSum) / num(rec.durationSec)) : 0
+      // 按模式过滤时用时长加权（与总览同口径）；全模式走日报，
+      // 那里只存了 Σ速度，除以场次即其原本的口径。
+      avgSpeed: rec
+        ? round1(num(rec.speedSecSum) > 0 ? num(rec.speedSecSum) / num(rec.durationSec)
+          : num(rec.sessions) > 0 ? num(rec.speedSum) / num(rec.sessions) : 0)
+        : 0
     });
   }
   return out;
