@@ -156,6 +156,43 @@ for (const [sm, py, code] of [['zh', 'zhang', 'VH'], ['ch', 'chun', 'IY'], ['sh'
   console.log(`  全量题库音节均为 2 键（zh/ch/sh 也只占一键）`);
 }
 
+console.log('【4d】ü 行韵母的归一化（jue/que/xue/yue → ve，但 yu 保持 u）');
+{
+  /* 回归背景：canonicalYunmu 曾只处理 j/q/x，漏了 y，
+     于是 yue 的韵母留在「ue」而 jue/que/xue 都成了「ve」。
+     编码碰巧都是 YT（ue 与 ve 同映射 T 键），练习判定不受影响，
+     但 buildResult() 产出的 text（如「y+ue → YT」）会直接显示在界面上 ——
+     同一屏里 jue 说「j+ve」、yue 说「y+ue」，对正在学规则的人是误导。
+
+     第二组断言锁定边界：yu 的韵母在全拼里本来就写作 u，
+     不是 ü 的省略形式，绝不能跟着一起变成 v。 */
+  const yun = py => (splitSyllable(py)[0] || {}).yun;
+  const code = py => (splitSyllable(py)[0] || {}).code;
+
+  for (const py of ['jue', 'que', 'xue', 'yue']) {
+    ok(yun(py) === 've', `${py} 的韵母应归一化为 ve，实际 ${yun(py)}`);
+  }
+  for (const py of ['ju', 'qu', 'xu']) {
+    ok(yun(py) === 'v', `${py} 的韵母应为 v，实际 ${yun(py)}`);
+  }
+  // 边界：这三个的 u 是「真 u」，不能变成 v
+  ok(yun('yu') === 'u', `yu 的韵母必须是 u（不是 v），实际 ${yun('yu')}`);
+  ok(yun('yun') === 'un', `yun 的韵母必须是 un，实际 ${yun('yun')}`);
+  ok(yun('jun') === 'un', `jun 的韵母必须是 un，实际 ${yun('jun')}`);
+
+  // 编码是既成事实，修复前后都不该变
+  const CODES = { jue: 'JT', que: 'QT', xue: 'XT', yue: 'YT', ju: 'JV', qu: 'QV', xu: 'XV', yu: 'YU' };
+  for (const [py, want] of Object.entries(CODES)) {
+    ok(code(py) === want, `${py} 编码应为 ${want}，实际 ${code(py)}`);
+  }
+
+  // 拆分说明文本：四个同规则音节必须呈现同一种写法
+  const texts = ['jue', 'que', 'xue', 'yue'].map(py => splitSyllable(py)[0].text);
+  ok(texts.every(t => t.includes('ve')), `jue/que/xue/yue 的拆分说明应统一含 ve：${texts.join('｜')}`);
+
+  console.log(`  jue/que/xue/yue → ve 已统一；yu / yun / jun 保持 u / un`);
+}
+
 console.log('【4b】L1 声母专项题：zh/ch/sh 必须是单键');
 {
   /* 回归：曾把 zh/ch/sh 的 L1 答案写成 VH / IH / UH（多一个 H），

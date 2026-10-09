@@ -1399,7 +1399,7 @@ export class PracticeEngine {
     };
   }
 
-  /** 导出可续练的现场 */
+  /** 当前提示档位：0 完整提示 / 1 只显示拼音 / 2 独立输入。测验模式恒为 2。 */
   assistanceLevel() { return this.examMode ? 2 : this.training.stage; }
 
   /** 自上次结算以来「仍在练习」的时间。节流/休眠按 MAX_IDLE_GAP_SEC 截断。 */
@@ -1422,6 +1422,14 @@ export class PracticeEngine {
     return this.elapsedSec;
   }
 
+  /**
+   * 导出可续练的现场。
+   *
+   * 与 summarize() 的分工：那个是「这一轮结果」（结算页展示、落库），
+   * 这个是「还没做完的进度」（`_resume` 槽位，下次进来接着打）。
+   * 注意 elapsedSec 取 activeSeconds() 而非 this.elapsedSec —— 后者只是
+   * 上一次结算时的值，还要补上尚未结算的零头，否则续练会丢掉最后那一段。
+   */
   exportResume() {
     return {
       training: this.trainingEnabled ? this.training : null,

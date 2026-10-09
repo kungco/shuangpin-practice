@@ -1,6 +1,6 @@
 /**
  * 题库扩充生成器（构建期工具，不参与运行时）
- * 运行：node _test/gen_expand.mjs [--write]
+ * 运行：node _test/tools/gen_expand.mjs [--write]
  *
  * 职责：
  *   1. 装载「候选扩充内容」（人工撰写，见下方 NEW_* 常量）
@@ -12,10 +12,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { splitSyllable } from '../src/core/scheme.js';
-import { ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS } from '../src/data/pinyin.js';
+import { splitSyllable } from '../../src/core/scheme.js';
+import { ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS } from '../../src/data/pinyin.js';
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DATA = resolve(root, 'src/data/pinyin.js');
 const WRITE = process.argv.includes('--write');
 

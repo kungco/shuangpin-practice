@@ -89,8 +89,6 @@ export const ZERO_INITIAL_YUNMU = [
   'a', 'o', 'e', 'ai', 'ei', 'ao', 'ou', 'an', 'en', 'ang', 'eng', 'er'
 ];
 
-/* 零声母规则：拼音以这些韵母开头时，双拼编码为「首字母 + 韵母键」 */
-
 /* ============================================================
    构建索引
    ============================================================ */
@@ -165,17 +163,26 @@ export function normalizeYunmu(y) {
 /**
  * 全拼韵母 → 双拼韵母（处理全拼中的缩写形式）
  * 全拼中 ju/qu/xu/yu 后的 u 实际是 ü；wen 实际是 uen；等
+ *
+ * 【为什么 j/q/x 和 y 要分开处理】
+ * 全拼的书写规则是：ü 行韵母在 j/q/x/y 之后省略两点写成 u。
+ * 但「省略」的力度在两类声母上不同：
+ *   - j/q/x：üe 写成 ue，ü 写成 u —— 两者都要还原成 ve / v
+ *     （jue → j+ve、ju → j+v）
+ *   - y：**只有** üe 还原成 ve（yue → y+ve）；
+ *     而 yu 的韵母在全拼里本来就写作 u（不是 ü 的省略形式），
+ *     还原成 v 反而错（yu 应为 y+u，不是 y+v）。
+ * 所以这里只给 y 补 ue → ve 一条，绝不能把 y 并进上面那个数组 ——
+ * 那会让 yu 变成 yv。
  */
 function canonicalYunmu(sheng, yun) {
   let y = normalizeYunmu(yun);
-  // j/q/x/y + u → v
-  if (['j', 'q', 'x', 'y'].includes(sheng) && y.startsWith('u') && !y.startsWith('ue') === false) {
-    // 处理 jue/que/xue/yue：ue → ve；ju/qu/xu/yu：u → v
-  }
   if (['j', 'q', 'x'].includes(sheng)) {
     if (y === 'u') y = 'v';
     else if (y === 'ue') y = 've';
-    else if (y === 'un') y = 'un'; // jun/qun/xun 的 un 就是 un
+    // jun/qun/xun 的 un 就是 un，无需归一化
+  } else if (sheng === 'y' && y === 'ue') {
+    y = 've';
   }
   // 全拼里的 iou/uei/uen 缩写为 iu/ui/un，这里保持缩写（与韵母表一致）
   if (y === 'iou') y = 'iu';
@@ -385,7 +392,15 @@ export function isPrefixValid(syl, typed) {
 }
 
 /**
- * 一个音节最少需要几次按键（zh/ch/sh 为 3，其余为 2）
+ * 一个音节最少需要几次按键。
+ *
+ * 【恒为 2】小鹤里每个音节都是 2 键：zh/ch/sh 各占**一个**键
+ * （V/I/U），不额外加 H；零声母音节同样是「首字母 + 韵母键」两键。
+ * 所以返回值实际恒为 2，保留 Math.min 只是为了让「多候选拆分」的
+ * 语义在代码里显式可见。
+ *
+ * 历史上这里的注释写的是「zh/ch/sh 为 3」，那是「zh = Z + H」的旧认知 ——
+ * 与 SHENGMU_KEY_SEQ 的注释、README「关于键位」一节正好相反，别被它带偏。
  */
 export function minKeystrokes(syl) {
   if (!syl || !syl.candidates || !syl.candidates.length) return 0;

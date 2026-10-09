@@ -1,19 +1,24 @@
 /**
  * 用 headless Chrome + CDP 驱动页面截图（开发期视觉验证）
  * ------------------------------------------------------------
- * 用法：node _test/shot.mjs <url> <out.png> [width] [height] [script-file]
+ * 用法：node _test/tools/shot.mjs <url> <out.png> [width] [height] [script-file]
  *   - 若给了 script-file（一段 JS 表达式/语句），会在截图前注入执行，
  *     便于切到指定视图、模拟按键等。
  */
 import { spawn } from 'node:child_process';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+const CHROME = process.env.CHROME_PATH
+  || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const [url, out, w = '1240', h = '900', scriptFile] = process.argv.slice(2);
 const PORT = 9333;
 
-const userDir = 'E:/gongzuo/2026-10-07-17-40-28/_test/.chrome-profile';
+/* 临时 profile 目录放在脚本自己身边（与 .gitignore 的 _test/.chrome-profile/ 对齐）。
+   早期这里硬编码了另一个工作区的绝对路径，换台机器 / 换个 clone 位置就失效。 */
+const userDir = resolve(dirname(fileURLToPath(import.meta.url)), '.chrome-profile');
 
 const chrome = spawn(CHROME, [
   '--headless=new',

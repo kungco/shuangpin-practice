@@ -4,7 +4,7 @@
   "private": true,
   "description": "小鹤双拼打字练习器。应用本体零依赖、零构建，这个文件的作用见下方 type 字段的说明。",
   "type": "module",
-  "说明": "这一行是必需的，不是配置偏好。测试脚本用 import 加载 src/ 下的 ES 模块，而 src/ 在 _test/ 之外——从 src/data/pinyin.js 往上找不到任何 package.json 时，Node 会按 CommonJS 处理它，于是「命名导出不存在」。Node 24 有 ESM 语法自动探测会兜住这个坑，Node 18/20 不会。应用本体在浏览器里跑（<script type=\"module\">），不读这个文件；它只服务于 Node 侧的自检脚本。",
+  "//": "type:module 是必需的，不是配置偏好 —— 原因见 README「自检」一节：测试脚本用 import 加载 src/ 下的 ES 模块，而 src/ 在 _test/ 之外，找不到声明时 Node 18/20 会按 CommonJS 解析并报「命名导出不存在」。应用本体在浏览器里跑，不读这个文件。",
   "scripts": {
     "test": "npm --prefix _test test"
   },

@@ -6,10 +6,13 @@
 # 它们锁定了依赖版本，保证本地 / CI 装出同一棵树。只忽略装好的目录。
 _test/node_modules/
 
-# 视觉验证时 headless Chrome 的临时配置目录
+# 视觉验证（tools/shot.mjs）的产物：
+#   - 临时 Chrome profile 落在 _test/.chrome-profile/（脚本按自身位置解析，
+#     不再硬编码绝对路径，所以这里能对上）
+#   - 截图与注入脚本可能落在 _test/ 或 _test/tools/ 下
 _test/.chrome-profile/
-_test/shot-*.png
-_test/inj-*.js
+_test/**/shot-*.png
+_test/**/inj-*.js
 # 根目录下做截图注入用的临时脚本（shot.mjs 的 script-file 参数）
 .shot-*.js
 shot-*.png

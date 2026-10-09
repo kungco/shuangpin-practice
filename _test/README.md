@@ -18,7 +18,9 @@
 > 且不引入 linkedom —— 它们测的模块本身不碰 DOM（`announce` 查不到节点会安全返回，
 > 音效无 WebAudio 会静默降级）。适合改对应代码时高频单跑。
 
-另有四个**开发辅助**脚本（属于工具，非测试）：
+另有几个**开发辅助**脚本（属于工具，非测试）。
+
+**服务器**（与自检脚本同放在 `_test/` 根目录，因为它们被启动脚本直接调用）：
 
 - `serve.mjs` —— 零依赖静态服务器，给 headless Chrome / 人工预览用。**别用
   `python -m http.server` 后台跑** —— 那个进程会随父 shell 一起被回收，
@@ -35,11 +37,7 @@
   > 会按系统 ANSI（简中环境即 GBK）解码，中文注释变成乱码后可能「吞掉」换行和引号，
   > 报错却指向完全不相干的行（典型症状：`表达式或语句中包含意外的标记"}"`）。
   > `.gitattributes` 里已声明 `*.ps1 text eol=crlf`，BOM 作为内容字节随文件一起提交。
-- `shot.mjs` —— headless Chrome + CDP 截图工具，用于视觉验证。
-  用法：`node _test/shot.mjs <url> <out.png> [width] [height] [script-file]`，
-  可选 `script-file` 会在截图前注入执行（切视图 / 模拟按键）。
-  注意两点：环境里有代理，必须带 `--no-proxy-server`；用
-  `--force-device-scale-factor=2` 才能看清细节。
+- `probe-service.ps1` —— 探测 8781 端口上是否已有本应用的服务在跑。
 - `make_lnk.py` —— 手写 Shell Link（MS-SHLLINK）二进制格式生成 Windows 快捷方式。
   之所以不用 `WScript.Shell.CreateShortcut()`，是因为当前环境的安全策略禁止 COM 实例化。
   用法：
@@ -48,13 +46,15 @@
   python _test/make_lnk.py <目标.lnk> <目标程序> [参数] [工作目录] [描述] [图标]
   ```
 
-下面三个是**题库体检 / 维护**脚本（同样属于工具）：
+**`_test/tools/`** —— 构建期 / 维护期工具。它们**不参与** `npm test`，
+也不被应用运行时引用；放在子目录里是为了让「哪七个是我该跑的」一眼可辨。
 
-- `_audit_bank.mjs` —— 题库体检报告：规模统计、拼音映射质量、韵母键覆盖率、
-  词组/短文的字覆盖闭合性、拼音重复度。**改动题库后建议跑一次**，
-  它会直接指出「哪些字只在词组里出现却练不到」这类不一致。
-- `dedupe_chars.mjs` —— 生成期去重工具。
-- `gen_expand.mjs` —— 早期批量扩充题库的生成器（已用过，保留备查）。
+| 工具 | 用途 |
+|---|---|
+| `tools/audit_bank.mjs` | 题库体检报告：规模统计、拼音映射质量、韵母键覆盖率、词组/短文的字覆盖闭合性、拼音重复度。**改动题库后建议跑一次**，它会直接指出「哪些字只在词组里出现却练不到」这类不一致。 |
+| `tools/dedupe_chars.mjs` | 单字表跨档去重。`--write` 才会写盘。 |
+| `tools/gen_expand.mjs` | 题库扩充生成器：逐条校验候选内容（可拆分 / 无大写 / 字数对应 / 无重复 / 短文用字全覆盖），任何一条不过就整体失败。`--write` 才会写盘。 |
+| `tools/shot.mjs` | headless Chrome + CDP 截图工具，用于视觉验证。用法：`node _test/tools/shot.mjs <url> <out.png> [width] [height] [script-file]`，可选 `script-file` 会在截图前注入执行（切视图 / 模拟按键）。注意两点：环境里有代理，必须带 `--no-proxy-server`；用 `--force-device-scale-factor=2` 才能看清细节。临时 profile 落在 `_test/.chrome-profile/`（已 gitignore）；Chrome 不在默认路径时可用 `CHROME_PATH` 环境变量指定。 |
 
 ## 运行
 

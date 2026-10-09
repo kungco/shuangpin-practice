@@ -300,7 +300,10 @@ function makePartQuestion(part, usedPinyin) {
   const picked = primarySplit(py);
   if (!picked) return makeFallbackCharQuestion();
 
-  const stepIndex = wantSheng ? 0 : (picked.zero ? 1 : 1);
+  /* 声母是第 0 步；韵母在第 1 步 —— 零声母也一样。
+     零声母的两步是 [首字母, 韵母]（见 scheme.js 的 buildResult），
+     所以韵母同样落在下标 1，这里不需要分支。 */
+  const stepIndex = wantSheng ? 0 : 1;
   const step = picked.steps[stepIndex] || picked.steps[0] || {};
   const cname = wantSheng ? (picked.sheng || '') : (picked.yun || '');
 

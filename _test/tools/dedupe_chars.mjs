@@ -1,6 +1,6 @@
 /**
  * 单字表去重（构建期一次性工具）
- * 运行：node _test/dedupe_chars.mjs [--write]
+ * 运行：node _test/tools/dedupe_chars.mjs [--write]
  *
  * 背景：原 CHARS_TIER1–5 存在 36 处跨档重复（同一字出现在两个档位）。
  *       ALL_CHARS 用 Object.assign 合并，结果本身正确（拼音一致），
@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DATA = resolve(root, 'src/data/pinyin.js');
 const WRITE = process.argv.includes('--write');
 

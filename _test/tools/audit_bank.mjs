@@ -4,10 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const root = resolve(here, '..');
+const root = resolve(here, '..', '..');
 
-const D = await import(new URL('../src/data/pinyin.js', import.meta.url).href);
-const S = await import(new URL('../src/core/scheme.js', import.meta.url).href);
+const D = await import(new URL('../../src/data/pinyin.js', import.meta.url).href);
+const S = await import(new URL('../../src/core/scheme.js', import.meta.url).href);
 
 const {
   CHARS_TIER1, CHARS_TIER2, CHARS_TIER3, CHARS_TIER4, CHARS_TIER5, CHARS_TIER6, CHARS_TIER7,
