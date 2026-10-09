@@ -307,6 +307,12 @@ export const DEFAULT_SETTINGS = {
      上限 20000 字（见 clampText），足够一整章小说，
      再长会把 localStorage 撑爆。 */
   customText: '',
+  /* 语音朗读。默认关闭，理由与音效相同（打字练习本来就有环境音）。
+     打开后，「只听声母 / 只听韵母」会真正朗读音节 ——
+     没有中文语音包的机器上会自动降级并如实告知，不会变成哑巴按钮。 */
+  speech: false,
+  /* 朗读语速。教学场景略慢于常速，0.85 是「听得清」与「不拖沓」的折中。 */
+  speechRate: 0.85,
   /* 快捷键。对象在 loadSettings 里单独处理（不是标量），
      合并/校验逻辑见 ui/a11y.js::mergeShortcuts */
   shortcuts: null
@@ -368,6 +374,8 @@ export function loadSettings() {
   merged.dailyGoalChars = clampInt(merged.dailyGoalChars, 0, 1000000);
   merged.dailyGoalSessions = clampInt(merged.dailyGoalSessions, 0, 100);
   merged.customText = clampText(merged.customText);
+  // 语速夹到 [0.5, 2]：低于 0.5 慢到失真，高于 2 听不清声母
+  merged.speechRate = clampNum(merged.speechRate, 0.5, 2, 0.85);
   return merged;
 }
 
@@ -394,6 +402,13 @@ function clampText(v) {
   return arr.length > 20000 ? arr.slice(0, 20000).join('') : v;
 }
 
+/** 小数夹取；非有限数回落 fallback（与 clampInt 同属「把脏值挡在门外」） */
+function clampNum(v, lo, hi, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(lo, Math.min(hi, n));
+}
+
 export function saveSettings(settings) {
   const safe = Object.assign({}, DEFAULT_SETTINGS);
   if (settings && typeof settings === 'object') Object.assign(safe, settings);
@@ -402,6 +417,7 @@ export function saveSettings(settings) {
   safe.dailyGoalChars = clampInt(safe.dailyGoalChars, 0, 1000000);
   safe.dailyGoalSessions = clampInt(safe.dailyGoalSessions, 0, 100);
   safe.customText = clampText(safe.customText);
+  safe.speechRate = clampNum(safe.speechRate, 0.5, 2, 0.85);
   return writeJSON(KEYS.settings, safe);
 }
 

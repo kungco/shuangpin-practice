@@ -70,7 +70,10 @@ function keyData() {
  *   - showDetail: 是否在键内显示韵母明细（默认 true）
  *   - heat: 热力图数据 [{key, level, percent, count}]。给了就切到「热力模式」：
  *           键底按 level 上色，并叠一个百分比数字。热力模式下不淡出其它键。
- * @returns {{ setHighlight(list): void, clear(): void, setHeat(list): void, clearHeat(): void, destroy(): void }}
+ * @returns {{ setHighlight(list): void, clear(): void, setHeat(list): void,
+ *             clearHeat(): void, setSlow(list): void, clearSlow(): void,
+ *             setMastery(list): void, clearMastery(): void, repaint(): void,
+ *             destroy(): void }}
  */
 export function renderKeymap(container, opts = {}) {
   if (!container) return makeNoop();
@@ -108,6 +111,7 @@ export function renderKeymap(container, opts = {}) {
      不用给每个环单独塞一遍样式变量。 */
   let lastHeat = null;
   let lastSlow = null;
+  let lastMastery = null;
   let lastHighlight = null;
 
   /**
@@ -125,6 +129,7 @@ export function renderKeymap(container, opts = {}) {
   function repaint() {
     if (lastHeat) this.setHeat(lastHeat);
     if (lastSlow) this.setSlow(lastSlow);
+    if (lastMastery) this.setMastery(lastMastery);
     if (lastHighlight) this.setHighlight(lastHighlight);
     else clearHighlight();
   }
@@ -254,6 +259,47 @@ export function renderKeymap(container, opts = {}) {
       });
     },
 
+    /**
+     * 应用「掌握度」标记。传入空数组 = 清除。
+     *
+     * 与热力（fill）和慢键（虚线环）都不同：掌握度是一个**离散状态**
+     * （没碰过 / 在练 / 已掌握），不是连续量，所以用 class + 角标表达：
+     *   - 已掌握：键右上角一个小圆点（绿）
+     *   - 没碰过：键整体降饱和度（与「方案里没用到的键」区分开 ——
+     *     那类键在 buildSvg 里已经加了 is-dim，这里叠的是 is-untouched）
+     * 这样三个诊断层能同时出现在一个键上：
+     * 「又错又慢、还没掌握」= 红填充 + 蓝环 + 无圆点，一眼就能看出。
+     *
+     * @param {Array<{key:string, state:'untouched'|'learning'|'mastered'}>} list
+     */
+    setMastery(list) {
+      this.clearMastery();
+      lastMastery = Array.isArray(list) && list.length ? list.slice() : null;
+      if (!lastMastery) return;
+      for (const item of list) {
+        if (!item || !item.key) continue;
+        const K = String(item.key).toUpperCase();
+        const el = keyEls[K];
+        if (!el) continue;
+        const st = String(item.state || 'learning');
+        if (st === 'mastered') {
+          el.classList.add('is-mastered');
+          el.appendChild(masteryDot());
+        } else if (st === 'untouched') {
+          el.classList.add('is-untouched');
+        }
+        // 'learning' 不加额外标记：默认态就是在练，加了反而噪声
+      }
+    },
+
+    clearMastery() {
+      Object.values(keyEls).forEach(el => {
+        el.classList.remove('is-mastered', 'is-untouched');
+        const dot = el.querySelector('.kb-mastery-dot');
+        if (dot && dot.parentNode) dot.parentNode.removeChild(dot);
+      });
+    },
+
     clear() { clearHighlight(); lastHighlight = null; },
 
     repaint,
@@ -292,6 +338,23 @@ export function renderKeymap(container, opts = {}) {
     r.setAttribute('rx', '7');
     r.setAttribute('data-slow-ms', String(Math.round(Number(item.medianMs) || 0)));
     return r;
+  }
+
+  /**
+   * 已掌握小圆点：键右上角一个实心圆。
+   *
+   * 为什么不用「整键变绿」：绿色填充会和热力图的 fill 抢同一个通道，
+   * 「已掌握但又按错过」就画不出来。右上角一个点不占 fill，
+   * 与 red 填充 / 蓝环互不干扰。位置避开主字母（左上）与声母（右上偏中点，
+   * 见 buildKey），放在最右上、半径 5。
+   */
+  function masteryDot() {
+    const c = document.createElementNS(SVG_NS, 'circle');
+    c.setAttribute('class', 'kb-mastery-dot');
+    c.setAttribute('cx', String(KEY_W - 8));
+    c.setAttribute('cy', '8');
+    c.setAttribute('r', '4.6');
+    return c;
   }
 
   function clearHighlight() {
@@ -440,6 +503,9 @@ function makeNoop() {
   return {
     setHighlight() {}, clear() {},
     setHeat() {}, clearHeat() {},
+    setSlow() {}, clearSlow() {},
+    setMastery() {}, clearMastery() {},
+    repaint() {},
     destroy() {}
   };
 }

@@ -375,3 +375,169 @@ for (const count of [500, 5000]) {
   assert.equal(generateQuestions({ mode: 'phrase', count }).length, count);
   console.log(`phrase ${count}: ${(performance.now() - started).toFixed(1)} ms`);
 }
+
+/* ⑤ 键位掌握度：没碰过 / 在练 / 已掌握 三态 + 三条判定门槛
+   ------------------------------------------------------------
+   这一层不新增存储，靠 keyTimings（按对的样本）与 keyErrors（按错的次数）
+   合起来推算，所以要验的是「两条数据源确实被正确合并」，以及
+   「慢而准」绝不能被误判成已掌握。 */
+{
+  const { keyMastery } = await import('../src/core/stats.js');
+  store.clear();
+
+  const setTimings = (obj) => store.set(S.KEYS.keyTimings,
+    JSON.stringify({ all: obj, byMode: {}, recent: [] }));
+  const setErrors = (obj) => store.set(S.KEYS.keyErrors,
+    JSON.stringify({ all: obj, byMode: {}, recent: [] }));
+
+  /* 场景一：A 键练得多且从不错、速度正常 → 已掌握。
+     B 键练得多但错误率高 → 在练。C 键从没碰过 → 未接触。
+     D 键练得够多、也从不错，但明显偏慢 → 仍然是「在练」。 */
+  const fast = [], slow = [];
+  for (let i = 0; i < 20; i++) fast.push(200 + (i % 5) * 10);      // 中位数 ~220
+  for (let i = 0; i < 20; i++) slow.push(2000 + (i % 5) * 10);     // 中位数 ~2020
+  setTimings({
+    A: { lead: fast, follow: [] },
+    B: { lead: fast, follow: [] },
+    D: { lead: slow, follow: [] }
+  });
+  setErrors({ B: 8 });   // B：20 对 + 8 错 → 错误率 28.6%，远超 8%
+
+  const m = keyMastery({ range: 'all' });
+  const byKey = Object.fromEntries(m.items.map(i => [i.key, i]));
+
+  assert.equal(byKey.A.state, 'mastered',
+    'A：样本足、零错误、不慢 → 已掌握');
+  assert.equal(byKey.B.state, 'learning',
+    'B：错误率 28.6% 超门槛 → 在练（不能只看样本数）');
+  assert.equal(byKey.B.errors, 8, 'B 的错误次数并入掌握度统计');
+  assert.equal(byKey.B.practice, 28, `B 的练习数 = 对 20 + 错 8（实际 ${byKey.B.practice}）`);
+  assert.equal(byKey.D.state, 'learning',
+    '★ D：20 次全对但每次慢 10 倍 → 仍判「在练」（慢而准不是掌握）');
+  assert.equal(byKey.D.slow, true, 'D 被标记为偏慢');
+
+  // C 从没出现在 timings 或 errors 里 → 未接触（不会凭空出现，需由 UI 补全 26 键）
+  assert.equal(byKey.C, undefined, 'C 未被碰过 → 不在 items 里（由 UI 用全键表补全）');
+
+  // counts 三态合计必须等于 items 长度（不漏不多）
+  const { mastered, learning, untouched } = m.counts;
+  assert.equal(mastered + learning + untouched, m.total,
+    '三态计数之和等于键数');
+
+  /* 场景二：样本不够（< minSamples）即便零错误也只能算「在练」——
+     练 3 次全对不等于掌握，这是防止「掌握度虚高」的关键一条。 */
+  store.clear();
+  setTimings({ E: { lead: [200, 210, 220], follow: [] } });
+  setErrors({});
+  const m2 = keyMastery({ range: 'all' });
+  const e = m2.items.find(i => i.key === 'E');
+  assert.equal(e.state, 'learning', '样本 3 < 门槛 12 → 在练');
+  assert.equal(e.need, 9, `如实给出「再练 9 次」（实际 ${e.need}）`);
+
+  /* 场景三：错误率恰好在门槛上（8%）—— 用「≤」而不是「<」，
+     边界值应算通过，否则「刚好达标」的用户永远差一点。 */
+  store.clear();
+  setTimings({ F: { lead: Array.from({ length: 23 }, () => 200), follow: [] } });
+  setErrors({ F: 2 });   // 23 对 + 2 错 = 25，错误率恰好 8%
+  const f = keyMastery({ range: 'all' }).items.find(i => i.key === 'F');
+  assert.equal(f.errorRate, 0.08, `错误率恰为 8%（实际 ${f.errorRate}）`);
+  assert.equal(f.state, 'mastered', '错误率 8% 恰在门槛上 → 算达标');
+
+  /* 场景四：完全没有数据时不能崩，且 counts 全 0 */
+  store.clear();
+  const m4 = keyMastery({ range: 'all' });
+  assert.equal(m4.items.length, 0, '无数据时 items 为空');
+  assert.deepEqual(m4.counts, { untouched: 0, learning: 0, mastered: 0 },
+    '无数据时三态计数全 0（不出现 NaN）');
+
+  /* 场景五：掌握度必须按模式隔离 —— 与热力图同口径 */
+  store.clear();
+  store.set(S.KEYS.keyTimings, JSON.stringify({
+    all: { A: { lead: Array.from({ length: 20 }, () => 200), follow: [] } },
+    byMode: { phrase: { A: { lead: Array.from({ length: 20 }, () => 200), follow: [] } } },
+    recent: []
+  }));
+  store.set(S.KEYS.keyErrors, JSON.stringify({
+    all: { A: 0 }, byMode: {}, recent: []
+  }));
+  const mPhrase = keyMastery({ range: 'all', mode: 'phrase' });
+  assert.equal(mPhrase.byMode, true, '有该模式专属数据时 byMode=true');
+  const mChar = keyMastery({ range: 'all', mode: 'char' });
+  // char 模式没有专属 timings → 退回全量，byMode 必须如实为 false
+  assert.equal(mChar.byMode, false, '无该模式数据时 byMode=false（供 UI 说明「仍为全量」）');
+
+  /* 场景六（回归）：样本极少的键不得污染「整体中位数」基准。
+     真实踩到过：几个只练过 1 次、恰好很快的键把基准压到 ~120ms，
+     于是所有正常速度（220ms）的键全被判成「慢」，掌握度永远 0。
+     修法是基准只取样本够多的键。这里锁住这个行为。 */
+  store.clear();
+  store.set(S.KEYS.keyTimings, JSON.stringify({
+    all: {
+      // 一个练了 20 次、稳定 220ms 的正常键 —— 应当被判定为「已掌握」
+      G: { lead: Array.from({ length: 20 }, () => 220), follow: [] },
+      // 三个只练了 1 次、恰好极快的键 —— 不得把基准拽低
+      C: { lead: [110], follow: [] },
+      M: { lead: [108], follow: [] },
+      X: { lead: [112], follow: [] }
+    },
+    byMode: {}, recent: []
+  }));
+  store.set(S.KEYS.keyErrors, JSON.stringify({ all: {}, byMode: {}, recent: [] }));
+  const m6 = keyMastery({ range: 'all' });
+  const g6 = m6.items.find(i => i.key === 'G');
+  assert.equal(g6.state, 'mastered',
+    '★ 少样本快键不能把基准拽低、害得正常键永远判不成掌握');
+  assert.ok(m6.slowLine >= 220,
+    `基准线不应被 1 样本键拉到 150 以下（实际 ${m6.slowLine}）`);
+
+  console.log('✓ key mastery merges timings+errors, honours all three gates, and isolates by mode');
+}
+
+/* ⑥ 错题本导出为跟打文本 */
+{
+  const { buildWeakPassage } = await import('../src/core/stats.js');
+
+  const items = [
+    { key: '银行', word: '银行', char: '银', pinyin: 'yin hang', count: 5 },
+    { key: '月', word: '', char: '月', pinyin: 'yue', count: 3 },
+    { key: '双拼', word: '双拼', char: '双', pinyin: 'shuang pin', count: 2 },
+    { key: '银行', word: '银行', char: '银', pinyin: 'yin hang', count: 5 },   // 重复
+    { key: 'abc123', word: 'abc123', char: 'a', pinyin: '', count: 9 },        // 非纯汉字，应剔除
+    { key: '标点。', word: '标点。', char: '标', pinyin: '', count: 4 }         // 带标点，应剔除
+  ];
+
+  const built = buildWeakPassage(items);
+  assert.equal(built.count, 3, `只收纯汉字条目并去重（实际 ${built.count}）`);
+  assert.equal(built.chars, 2 + 1 + 2, `可练字数 = 各词字数之和（实际 ${built.chars}）`);
+  assert.ok(built.text.includes('银行') && built.text.includes('月') && built.text.includes('双拼'),
+    '三个词都进了文本');
+  assert.equal((built.text.match(/银行/g) || []).length, 1, '重复条目只出现一次');
+  assert.ok(!built.text.includes('abc'), '英文数字条目被剔除');
+  assert.ok(built.text.endsWith('。'), '文本以句号收尾（便于分段与字数统计）');
+  assert.ok(built.text.includes('、'), '条目之间用顿号连接');
+
+  // 空输入 / 全是不可用条目时安全回落，不能返回一个空句号
+  assert.deepEqual(buildWeakPassage([]), { text: '', count: 0, chars: 0 }, '空输入安全回落');
+  assert.equal(buildWeakPassage([{ word: 'abc' }]).count, 0, '全不可用条目时 count 为 0');
+  assert.equal(buildWeakPassage(null).text, '', 'null 输入不崩');
+
+  // maxItems 上限：太多了连不成可练的一段
+  const many = Array.from({ length: 100 }, (_, i) => ({ word: '字', char: '字', key: '字' + i }));
+  // 注意 key 各不相同、word 都是「字」→ 去重后只剩 1 条
+  assert.equal(buildWeakPassage(many).count, 1, '相同文字去重');
+  // 生成 100 个**互不相同**的纯汉字词（用汉字笔画铺满，避免混入数字）
+  const HAN = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥';
+  const many2 = Array.from({ length: 100 }, (_, i) => ({
+    word: HAN[i % 22] + HAN[Math.floor(i / 22) % 22] + HAN[(i * 7) % 22],
+    key: 'k' + i
+  }));
+  const uniq = new Set(many2.map(x => x.word));
+  assert.equal(buildWeakPassage(many2, { maxItems: 10 }).count, 10,
+    `maxItems 生效（候选 ${uniq.size} 个唯一词）`);
+
+  // 导出的文本必须能被真正的分段函数接受（否则「导出」按钮点了没用）
+  assert.ok(built.text.length > 0, '导出文本非空');
+
+  console.log('✓ buildWeakPassage assembles a deduped, Han-only, punctuation-joined drill text');
+}
+

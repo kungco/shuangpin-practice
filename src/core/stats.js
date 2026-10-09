@@ -634,6 +634,212 @@ export function keySlowness(opts = {}) {
 }
 
 /* ============================================================
+   键位掌握度（每个键「练到哪一步了」）
+   ============================================================ */
+
+/**
+ * 每个键的掌握度：没碰过 / 在练 / 已掌握。
+ *
+ * 与热力图、慢键图的关系（三者共用同一张键盘，但回答不同问题）：
+ *   keyHeatmap  —— 哪些键**按错**（红填充）
+ *   keySlowness —— 哪些键**按得慢**（蓝环）
+ *   keyMastery  —— 每个键**练够没有、稳不稳**（这一段的新问题）
+ *
+ * **数据来源不新增存储**。这里刻意复用已有的两张表：
+ *   - `getKeyTimings().samples` —— 该键**按对**的样本数（引擎只在按键
+ *     推进时才记耗时，所以样本数天然等于「这个键按对过几次」）
+ *   - `getKeyErrorTotals().counts` —— 该键**按错**的次数
+ * 二者合起来即可算出：
+ *   practice = samples + errors          （共碰过多少次）
+ *   accuracy = samples / (samples + errors)
+ *
+ * 判定为「已掌握」需要同时满足三条，缺一不可：
+ *   1. 样本够多（>= minSamples，默认 12）—— 练得少不算数
+ *   2. 错误率够低（<= maxErrorRate，默认 8%）—— 按对多但错得多不算数
+ *   3. 不慢（有耗时可查时，中位数 <= slowFactor × 整体中位数）——
+ *      「每次都要想一秒才按对」不是掌握，是还没形成肌肉记忆
+ * 第 3 条是最容易漏的一条：只看错误率会把「慢而准」误判成掌握，
+ * 而那恰恰是双拼最该继续练的状态（见 keySlowness 的注释）。
+ *
+ * 状态机（按优先级）：
+ *   'untouched' 没碰过（practice 太少且一次没错）
+ *   'learning'  在练（碰过，但未达掌握标准）
+ *   'mastered'  已掌握（三条全满足）
+ *
+ * @param {object} opts
+ *   - range: 'all' | '30' | '10'
+ *   - mode:  'all' 或具体模式 id
+ *   - minSamples:  判「已掌握」所需最少样本（默认 12）
+ *   - maxErrorRate: 判「已掌握」允许的最高错误率（默认 0.08）
+ *   - slowFactor:  判「不慢」允许的倍率（默认 1.3）
+ * @returns {{items:Array, counts:Object, total:number, sessions:number,
+ *           byMode:boolean, minSamples:number}}
+ */
+export const MASTERY_MIN_SAMPLES = 12;
+export const MASTERY_MAX_ERROR_RATE = 0.08;
+export const MASTERY_SLOW_FACTOR = 1.3;
+
+export function keyMastery(opts = {}) {
+  const range = ['all', '30', '10'].includes(String(opts.range)) ? String(opts.range) : 'all';
+  const mode = opts.mode || 'all';
+  const minSamples = Math.max(1, Math.floor(Number(opts.minSamples)) || MASTERY_MIN_SAMPLES);
+  const maxErrorRate = Number.isFinite(Number(opts.maxErrorRate))
+    ? Math.max(0, Math.min(1, Number(opts.maxErrorRate))) : MASTERY_MAX_ERROR_RATE;
+  const slowFactor = Number.isFinite(Number(opts.slowFactor))
+    ? Math.max(1, Number(opts.slowFactor)) : MASTERY_SLOW_FACTOR;
+
+  const errRes = getKeyErrorTotals(range, mode);
+  const timRes = getKeyTimings(range, mode);
+
+  /* 「慢」的相对基准：整体中位数。
+     只取**样本够多**的键来算这个基准 —— 一个只练过 1 次的键，其「中位数」
+     就是那一次的值，可能极快也可能极慢，把它算进基准会把整条线带偏。
+     （实践中真的踩到过：几个 1 样本的键恰好都很快，把基准压到 120ms，
+     于是所有正常速度的键全被判成「慢」，掌握度永远是 0。）
+     样本数为 0 的键本来就被排除在 items 之外，这里同理。 */
+  const baselineSamples = Math.max(3, Math.min(minSamples, 8));
+  const baseMedians = timRes.items
+    .filter(r => r && r.samples >= baselineSamples)
+    .map(r => num(r.medianMs))
+    .filter(n => n > 0)
+    .sort((a, b) => a - b);
+  // 样本够多的键太少（刚开始练）时，退回全部键 —— 有基准总比没有强，
+  // 但此时掌握判定会因为样本不足而天然保守，不会误报。
+  const refMedians = baseMedians.length ? baseMedians
+    : timRes.items.map(r => num(r.medianMs)).filter(n => n > 0).sort((a, b) => a - b);
+  const overallMs = median(refMedians);
+  const slowLine = overallMs > 0 ? overallMs * slowFactor : 0;
+
+  // 以 timings 为主表（它代表「练过」），再把错误数并进来
+  const byKey = {};
+  for (const r of timRes.items) {
+    if (!r || !/^[A-Z]$/.test(r.key)) continue;
+    byKey[r.key] = {
+      key: r.key,
+      samples: Math.max(0, Math.floor(num(r.samples))),
+      errors: 0,
+      medianMs: num(r.medianMs)
+    };
+  }
+  for (const [k, v] of Object.entries(errRes.counts || {})) {
+    const K = String(k).toUpperCase();
+    if (!/^[A-Z]$/.test(K)) continue;
+    if (!byKey[K]) byKey[K] = { key: K, samples: 0, errors: 0, medianMs: 0 };
+    byKey[K].errors += Math.max(0, Math.floor(num(v)));
+  }
+
+  const items = Object.values(byKey).map(r => {
+    const practice = r.samples + r.errors;
+    const accuracy = practice > 0 ? r.samples / practice : 0;
+    const errorRate = practice > 0 ? r.errors / practice : 0;
+    /* 「明确偏慢」才否决掌握。耗时为 0 表示没有数据（老记录、
+       或该键只在 L2 这类不记耗时的场景练过）—— 不知道就不算慢，
+       否则老用户一升级会发现所有键都「没掌握」。 */
+    const slow = slowLine > 0 && r.medianMs > 0 && r.medianMs > slowLine;
+
+    let state;
+    if (practice === 0) {
+      state = 'untouched';
+    } else {
+      const enough = r.samples >= minSamples;
+      const clean = errorRate <= maxErrorRate;
+      state = (enough && clean && !slow) ? 'mastered' : 'learning';
+    }
+
+    return {
+      key: r.key,
+      samples: r.samples,
+      errors: r.errors,
+      practice,
+      accuracy: Math.round(accuracy * 1000) / 1000,
+      errorRate: Math.round(errorRate * 1000) / 1000,
+      medianMs: r.medianMs,
+      slow,
+      // 距离「已掌握」还差多少样本，UI 可给出「再练 N 次」的量化指引
+      need: Math.max(0, minSamples - r.samples),
+      state
+    };
+  }).sort((a, b) => {
+    const rank = { learning: 0, untouched: 1, mastered: 2 };
+    if (rank[a.state] !== rank[b.state]) return rank[a.state] - rank[b.state];
+    // 同为「在练」：错误多的排前面（更该补）
+    return b.errorRate - a.errorRate || a.key.localeCompare(b.key);
+  });
+
+  const counts = { untouched: 0, learning: 0, mastered: 0 };
+  for (const it of items) counts[it.state]++;
+
+  return {
+    items,
+    counts,
+    total: items.length,
+    sessions: timRes.sessions,
+    // 与热力图同口径：false = 该模式下没有专属数据、退回的是全量
+    byMode: errRes.byMode || timRes.byMode,
+    overallMs,
+    slowLine,
+    minSamples
+  };
+}
+
+/* ============================================================
+   错题本导出为跟打文本
+   ============================================================ */
+
+/**
+ * 把易错项拼成一段可以「短文跟打」的文本。
+ *
+ * 为什么要有这个：复习页的 chip 一次只练一个词（3 道题），适合攻克单个难点，
+ * 但**不适合练连贯性**。而真实打字场景里，问题往往不是「这个字不会」，
+ * 是「字与字之间的切换不顺」。把错题连成一段话，正好补上这一环。
+ *
+ * 组装规则（每一条都是为了生成出来的文本仍然「像人话」而不是乱码）：
+ *   1. 词组优先、单字其次 —— 词组本身是多字的，更连贯
+ *   2. 按权重（错误多 + 快忘了）排序，把最该练的放前面
+ *   3. 用顿号「、」连接同类，句号「。」收尾 —— 让 splitPassageText
+ *      能在标点处断句，且可打字数统计准确（标点会被自动跳过）
+ *   4. 同一个字/词只出现一次（按 key 去重）
+ *
+ * 刻意**不**做「句子重组」：把「月」和「银行」硬拼成一个语法通顺的句子
+ * 需要语言模型，而这是零依赖项目，做得出来也不可预测。
+ * 现在这样是诚实的：一段错题清单，用户看得懂、练得到。
+ *
+ * @param {Array} items getWeakList 的返回值
+ * @param {object} [opts]
+ *   - maxItems: 最多收多少个（默认 40，太多了连不成可练的一段）
+ *   - groupByPunctuation: 是否用顿号连接（默认 true）
+ * @returns {{text:string, count:number, chars:number}}
+ *   text 为用户可直接粘贴的文本；chars 为其中可练的汉字数（估算，仅收录字）
+ */
+export function buildWeakPassage(items, opts = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const maxItems = Math.max(1, Math.floor(Number(opts.maxItems)) || 40);
+  const punct = opts.groupByPunctuation !== false;
+
+  const seen = new Set();
+  const picked = [];
+  for (const it of list) {
+    if (!it) continue;
+    const text = String(it.word || it.char || it.key || '').trim();
+    if (!text) continue;
+    // 只收纯汉字 / 汉字词：带英文、数字、标点的条目塞进来会让跟打文本变脏
+    if (!/^[\p{Script=Han}]+$/u.test(text)) continue;
+    if (seen.has(text)) continue;
+    seen.add(text);
+    picked.push(text);
+    if (picked.length >= maxItems) break;
+  }
+
+  if (!picked.length) return { text: '', count: 0, chars: 0 };
+
+  const sep = punct ? '、' : ' ';
+  const text = picked.join(sep) + '。';
+  const chars = picked.reduce((n, w) => n + Array.from(w).length, 0);
+
+  return { text, count: picked.length, chars };
+}
+
+/* ============================================================
    工具
    ============================================================ */
 

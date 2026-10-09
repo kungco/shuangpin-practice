@@ -84,11 +84,6 @@ export const SHENGMU_KEY_SEQ = {
   sh: ['U']
 };
 
-/* 零声母规则：拼音以这些韵母开头时，双拼编码为「首字母 + 韵母键」 */
-export const ZERO_INITIAL_YUNMU = [
-  'a', 'o', 'e', 'ai', 'ei', 'ao', 'ou', 'an', 'en', 'ang', 'eng', 'er'
-];
-
 /* ============================================================
    构建索引
    ============================================================ */
@@ -451,11 +446,3 @@ export const SCHEME_META = {
     layout: XIAOHE_LAYOUT
   }
 };
-
-/** 当前激活方案（预留多方案扩展） */
-let activeSchemeId = 'xiaohe';
-export function getActiveScheme() { return SCHEME_META[activeSchemeId]; }
-export function setActiveScheme(id) {
-  if (SCHEME_META[id]) { activeSchemeId = id; return true; }
-  return false;
-}

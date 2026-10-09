@@ -22,7 +22,8 @@ import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
 import { summarize, historySeries, dailySeries, scoreSeries, weakRanking, groupWeakItems,
          reviewAdvice, formatDuration, formatClock, keyHeatmap, keySlowness,
-         KEY_SLOW_MIN_SAMPLES, recentBaseline, dailyGoalProgress } from './core/stats.js';
+         KEY_SLOW_MIN_SAMPLES, recentBaseline, dailyGoalProgress, keyMastery,
+         MASTERY_MIN_SAMPLES, buildWeakPassage } from './core/stats.js';
 import { scoreExam, gradeTier, SCORE_CONFIG } from './core/score.js';
 import {
   getKeymapData, splitSyllable, primarySplit, highlightForSplit,
@@ -32,6 +33,8 @@ import { renderKeymap } from './ui/keymap.js';
 import { drawLine, drawBars, setTheme as setChartTheme } from './ui/chart.js';
 import { play as playSound, prime as primeSound, resetErrorFatigue,
          isSupported as soundSupported } from './ui/sound.js';
+import { speak as speakText, stop as stopSpeech,
+         hasChineseVoice, isSupported as speechSupported } from './ui/speech.js';
 import {
   prefersReducedMotion, watchReducedMotion, motionClass,
   prefersDark, watchColorScheme, applyTheme,
@@ -341,6 +344,23 @@ function redrawKeymapTheme() {
   }
 }
 
+/**
+ * 取一个模式的显示名。
+ *
+ * L2 的两个模式是特例：名字里的「听」只有在真的能出声时才成立。
+ * 本机没中文语音包（或用户没开朗读）时，它们实际是「看字母认键」，
+ * 就该叫「认声母键」。这样界面上的承诺永远和实际发生的事一致。
+ *
+ * @param {string} id 模式 id
+ * @returns {string}
+ */
+function modeDisplayName(id) {
+  const lv = LEVEL_MAP[id];
+  if (!lv) return String(id || '');
+  if (lv.nameSpoken && app.settings.speech && app._hasZhVoice) return lv.nameSpoken;
+  return lv.name;
+}
+
 /* ============================================================
    练习：模式选择面板
    ============================================================ */
@@ -348,16 +368,23 @@ function redrawKeymapTheme() {
 function initSetupPanel() {
   const grid = $('#modeGrid');
   if (grid) {
-    grid.innerHTML = LEVELS.map(l => `
-      <button class="mode-card" data-mode="${l.id}">
-        <span class="mode-count" data-count="${l.id}"></span>
-        <span class="mode-card-head">
-          <span class="mode-lv">${l.badge}</span>
-          <span class="mode-card-name">${escapeHtml(l.name)}</span>
-        </span>
-        <span class="mode-card-desc">${escapeHtml(l.desc)}</span>
-      </button>
-    `).join('');
+    /* 用函数渲染而非一次性 innerHTML：语音能力探测是异步的，
+       探测结果回来后需要重画模式名（「认声母键」↔「只听声母」）。 */
+    const paint = () => {
+      grid.innerHTML = LEVELS.map(l => `
+        <button class="mode-card" data-mode="${l.id}">
+          <span class="mode-count" data-count="${l.id}"></span>
+          <span class="mode-card-head">
+            <span class="mode-lv">${l.badge}</span>
+            <span class="mode-card-name">${escapeHtml(modeDisplayName(l.id))}</span>
+          </span>
+          <span class="mode-card-desc">${escapeHtml(l.desc)}</span>
+        </button>
+      `).join('');
+      updateModeCounts();
+    };
+    app._paintModeGrid = paint;
+    paint();
 
     grid.addEventListener('click', (e) => {
       const card = e.target.closest('.mode-card');
@@ -786,7 +813,7 @@ function startSession(questionsOverride, modeOverride) {
       questions,
       unlimited, questionSource, generation,
       mode,
-      modeName: LEVEL_MAP[mode] ? LEVEL_MAP[mode].name : mode,
+      modeName: modeDisplayName(mode),
       durationSec,
       strict: app.settings.strict,
       skipPunct: app.settings.skipPunct,
@@ -863,7 +890,15 @@ function bindEngineEvents() {
   const eng = app.engine;
   if (!eng) return;
 
-  eng.on('question', ({ done }) => { if (!done) rememberCurrentQuestion(eng); });
+  eng.on('question', ({ done }) => {
+    if (!done) {
+      rememberCurrentQuestion(eng);
+      /* 换到新题时朗读（只对 L2「听」模式有效，见 speakCurrentQuestion）。
+         挂在 question 而非 change 上：change 在本轮每次按键都会触发，
+         会把朗读打成结巴。 */
+      speakCurrentQuestion();
+    }
+  });
 
   eng.on('change', () => {
     renderSession();
@@ -917,6 +952,10 @@ function showSessionUI(show) {
   const session = $('#sessionPanel');
   if (setup) setup.hidden = !!show;
   if (session) session.hidden = !show;
+
+  /* 离开练习面板时立刻停掉朗读 —— 否则切回设置页后
+     上一题的音节还在念，听起来像界面失控。 */
+  if (!show) stopSpeech();
 
   /* 测验模式：隐藏一切「辅助」元素，避免暗示答案。
      - 迷你键位图会高亮当前该按的键 → 必须隐藏
@@ -2654,14 +2693,17 @@ function renderHeatmap() {
         </div>`;
       }
       /* 慢键层与热力层**独立**：没有错误数据不代表没有耗时数据，
-         一并 return 会把「按得慢但一直按对」的用户也显示成「什么都没有」。 */
+         一并 return 会把「按得慢但一直按对」的用户也显示成「什么都没有」。
+         掌握度层同理 —— 它靠 timings 也能算出「已掌握」。 */
       app.heatKeymap.clearSlow();
       renderSlowLayer();
+      renderMasteryLayer();
       return;
     }
 
     app.heatKeymap.setHeat(heat.items);
     renderSlowLayer();
+    renderMasteryLayer();
 
     /* 概览文字 */
     const summary = $('#heatSummary');
@@ -2735,6 +2777,59 @@ function renderSlowLayer() {
     console.error('[slowkeys] 渲染失败', err);
     box.innerHTML = '';
     try { app.heatKeymap.clearSlow(); } catch (_) {}
+  }
+}
+
+/**
+ * 掌握度层：在统计页的键盘图上标出「哪些键已经练熟、哪些还没碰过」。
+ *
+ * 第三个诊断层，与热力（红填充 = 按错）、慢键（蓝环 = 按得慢）共用一张图。
+ * 回答的是最朴素的那个问题：**「这 26 个键，我到底掌握了几个？」**
+ * 前两层只能告诉你「哪里还有问题」，这一层第一次给出**进度感**——
+ * 绿点一个个亮起来，是这类练习应用里唯一真正给人成就的东西。
+ */
+function renderMasteryLayer() {
+  const box = $('#masteryBox');
+  if (!box || !app.heatKeymap) return;
+  try {
+    const m = keyMastery({ range: app.stats.heatRange, mode: app.stats.mode });
+    app.heatKeymap.setMastery(m.items);
+
+    const { mastered, learning, untouched } = m.counts;
+    if (untouched === m.total) {
+      box.innerHTML = `<div class="mastery-legend">掌握度：还没有练习数据。
+        练过的键会显示为「在练」，连续答对且不慢的键会亮起<b>绿色圆点</b>表示已掌握。</div>`;
+      return;
+    }
+
+    // 还差一点的键（在练、且样本少于门槛的）—— 给出「再练 N 次」的量化指引
+    const close = m.items.filter(it => it.state === 'learning' && it.need > 0 && it.practice > 0)
+      .slice(0, 8);
+
+    box.innerHTML = `
+      <div class="mastery-legend">
+        <span class="mastery-stat"><b class="mastery-num">${mastered}</b> / ${m.total} 个键已掌握</span>
+        <span class="mastery-stat">在练 <b>${learning}</b></span>
+        <span class="mastery-stat">没碰过 <b>${untouched}</b></span>
+        ${m.byMode || app.stats.mode === 'all' ? '' :
+          '<span class="heat-fallback-note">该模式暂无专属数据，此处为全部模式累计</span>'}
+      </div>
+      ${close.length ? `<div class="mastery-legend" style="margin-top:4px">
+        <span class="mastery-stat">离掌握最近：</span>
+        ${close.map(it => `<span class="slow-chip">
+          <span class="slow-chip-k">${escapeHtml(it.key)}</span>
+          <span class="slow-chip-c">再练 ${it.need} 次</span>
+        </span>`).join('')}
+      </div>` : ''}
+      <div class="mastery-legend" style="margin-top:4px">
+        判定「已掌握」需同时满足：按对 <b>${m.minSamples}</b> 次以上、
+        错误率 ≤ 8%、且不慢于整体中位数的 1.3 倍 ——
+        「每次都要想一秒才按对」算不得掌握，那是还没形成肌肉记忆。
+      </div>`;
+  } catch (err) {
+    console.error('[mastery] 渲染失败', err);
+    box.innerHTML = '';
+    try { app.heatKeymap.clearMastery(); } catch (_) {}
   }
 }
 
@@ -2880,6 +2975,8 @@ function renderReviewView() {
       <div class="review-cta">
         <button class="btn btn-primary" id="btnReviewPractice"${noDue ? ' disabled aria-disabled="true"' : ''}>${noDue ? '今天没有到期项' : rv.due ? `复习到期的 ${Math.min(rv.due, 20)} 项` : '强化练习这些内容'}</button>
         <button class="btn btn-ghost" id="btnReviewPracticeAll">普通练习</button>
+        <button class="btn btn-ghost" id="btnReviewToCustom"
+                title="把易错字词连成一段跟打文本，练字与字之间的连贯">错题连成一段跟打</button>
         <button class="btn btn-ghost" id="btnClearWeak">清空易错记录</button>
       </div>
     `;
@@ -2946,6 +3043,49 @@ function bindReviewActions() {
     if (!qs.length) { toast('暂时没有可用的复习内容', 'err'); return; }
     switchView('practice');
     startSession(qs, 'char');
+  });
+
+  /* 错题连成一段跟打：把易错项写进「自定义文本」并切过去。
+     比逐条练更能补上「字与字之间切换不顺」这一环 —— 见 buildWeakPassage 的注释。 */
+  const btnToCustom = $('#btnReviewToCustom');
+  if (btnToCustom) btnToCustom.addEventListener('click', () => {
+    const all = weakRanking(60);
+    const built = buildWeakPassage(all, { maxItems: 40 });
+    if (!built.count) {
+      toast('还没有可用的易错字词', 'err');
+      return;
+    }
+
+    /* 覆盖前先问：用户可能手头正有一段精心准备的材料，
+       直接覆盖是不可撤销的。已有内容且不是上次生成的时，弹窗确认。 */
+    const existing = String(app.settings.customText || '').trim();
+    const apply = () => {
+      app.settings.customText = built.text;
+      saveSettingsDebounced();
+      const ta = $('#customTextInput');
+      if (ta) { ta.value = built.text; ta.dispatchEvent(new Event('input')); }
+      // 切到「自定义文本」模式，并把练习区滚动到可见
+      selectMode('custom');
+      switchView('practice');
+      toast(`已生成 ${built.count} 个易错词、共 ${built.chars} 字，可开始跟打`, 'ok');
+    };
+
+    if (existing) {
+      openModal(`
+        <h2>覆盖自定义文本？</h2>
+        <p class="modal-sub">当前「自定义文本」里已有 ${Array.from(existing).length} 个字符，
+        将被这 ${built.count} 个易错词（共 ${built.chars} 字）替换。此操作不可撤销。</p>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" data-act="cancel">取消</button>
+          <button class="btn btn-primary" data-act="ok">替换并开练</button>
+        </div>
+      `, (act, close) => {
+        close();
+        if (act === 'ok') apply();
+      });
+      return;
+    }
+    apply();
   });
 
   const btnClear = $('#btnClearWeak');
@@ -3099,6 +3239,12 @@ function initSettingsView() {
 
   bindToggle(setStrict, 'strict');
   bindToggle(setSkipPunct, 'skipPunct');
+
+  /* ---- 语音朗读 ----
+     与音效是两件事：音效是按键反馈的合成音（WebAudio），
+     朗读是「听声母/听韵母」模式下把音节念出来（SpeechSynthesis）。
+     分别开关，因为它们对用户的意义不同 —— 有人想要按键反馈但嫌朗读吵。 */
+  initSpeechSettings();
 
   /* ---- 卡住自动提示 ---- */
   bindToggle(setHint, 'hint', (v) => {
@@ -3433,6 +3579,151 @@ function applyHintSettingsToEngine() {
   }
 }
 
+/**
+ * 语音朗读设置：开关 + 语速 + **能力探测**。
+ *
+ * 【为什么要探测而不是直接开】「只听声母/听韵母」两个模式的题面是字母
+ * （h / ou），打开朗读才有声音。但**没有中文语音包的机器上，
+ * 用 en-US 语音念中文会念出英语口音或干脆读不出** —— 比不发声更糟。
+ * 所以这里主动探测 zh 语音：
+ *   - 有 → 打开开关即朗读，正常宣传「听」
+ *   - 无 → 明确告知「本机没有中文语音包，这两个模式是看字母认键」
+ *         并给出安装提示，而不是留一个按了没反应的哑巴开关
+ *
+ * 探测是**异步**的（getVoices() 首次可能为空，要等 voiceschanged），
+ * 所以先按「未知」渲染，拿到结果再更新文案。
+ */
+function initSpeechSettings() {
+  const setSpeech = $('#setSpeech');
+  const opts = $('#speechOpts');
+  const note = $('#speechNote');
+  const rate = $('#setSpeechRate');
+
+  const supported = speechSupported();
+  if (setSpeech) {
+    setSpeech.checked = !!app.settings.speech;
+    if (!supported) {
+      setSpeech.disabled = true;
+      setSpeech.checked = false;
+      const lab = setSpeech.closest('label');
+      if (lab) {
+        lab.classList.add('is-disabled');
+        lab.title = '当前浏览器不支持语音合成（speechSynthesis），朗读不可用';
+      }
+    }
+    setSpeech.addEventListener('change', () => {
+      app.settings.speech = !!setSpeech.checked;
+      saveSettingsDebounced();
+      if (!setSpeech.checked) {
+        stopSpeech();                    // 关掉时立刻静音，不留残响
+        app._speechWarned = false;       // 重新打开时可以再提示一次
+      }
+      // 重画模式卡片：开关直接决定 L2 两个模式叫「听」还是「认」
+      if (typeof app._paintModeGrid === 'function') app._paintModeGrid();
+      renderSpeechUI();
+    });
+  }
+
+  if (rate) {
+    rate.value = String(app.settings.speechRate);
+    rate.addEventListener('change', () => {
+      app.settings.speechRate = Number(rate.value) || 0.85;
+      saveSettingsDebounced();
+      // 立刻用新语速念一个样本 —— 用户不用开一局练习才知道快慢
+      if (app.settings.speech) {
+        speakText('双拼练习', { rate: app.settings.speechRate });
+      }
+    });
+  }
+
+  // 先按「探测中」渲染，避免闪烁；拿到结果后更新
+  renderSpeechUI({ probing: true });
+  hasChineseVoice().then(ok => {
+    app._hasZhVoice = ok;
+    renderSpeechUI();
+  });
+}
+
+/**
+ * 根据「是否支持 + 有没有中文语音 + 开关是否打开」更新语音相关 UI。
+ *
+ * 三个状态各有明确文案，绝不出现「开关是开的、但按了没声音、
+ * 也没人告诉你为什么」这种最坏情况。
+ */
+function renderSpeechUI(opts = {}) {
+  const setSpeech = $('#setSpeech');
+  const box = $('#speechOpts');
+  const note = $('#speechNote');
+  if (!note) return;
+
+  const supported = speechSupported();
+  const hasVoice = app._hasZhVoice;
+  const on = !!(setSpeech && setSpeech.checked);
+
+  /* 语音能力会改变 L2 两个模式的**名字**（认键 ↔ 听）。
+     重画模式卡片，保证探测结果一回来界面就同步。
+     只在状态真的变化时才重画，避免无谓的 DOM 重建。 */
+  if (app._speechState !== hasVoice) {
+    app._speechState = hasVoice;
+    if (typeof app._paintModeGrid === 'function') app._paintModeGrid();
+  }
+
+  // 语速选择只在「开着且真的能出声」时才有意义
+  if (box) box.hidden = !(supported && on && hasVoice === true);
+  note.hidden = false;
+
+  if (!supported) {
+    note.textContent = '当前浏览器不支持语音合成，朗读不可用。';
+    note.className = 'footnote';
+    return;
+  }
+  if (opts.probing || hasVoice === undefined) {
+    note.textContent = '正在检测本机是否安装中文语音包…';
+    note.className = 'footnote';
+    return;
+  }
+  if (!hasVoice) {
+    /* 关键降级文案：说清「这两个模式现在是干什么的」，
+       而不是简单说一句「不支持」。用户据此知道功能没坏，只是语义变了。 */
+    note.textContent = '本机未检测到中文语音包，朗读不可用 —— '
+      + '「只听声母 / 只听韵母」两个模式此时是**看字母、认按键**，没有声音。'
+      + '如需听力练习，可在系统「时间和语言 → 语音」中安装中文语音后重试。';
+    note.className = 'footnote';
+    return;
+  }
+  note.textContent = '已检测到中文语音，打开后「只听声母 / 只听韵母」会朗读完整音节。';
+  note.className = 'footnote';
+}
+
+/**
+ * 播放当前题目的语音（若有）。
+ *
+ * 只对 L2 两个「听」模式生效 —— 它们`speakText` 是完整音节。
+ * 其余模式（单字/词组/短文）的题面本身就是汉字，用户是在「看字打字」，
+ * 朗读反而干扰。
+ *
+ * 降级：没装中文语音或开关关闭时静默跳过。**只提示一次** ——
+ * 用户开了开关却发现没声音，第一次应该被告知原因；但每题都弹就成噪音了。
+ */
+function speakCurrentQuestion() {
+  if (!app.settings.speech || !speechSupported()) return;
+
+  const eng = app.engine;
+  if (!eng) return;
+  const q = eng.currentQuestion();
+  if (!q || !q.speakText) return;        // 只有 L2 两个模式带 speakText
+
+  if (app._hasZhVoice === false) {
+    // 明确告知「为什么没声音」，但只告知一次
+    if (!app._speechWarned) {
+      app._speechWarned = true;
+      toast('本机没有中文语音包，无法朗读音节', 'err', 4000);
+    }
+    return;
+  }
+  speakText(q.speakText, { rate: app.settings.speechRate });
+}
+
 /** 把 settings 同步到所有相关 UI */
 function syncSettingsUI() {
   syncCountControls();
@@ -3455,12 +3746,18 @@ function syncSettingsUI() {
     ['#setSkipPunct', 'skipPunct'],
     ['#setHint', 'hint'],
     ['#chkWeakBoost', 'weakBoost'],
-    ['#chkReviewDueOnly', 'reviewDueOnly']
+    ['#chkReviewDueOnly', 'reviewDueOnly'],
+    ['#setSpeech', 'speech']
   ];
   checks.forEach(([sel, key]) => {
     const el = $(sel);
     if (el) el.checked = !!app.settings[key];
   });
+  [['#setSpeechRate', 'speechRate']].forEach(([sel, key]) => {
+    const el = $(sel);
+    if (el) el.value = String(app.settings[key]);
+  });
+  renderSpeechUI();
   // 每日目标是数字输入框（不是 select 也不是 checkbox），单独同步。
   // 放在这里而不是散落在各调用点：syncSettingsUI 是「设置变化后统一刷新
   // 所有 UI」的唯一入口，漏掉它会导致「导入数据后目标框还是旧值」。

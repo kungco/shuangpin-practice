@@ -943,6 +943,84 @@ console.log('\n【9d】自定义文本：粘贴 → 开始 → 打字 → 落库
   ok(rec && Array.from(rec.mode) && rec.date, `历史记录带模式与日期（实际 mode=${rec && rec.mode}）`);
 }
 
+/* ---------- 错题本导出为跟打文本（复习页 → 自定义文本） ----------
+   这是一条跨越两个视图的用户路径：复习页点按钮 → 写入设置 → 切模式 → 能开练。
+   单测 buildWeakPassage 只管拼装，这里管「装上了没有」。 */
+console.log('\n【9e】错题连成一段跟打：复习页 → 自定义文本');
+{
+  // 清场：退出练习、关掉弹窗
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  q('#sessionPanel').hidden = true;
+  if (!q('#overlay').hidden) {
+    const b = qa('#modal [data-act]')[0];
+    if (b) fire(b, 'click');
+  }
+
+  // 造几条易错记录（用真实 API，不手改存储）
+  sMod.clearWeak();
+  ['银行', '月', '双拼', '秋', '笑'].forEach(w => sMod.recordWeak({ char: Array.from(w)[0], word: w, pinyin: '' }));
+
+  // 先把自定义文本占位（用于验证「已有内容要弹窗确认」）
+  app.settings.customText = '原有的内容不该被静默覆盖';
+  const ta = q('#customTextInput');
+  if (ta) ta.value = app.settings.customText;
+
+  // 进入复习页
+  fire(q('[data-view="review"]'), 'click');
+  await new Promise(r => setTimeout(r, 40));
+  const btn = q('#btnReviewToCustom');
+  ok(!!btn, '复习页有「错题连成一段跟打」按钮');
+
+  fire(btn, 'click');
+  await new Promise(r => setTimeout(r, 30));
+
+  // 已有内容 → 必须先弹窗确认，不能直接覆盖
+  ok(!q('#overlay').hidden, '已有自定义文本时先弹窗确认');
+  ok(/覆盖/.test(q('#modal').textContent), '弹窗说明是「覆盖」操作');
+  const okBtn = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'ok');
+  ok(!!okBtn, '弹窗有确认按钮');
+  fire(okBtn, 'click');
+  await new Promise(r => setTimeout(r, 30));
+
+  // 确认后：文本已写入设置 + 输入框 + 模式切到 custom
+  const txt = app.settings.customText || '';
+  ok(txt.length > 0, '确认后自定义文本被写入');
+  ok(txt.includes('银行') || txt.includes('月') || txt.includes('双拼'),
+    `导出的文本含易错词（实际「${txt.slice(0, 40)}」）`);
+  ok(!txt.includes('原有的内容'), '原有内容被替换（用户已确认）');
+  ok(app.sessionMode === 'custom', `模式自动切到 custom（实际 ${app.sessionMode}）`);
+  ok(ta && ta.value === txt, '输入框与设置同步');
+
+  // 导出后能真的开练（这才是这个功能的终点）
+  fire(q('[data-view="practice"]'), 'click');
+  await new Promise(r => setTimeout(r, 10));
+  fire(q('#btnStart'), 'click');
+  await new Promise(r => setTimeout(r, 40));
+  ok(!!app.engine && app.engine.mode === 'custom', '导出的错题文本可直接开练');
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  q('#sessionPanel').hidden = true;
+  if (!q('#overlay').hidden) {
+    const b = qa('#modal [data-act]')[0];
+    if (b) fire(b, 'click');
+  }
+
+  // 没有易错记录时：给出提示而不是写一个空文本
+  sMod.clearWeak();
+  app.settings.customText = '';
+  fire(q('[data-view="review"]'), 'click');
+  await new Promise(r => setTimeout(r, 30));
+  const btn2 = q('#btnReviewToCustom');
+  // 无记录时复习页走的是空态分支，按钮可能不存在 —— 两种情况都接受
+  if (btn2) {
+    fire(btn2, 'click');
+    await new Promise(r => setTimeout(r, 20));
+    ok(app.settings.customText === '', '没有易错记录时不写入空文本');
+  } else {
+    ok(!!q('#reviewBody').textContent.match(/暂无需要复习/), '无记录时复习页走空态分支');
+  }
+  sMod.clearWeak();
+}
+
 /* ---------- 存储降级：写失败后马上读 ---------- */
 console.log('\n【9b】存储配额满后的降级（写失败 → 立即读）');
 const errCountBefore9b = errors.length;
@@ -1194,6 +1272,139 @@ for (const mode of ['sheng', 'yun']) {
   ok(r5.correct === false, `${mode} 按错判错`);
   ok(/声母|韵母/.test(r5.feedback.explain), `${mode} 错误解释点明是声母还是韵母：${r5.feedback.explain}`);
   eng5.destroy();
+}
+
+/* ---------- 语音朗读（接线层） ----------
+   注意：测试环境（linkedom）**没有** speechSynthesis，这恰好是最常见的
+   真实降级场景。因此这里验的是「接对了线、并且没声音时不崩、不撒谎」，
+   而不是「真的发出了声音」—— 后者在无头环境里无从验证。
+   真正出声的那部分由 verify.mjs 的 speakText 断言（数据契约）保证。 */
+console.log('\n【10f】语音朗读：接线与无语音降级');
+{
+  const sSpeech = await import('../src/ui/speech.js');
+
+  ok(sSpeech.isSupported() === false, '测试环境无 speechSynthesis，isSupported() 如实返回 false');
+  ok(await sSpeech.hasChineseVoice(60) === false, '无 speechSynthesis 时 hasChineseVoice 立即返回 false（不等超时）');
+  ok(sSpeech.speak('shuang') === false, '无语音时 speak() 返回 false（而不是抛异常）');
+  ok(sSpeech.stop() === undefined, '无语音时 stop() 静默无操作');
+
+  // 设置页必须有开关 + 说明块，否则「开了没声音」就无从解释
+  const setSpeech = q('#setSpeech');
+  const speechNote = q('#speechNote');
+  const speechOpts = q('#speechOpts');
+  ok(!!setSpeech, '设置页有语音朗读开关 #setSpeech');
+  ok(!!speechNote, '设置页有语音状态说明 #speechNote');
+  ok(!!speechOpts, '设置页有语速选项容器 #speechOpts');
+  ok(!!q('#setSpeechRate'), '设置页有语速选择 #setSpeechRate');
+
+  // 不支持时：开关必须被禁用且不勾选（不能让用户打开一个假的开关）
+  ok(setSpeech.disabled, '不支持语音时开关被禁用');
+  ok(setSpeech.checked === false, '不支持语音时开关不会被勾上');
+
+  // 说明文案必须诚实：点明「不支持」，且不能假装能朗读
+  ok(speechNote.hidden === false, '说明块可见（用户能读到为什么没声音）');
+  ok(/不支持语音合成/.test(speechNote.textContent),
+    `说明块如实说明浏览器不支持（实际「${speechNote.textContent}」）`);
+  ok(!/（.*）$/.test(speechNote.textContent) && !/朗读音节。$/.test(speechNote.textContent),
+    '说明块没有误报「已检测到中文语音」');
+  ok(speechOpts.hidden, '不支持语音时语速选项隐藏');
+
+  // 模式名：没有中文语音时，L2 两个模式不许叫「听」
+  const grid = q('#modeGrid');
+  const cardsText = grid ? grid.textContent : '';
+  ok(/认声母键/.test(cardsText), '模式卡片显示「认声母键」（无声时的如实命名）');
+  ok(!/只听声母/.test(cardsText), '模式卡片**不**出现「只听声母」（没有音频就不承诺听力）');
+
+  /* 关键：即便用户绕过开关直接改 app.settings.speech = true，
+     在无中文语音的环境下跑一局 L2，也不能抛异常、不能发出无声的「假朗读」。 */
+  app.settings.speech = true;
+  app._hasZhVoice = false;
+  const qs6 = qMod.generateQuestions({ mode: 'sheng', count: 6 });
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  const eng6 = new engineMod.PracticeEngine({ questions: qs6, mode: 'sheng', hintEnabled: false });
+  app.engine = eng6;
+  eng6.start();
+  let g6 = 0;
+  while (eng6.state === 'running' && g6 < 100) {
+    g6++;
+    const t6 = eng6.currentTarget();
+    if (!t6 || !t6.keys || !t6.keys.length) break;
+    eng6.pressKey(String(t6.keys[0]).toLowerCase());
+  }
+  const sm6 = eng6.summary();
+  ok(sm6.totalChars === 6, `开着朗读开关、无语音包时练习照常完成（${sm6.totalChars}/6）`);
+  ok(errors.length === 0, '无语音环境下整局练习未抛异常');
+
+  // 恢复现场：关开关、清标记，避免影响后续用例
+  app.settings.speech = false;
+  app._speechWarned = false;
+  if (app.engine) { app.engine.destroy(); app.engine = null; }
+  q('#sessionPanel').hidden = true;
+  if (!q('#overlay').hidden) {
+    const b6 = qa('#modal [data-act]')[0];
+    if (b6) fire(b6, 'click');
+  }
+  await new Promise(r => setTimeout(r, 20));
+}
+
+/* ---------- 键位掌握度层（接线层） ----------
+   与前两层（热力填充 / 慢键虚线环）一起挂在同一张键盘图上，
+   所以这里验的是「第三个通道真的画上去了、三态标记互不覆盖」。 */
+console.log('\n【10g】键位掌握度：三层标记共存');
+{
+  const { keyMastery } = stMod;
+
+  sMod.clearKeyTimings();
+  sMod.clearKeyErrors();
+
+  // 造出「已掌握」与「在练」两种键：A 练 20 次全对且快；B 同样快但错误多
+  const fakeLead = Array.from({ length: 20 }, (_, i) => 200 + (i % 5) * 10);
+  sMod.recordKeyTimings({ A: { lead: fakeLead.slice(), follow: [] }, B: { lead: fakeLead.slice(), follow: [] } }, 'char');
+  sMod.recordKeyErrors({ B: 6 }, 'char');
+
+  const m = keyMastery({ range: 'all', mode: 'char' });
+  const byKey = Object.fromEntries(m.items.map(i => [i.key, i]));
+  ok(byKey.A && byKey.A.state === 'mastered', 'A 键判为已掌握');
+  ok(byKey.B && byKey.B.state === 'learning', 'B 键判为在练（错误率高）');
+  ok(m.counts.mastered >= 1 && m.counts.learning >= 1, '两态计数都非零');
+
+  // 走 UI：统计视图渲染后，掌握度标记要真的落在键位图上
+  fire(q('[data-view="stats"]'), 'click');
+  await new Promise(r => setTimeout(r, 40));
+
+  const heat = q('#heatWrap');
+  ok(!!heat, '统计页有热力图容器');
+  ok(!!q('#masteryBox'), '统计页有掌握度说明块 #masteryBox');
+
+  const aKey = heat.querySelector('.kb-key[data-key="A"]');
+  const bKey = heat.querySelector('.kb-key[data-key="B"]');
+  ok(aKey && aKey.classList.contains('is-mastered'), 'A 键被标为 is-mastered');
+  ok(aKey && !!aKey.querySelector('.kb-mastery-dot'), 'A 键画出了绿色圆点');
+  ok(bKey && !bKey.classList.contains('is-mastered'), 'B 键未标为已掌握');
+  ok(bKey && !bKey.querySelector('.kb-mastery-dot'), 'B 键没有绿点');
+
+  // 三层共存：B 键同时有热力填充（错）与（可能的）慢键环，且掌握度不干扰
+  ok(bKey && bKey.classList.contains('is-heat'), 'B 键同时带热力标记（三层不互斥）');
+  ok((bKey.querySelector('.kb-body') && bKey.querySelector('.kb-mastery-dot'))
+    || !bKey.classList.contains('is-mastered'), '填充与圆点用不同元素，互不覆盖');
+
+  // 说明块必须报出「已掌握 x / 总数」这种进度信息，而不是只说有问题
+  const boxText = q('#masteryBox').textContent;
+  ok(/已掌握/.test(boxText), '掌握度说明块给出「已掌握」进度');
+  ok(/个键/.test(boxText), '说明块给出键数口径');
+
+  // 清空数据后标记必须被撤掉（不能留下残影）
+  sMod.clearKeyTimings();
+  sMod.clearKeyErrors();
+  fire(q('[data-view="stats"]'), 'click');
+  await new Promise(r => setTimeout(r, 40));
+  const aAfter = q('#heatWrap').querySelector('.kb-key[data-key="A"]');
+  ok(!aAfter.classList.contains('is-mastered'), '清空数据后绿点被撤销');
+  ok(!aAfter.querySelector('.kb-mastery-dot'), '清空数据后圆点元素被移除');
+
+  // 恢复现场
+  app.stats.heatRange = 'all';
+  app.stats.mode = 'all';
 }
 
 /* ---------- 压力测试：各模式全流程 ---------- */
@@ -1968,11 +2179,30 @@ console.log('【新增】按键耗时：结算面板的「反应最慢的键」�
 
   /* ---------- ⑤ 切主题后慢键环仍在 ---------- */
   const themeSel = q('#setTheme');
+  const dotsBefore = qa('#heatWrap .kb-mastery-dot').length;
   themeSel.value = 'dark';
   fire(themeSel, 'change');
   await new Promise(r => setTimeout(r, 30));
   ok(qa('#heatWrap .kb-slow-ring').length === rings.length,
     `切换主题后慢键环没有丢失（${qa('#heatWrap .kb-slow-ring').length} 个）`);
+  // 掌握度是第三个通道，重绘时同样不能被漏掉。
+  // 上一段（【10g】）已清空数据，这里若本来就 0 个点，就等于没验到 ——
+  // 所以先注入一个「已掌握」的键，确认重绘后它还在，再还原。
+  {
+    const fake = Array.from({ length: 20 }, (_, i) => 200 + (i % 5) * 10);
+    ls.recordKeyTimings({ Z: { lead: fake, follow: [] } }, 'char');
+    fire(q('[data-view="stats"]'), 'click');
+    await new Promise(r => setTimeout(r, 30));
+    const dotsNow = qa('#heatWrap .kb-mastery-dot').length;
+    ok(dotsNow >= 1, `注入已掌握键后出现圆点（${dotsNow} 个）`);
+    themeSel.value = 'light';
+    fire(themeSel, 'change');
+    await new Promise(r => setTimeout(r, 30));
+    ok(qa('#heatWrap .kb-mastery-dot').length === dotsNow,
+      `切换主题后掌握度圆点没有丢失（${qa('#heatWrap .kb-mastery-dot').length} 个）`);
+    ls.clearKeyTimings();
+    ls.clearKeyErrors();
+  }
   themeSel.value = 'auto';
   fire(themeSel, 'change');
   await new Promise(r => setTimeout(r, 20));

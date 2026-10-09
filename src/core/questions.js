@@ -62,7 +62,11 @@ export const LEVELS = [
   {
     id: 'sheng',
     level: 2,
-    name: '只听声母',
+    /* 名字不再写死成「只听声母」——「听」只有在真的出声时才成立。
+       开启语音朗读后 UI 会改为「只听声母」，否则显示「认声母键」。
+       两种叫法都从这里派生，避免一处叫「听」一处叫「认」的割裂。 */
+    name: '认声母键',
+    nameSpoken: '只听声母',
     badge: 'L2a',
     desc: '只按声母那一键，不要求韵母。用来确认声母键是否记牢。',
     tip: 'zh/ch/sh 各占一键（V/I/U）'
@@ -70,7 +74,8 @@ export const LEVELS = [
   {
     id: 'yun',
     level: 2,
-    name: '只听韵母',
+    name: '认韵母键',
+    nameSpoken: '只听韵母',
     badge: 'L2b',
     desc: '只按韵母那一键，不要求声母。专门攻克容易混淆的韵母。',
     tip: 'ang→H、eng→G、ong→S'
@@ -327,6 +332,11 @@ function makePartQuestion(part, usedPinyin) {
     // 完整拆分带上，UI 才能在答完后展示整音节的对照
     fullSplit: picked,
     pinyin: py,
+    /* 朗读文本 = **完整音节**（如 h 题读「he」），不是声母字母本身。
+       读单个字母 "h" 会被语音引擎按字母名念（英文 "aitch"）或干脆跳过，
+       都有害无益；读完整音节能让引擎按拼音规则发出正确的声母音。
+       这是「听声母」这个名字能成立的前提。 */
+    speakText: py,
     chars: [{ ch: '', pinyin: py, syl: buildSyllables([py])[0] }],
     text: `${cname}  ←  ${py}`,
     explain: wantSheng

@@ -952,6 +952,103 @@ console.log('【新增】自定义文本：标注、跳过未收录、分段');
   ok(tiny.length >= 1 && tiny.every(s => s.length > 0), '极小上限仍产出非空段');
 }
 
+/* ============================================================
+   【新增】语音朗读：朗读文本必须是完整音节，不是单个字母
+   ============================================================ */
+
+console.log('【新增】语音朗读：speakText 是完整音节');
+
+{
+  const { generateQuestions, LEVEL_MAP } =
+    await import('../src/core/questions.js');
+
+  /* L2 两个模式的名字必须**双轨**：默认叫「认…键」（如实描述看字母认键），
+     只有真的能出声时才显示「只听…」。这里锁住两条都存在，
+     避免后续有人「顺手」把 spoken 名字删掉导致语音模式无名义可用。 */
+  ok(LEVEL_MAP.sheng.name === '认声母键', '默认名称为「认声母键」（不出声时的如实描述）');
+  ok(LEVEL_MAP.sheng.nameSpoken === '只听声母', '保留「只听声母」供有语音时使用');
+  ok(LEVEL_MAP.yun.name === '认韵母键' && LEVEL_MAP.yun.nameSpoken === '只听韵母',
+    '韵母模式同样是双轨命名');
+
+  /* 核心断言：朗读的是**完整音节**。
+     读单个字母 "l" 会被引擎按字母名念（英文 "el"）或跳过，
+     必须读 "lun" 才拿得到正确的声母音。 */
+  const sheng = generateQuestions({ mode: 'sheng', count: 40 });
+  ok(sheng.every(q => q.speakText && q.speakText.length >= 1),
+    '声母题都带 speakText');
+  ok(sheng.every(q => q.speakText === q.pinyin),
+    '语法：speakText 恒等于完整音节（= 题目 pinyin）');
+  ok(sheng.every(q => q.speakText !== q.promptText),
+    '★ speakText 与屏幕上的 promptText（单字母）**不同** —— 这是本功能的关键');
+
+  const yun = generateQuestions({ mode: 'yun', count: 120 });
+  ok(yun.every(q => q.speakText === q.pinyin),
+    '韵母题同样：朗读完整音节而非韵母字母');
+
+  /* 注意这里**不能**要求 speakText !== promptText：
+     存在「音节本身就等于韵母」的情况（如 an / en / ang / ai…，
+     屏幕上是 an，朗读也是 an），二者相同才是正确的。
+     真正要防的是「把单个字母拿去朗读」——只对**单字母**的 promptText
+     要求它与朗读文本不同（单字母 = 声母场景，必须补元音才念得对）。 */
+  const badSingle = [...sheng, ...yun].filter(q =>
+    /^[a-z]$/.test(q.promptText) && q.speakText === q.promptText);
+  ok(badSingle.length === 0,
+    `单字母题面绝不与朗读文本相同（否则引擎会念字母名）——违规 ${badSingle.length} 个`);
+
+  // 抽查具体例子
+  const one = generateQuestions({ mode: 'sheng', count: 1 })[0];
+  ok(one.speakText === one.pinyin, `单个声母题 speakText=${one.speakText} 等于完整音节`);
+  ok(!/^[a-z]$/.test(one.speakText) || one.pinyin.length === 1,
+    '完整音节通常长于单字母（除非该音节本身就是单字母，如 a/e）');
+
+  /* 其他模式不该带 speakText —— 用户是在「看字打字」，
+     朗读会干扰而非帮助。 */
+  const chars = generateQuestions({ mode: 'char', count: 5 });
+  ok(chars.every(q => !q.speakText), '单字模式不带 speakText（看字打字，无需朗读）');
+  const ph = generateQuestions({ mode: 'phrase', count: 5 });
+  ok(ph.every(q => !q.speakText), '词组模式不带 speakText');
+}
+
+/* ============================================================
+   【新增】死代码清扫的回归守卫
+   ------------------------------------------------------------
+   这些导出确实没有任何调用方（下面用源码扫描再确认一次），
+   留着会让后来人误以为「改了它有影响」。删掉之后加一条断言锁住，
+   避免下次有人「顺手」又加回去 —— 或者更糟：加回去后误以为自己改的
+   东西生效了。
+   ============================================================ */
+
+console.log('【新增】死代码清扫：两个导出确实没有调用方且已移除');
+
+{
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const root = resolve(__dir, '..');
+  const schemeSrc = readFileSync(resolve(root, 'src/core/scheme.js'), 'utf8');
+  const allSrc = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+
+  // ① ZERO_INITIAL_YUNMU：零声母的判定实际由 `py.startsWith(sm)` 完成，
+  //    这个常量从未被读取。
+  ok(!/ZERO_INITIAL_YUNMU/.test(schemeSrc), 'scheme.js 中已移除未使用的 ZERO_INITIAL_YUNMU');
+
+  // ② getActiveScheme / setActiveScheme：全局只有一个方案，从未被调用。
+  ok(!/getActiveScheme/.test(schemeSrc), 'scheme.js 中已移除无调用方的 getActiveScheme');
+  ok(!/setActiveScheme/.test(schemeSrc), 'scheme.js 中已移除无调用方的 setActiveScheme');
+  ok(!/activeSchemeId/.test(schemeSrc), '连同其私有状态 activeSchemeId 一并移除');
+
+  // 主程序也不该引用它们（防「删了实现但调用点还在」的假清爽）
+  ok(!/getActiveScheme|setActiveScheme|ZERO_INITIAL_YUNMU/.test(allSrc),
+    'main.js 不引用任何已移除的符号');
+
+  // 反向确认：零声母判定仍然工作（删掉的只是一个没用的常量，不是功能）
+  // 注意 splitSyllable 返回的是**数组**（一个拼音可能有多种拆法）。
+  const zero = splitSyllable('an');
+  ok(zero.length >= 1 && zero[0].zero === true && zero[0].code === 'AJ',
+    '零声母判定仍然正常（an → AJ，零声母）');
+  const zh = splitSyllable('zhang');
+  ok(zh.length >= 1 && zh[0].code === 'VH',
+    '正常音节的拆分不受影响（zhang → VH）');
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 全部自检通过'
   : `❌ 共 ${fail} 项未通过`));

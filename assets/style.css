@@ -930,6 +930,29 @@ textarea:focus {
 /* 慢键环不参与点击（键位图页可点，标记不该抢事件） */
 .kb-slow-ring { pointer-events: none; }
 
+/* ---------------- 键位掌握度（练到哪一步了）----------------
+
+   第三个诊断层，与热力（填充）、慢键（虚线环）一样走**独立通道**：
+     - 已掌握 = 键右上角一个实心绿点（不碰 fill，所以红填充仍可见）
+     - 没碰过 = 键整体降饱和（区别于「方案里没用到」的 is-dim）
+   这样「又错又慢、还没掌握」的键 = 红填充 + 蓝环 + 无绿点，信号不互相掩盖。
+
+   刻意不给「在练」加标记：绝大多数键都处于在练状态，全加标记反而是噪声，
+   默认态即「在练」。信息量集中在两个极端（已掌握 / 没碰过）。 */
+.kb-mastery-dot {
+  fill: var(--ok);
+  stroke: var(--surface);
+  stroke-width: 1.2;
+  pointer-events: none;
+}
+.kb-key.is-untouched .kb-body { fill-opacity: .55; stroke-dasharray: 3 3; }
+.kb-key.is-untouched .kb-main,
+.kb-key.is-untouched .kb-sub,
+.kb-key.is-untouched .kb-pinyin { opacity: .55; }
+
+/* 图例（统计页热力图下方） */
+.mastery-legend { font-size: 12.5px; color: var(--text-2); padding: 4px 2px; }
+
 .kb-main { font-family: var(--mono); font-weight: 700; }
 .kb-sub  { font-family: var(--sans); }
 .kb-pinyin { font-family: var(--mono); }
