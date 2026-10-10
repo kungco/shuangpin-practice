@@ -1,6 +1,6 @@
 # 自检脚本
 
-七个互相独立的测试套件 + 两套需要模拟 DOM 的 + 一份性能基准，
+七个互相独立的测试套件 + 两套需要模拟 DOM 的 + 一套真浏览器冒烟 + 一份性能基准，
 **只用于开发期自检，不影响应用运行**。
 （应用本身零依赖，但**不能直接双击 `index.html`** —— 浏览器禁止在 `file://`
 协议下加载 ES 模块，必须经由本地 HTTP 服务打开。见文末说明。）
@@ -15,6 +15,7 @@
 | `launcher.mjs` | **启动脚本静态自检**：编码前提（BOM / CRLF / chcp 顺序）、引用的文件是否存在、标签配对、三级回退链、与服务端脚本的接口一致性、危险写法扫描、**模块类型声明**、**CI 工作流确实存在**、**每套自检都挂进了 `npm test` 且脚本里的文件都真实存在** | 无 |
 | `training.mjs` | 提示撤除、滑动窗口与决策节奏续练、自适应档位、键位覆盖与强化上限、人工注音长度告警、词组筛选、续练、加权统计与降级、曲线均值口径、日报回落、计时同源、**测验成绩曲线只取有效分数**、500 / 5,000 题性能 | 无 |
 | `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**、**辅助功能接线层**、**提示依赖度可见性**、**存储降级时的界面告知**、**词组易错归组**、**完成音效**、**测验成绩曲线**、**键位图开关**、**热力图跟随模式筛选**、**热力等级竖条根数 = 等级**、**change 重绘粒度契约**） | `linkedom` |
+| `browser.mjs` | **真浏览器冒烟**（headless Chrome/Edge + CDP，补模拟 DOM 的边界）：**真实键盘事件推进引擎**、**弹窗原生焦点**（初始落点 / Tab 循环不逃逸 / Esc 关闭后归还）、**Canvas 统计真的画出了像素** 且带 `role="img"` 与随数据更新的 `aria-label`、**窄屏 390×844 无横向滚动**。找不到浏览器时**跳过**（exit 0），CI 无浏览器不会红 | Chrome/Edge |
 | `bench.mjs` | **性能基准（护栏，非功能测试）**：统计「一次按键引发的 DOM 写入量」，钉死 `renderSession` 的分级重绘不被改回全量 —— 音节内推进不得重建题干。详见下方说明 | `linkedom` |
 
 > `bench.mjs` 为什么和其他套件长得不一样：它**测的不是对错，而是性能不回退**。
@@ -72,6 +73,7 @@
 |---|---|
 | **`tools/vclock.mjs`** | **零依赖虚拟时钟**：`createVirtualClock()` 提供 `setTimeout/setInterval/clear*/now/performanceNow/advance/pendingCount/drainErrors`，语义见 `clock.mjs` 的断言。另有 `installVirtualWindow(clock)`（给不需要 DOM 的测试，如 `engine.mjs`）与 `virtualizeWindowTimers(clock, win)`（只借 `window` 上的定时器与 `Date.now`，`document` 一律不动）。单独成文件是为了让 `engine.mjs` 用得上它却不必拖进 linkedom。 |
 | **`tools/harness.mjs`** | **模拟浏览器基座（共享）**：把 `integration.mjs` / `bench.mjs` 原先各自抄的那份 ~140 行 linkedom 引导代码合成一份（linkedom 缺的 canvas 桩、`value` 可写、焦点模型、`offsetParent`、监听器捕获、全局注入都在这里），并提供 `settle()` / `advance()` / `waitFor()` / `fire()` / `fireKey()`。默认**虚拟时钟**，`{ realTimers: true }` 走真时钟。 |
+| **`tools/cdp.mjs`** | **headless 浏览器 + CDP 封装（共享）**：`findChrome()`（Windows 上兜底 Edge，找不到返回 null 让调用方跳过）、`launchChrome()`（spawn + 轮询 `/json/list` + WebSocket 配对）、`evaluate()`（取值并把页面异常变成可读失败）。`tools/shot.mjs` 与 `browser.mjs` 共用。仍只用 Node 内置能力，保持零依赖。 |
 | `tools/audit_bank.mjs` | 题库体检报告：规模统计、拼音映射质量、韵母键覆盖率、词组/短文的字覆盖闭合性、拼音重复度。**改动题库后建议跑一次**，它会直接指出「哪些字只在词组里出现却练不到」这类不一致。 |
 | `tools/dedupe_chars.mjs` | 单字表跨档去重。`--write` 才会写盘。 |
 | `tools/gen_expand.mjs` | 题库扩充生成器：逐条校验候选内容（可拆分 / 无大写 / 字数对应 / 无重复 / 短文用字全覆盖），任何一条不过就整体失败。`--write` 才会写盘。 |
@@ -79,12 +81,12 @@
 
 ## 运行
 
-**推荐（一次装依赖，之后跑全部九套 + 基准）：**
+**推荐（一次装依赖，之后跑全部十套 + 基准）：**
 
 ```bash
 cd _test
 npm ci            # 按 package-lock.json 精确还原依赖（首次或换环境时执行）
-npm test          # 依次跑 verify → clock → engine → storage → a11y → launcher → training → integration → bench
+npm test          # 依次跑 verify → clock → engine → storage → a11y → launcher → training → integration → browser → bench
 ```
 
 也可以单独跑（每个套件都有对应的 `npm run test:xxx`）：
@@ -98,6 +100,7 @@ node _test/a11y.mjs
 node _test/launcher.mjs
 node _test/training.mjs
 node _test/integration.mjs
+node _test/browser.mjs   # 真浏览器冒烟：没有 Chrome/Edge 时自动跳过
 node _test/bench.mjs     # 性能基准：每键 DOM 写入量
 ```
 
@@ -106,7 +109,8 @@ node _test/bench.mjs     # 性能基准：每键 DOM 写入量
 
 ### 依赖可复现性（为什么要用 `npm ci`）
 
-`integration.mjs` 与 `bench.mjs` 需要 `linkedom` 来模拟 DOM，其余七套**零依赖**。
+`integration.mjs` 与 `bench.mjs` 需要 `linkedom` 来模拟 DOM，
+`browser.mjs` 需要一个 Chromium 系浏览器（没有就跳过），其余七套**零依赖**。
 为了「换个环境/换个人跑结果都一样」，`_test/` 下提交了两个文件：
 
 | 文件 | 作用 |
@@ -203,6 +207,7 @@ Node 从 `src/data/pinyin.js` 往上找最近的 `package.json`，一路到仓�
    文件必须存在，且 `_test/` 下每个自检文件都必须挂进 `npm test`
    （历史上的 `training.mjs` 就是这样被漏掉的）。加完立刻抓出一个真实不一致
    —— `bench.mjs` 有 `bench` 却没有 `test:bench` 单项入口。
+6. **补真浏览器冒烟**（下一节）。
 
 结果：`integration.mjs` **17.6s → 6.0s**、`engine.mjs` **3.9s → 0.8s**，
 全套九套 + 基准 **约 28s → 约 11s**，断言数不减反增
@@ -215,6 +220,44 @@ Node 从 `src/data/pinyin.js` 往上找最近的 `package.json`，一路到仓�
 > `main.js:onKeyDown` 有一道 **8ms 按键防抖**（防输入法连发），两次按键间隔
 > 小于 8ms 时第二下会被**直接丢掉** —— 不等，那一按根本没进引擎，
 > 「题干未变」就成了假绿。
+
+## `browser.mjs` 覆盖什么（真浏览器冒烟）
+
+linkedom 集成测试再全，也有四类问题它**原理上就测不到**——都是「集成全绿、
+真机一打开就是不对」的那类。本套件用 headless Chrome/Edge + CDP 各钉一条：
+
+| 用例 | 为什么 linkedom 测不到 | 钉住的规则 |
+|---|---|---|
+| 【1】练习输入 | linkedom 没有**输入管线**，只能手动调 `pressKey()` | 用 CDP `Input.dispatchKeyEvent` 发**真实键盘事件**：物理键 → `keydown` → 引擎推进（keyIndex +1）；按错键不推进 |
+| 【2】弹窗焦点 | linkedom 的 `focus()` 是空实现、没有 `document.activeElement`，焦点迁移**完全观测不到**（集成测试里的焦点断言靠的是测试桩自己造的焦点模型） | 真浏览器里：打开弹窗焦点自动落在弹窗内的 `[data-act]` 主按钮上；Tab 循环 6 次不逃出弹窗；Esc 关闭且焦点归还 |
+| 【3】Canvas 统计 | linkedom 里 canvas 是**空桩**，`drawLine` 画没画根本不知道 | 真 canvas 上 `getImageData` 数**非透明像素**：三张统计图都必须真的画出了内容；且带 `role="img"` 与随数据更新的 `aria-label`（读屏替代） |
+| 【4】窄屏布局 | linkedom 没有**布局**，`scrollWidth` 恒 0 | 390×844 下 `scrollWidth ≤ 390`（无横向滚动），导航与模式卡片仍渲染可用 |
+
+环境策略：`tools/cdp.mjs` 的 `findChrome()` 找不到 Chromium 系浏览器（含 Edge 兜底）
+时返回 null，本套件**跳过并 exit 0** —— CI 的 Linux runner 不保证有浏览器，
+冒烟是「有真浏览器就加测」，不该让没有浏览器的环境红掉。
+它会自己起一个临时本地服务（`serve.mjs` 子进程）并选空闲端口，跑完即关。
+
+> 顺带修了一个真实缺陷（本套件的价值当场兑现）：三张统计 Canvas 之前
+> **完全没有读屏替代** —— 没有 `role`、没有 `aria-label`，读屏软件只能念出
+> 「图像」两个字，用户拿不到任何数据。现在 `index.html` 给了 `role="img"`
+> 与静态兜底标签，`main.js` 在每次重绘时把**数据摘要**写进 `aria-label`
+> （如「近 20 轮速度曲线，均值 43.2，最低 31，最高 58」），空态也如实说明。
+
+**反向验证过**（每条新断言都确认会红，不是摆设）：
+
+- 把 `main.js` 里三处动态 `aria-label` 注掉 → 三条「数据摘要」断言变红。
+  这里还抓出**断言本身的一个坑**：只查「label 非空」时，`index.html` 的静态
+  兜底（「练习成绩曲线」6 个字）就能蒙混过关 —— 断言曾全绿但形同虚设。
+  改成对动态摘要的特征短语做匹配后才能红。
+- 给 `historyChart` 的 `drawLine` 短路 → 「真的画出了像素（0 个）」变红。
+- 给 `style.css` 加 `body { min-width: 700px }` 模拟布局回归 → 这里又抓出
+  **一个断言坑**：拿 `scrollWidth` 跟 `window.innerWidth` 比是**无效的** ——
+  内容放不下时 Chrome 会把布局视口一起撑大，两个数一起涨，比较恒成立。
+  必须跟**我们模拟进去的**视口宽（390）比，那才是「手机屏幕有多宽」。
+
+**为什么慢也值得**：这套件约 5 秒（要起真浏览器），是全套里最慢的一支。
+它守的四个边界都不是理论风险 —— Canvas 读屏替代就是这次跑出来的真缺陷。
 
 > `launcher.mjs` 在 Linux runner 上也能跑：它做的是**纯静态检查**（读字节、
 > 匹配文本、校验接口约定），不依赖 Windows 运行时。真正的 `cmd.exe` 行为
@@ -363,8 +406,9 @@ cd _test && npm ci
 
 ## 本机额外验证
 
-建议再用真实浏览器走一遍：开始练习 → 故意按错 → 暂停/继续
-→ 看统计曲线 → 错题复习。集成测试只能覆盖到「接线」层面，视觉与交互手感需要人眼确认。
+`browser.mjs` 已经在真浏览器里自动覆盖了一部分（输入、弹窗焦点、Canvas 出图、
+窄屏不横向滚动）。剩下的视觉与手感仍需人眼确认：开始练习 → 故意按错 → 暂停/继续
+→ 看统计曲线 → 错题复习。
 
 本轮新增的三块，人手确认清单：
 

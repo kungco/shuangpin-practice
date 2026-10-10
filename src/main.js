@@ -2563,6 +2563,12 @@ function renderStatsView() {
         avg: series.avg,
         height: 260
       });
+      /* 读屏替代：canvas 里的像素读屏拿不到，把这张图**说了什么**写进
+         aria-label（随重绘更新，与图上数据一致）。空态也要如实说，
+         否则读屏用户听到「图像」却不知道是没数据还是加载失败。 */
+      canvas.setAttribute('aria-label', series.points.length
+        ? `近 ${series.points.length} 轮${series.metric === 'acc' ? '正确率' : '速度'}曲线，均值 ${series.avg}，最低 ${series.min}，最高 ${series.max}`
+        : '还没有练习记录，暂无成绩曲线');
       /* 均值线是加权值（速度按练习时长、正确率按完成字数），
          曲线上的点仍是每轮原始值 —— 所以那条线不会等于各点的算术平均。
          差异大时显式说明，免得被当成画错了。 */
@@ -2609,12 +2615,25 @@ function renderStatsView() {
           : '';
         sNote.hidden = !sNote.textContent;
       }
+      // 读屏替代：与画布上实际画的内容（曲线或空态文案）保持一致
+      scoreCanvas.setAttribute('aria-label', ss.points.length
+        ? `${ss.points.length} 次有效测验的成绩曲线，平均 ${ss.avg} 分，最低 ${ss.min}，最高 ${ss.max}`
+        : (ss.total ? '已完成的测验都不满足计分条件（无提示或字数不足），无成绩曲线'
+                    : '还没有做过能力测验，无成绩曲线'));
     }
 
     /* ---- 每日柱状 ---- */
     const dailyCanvas = $('#dailyChart');
     if (dailyCanvas) {
-      drawBars(dailyCanvas, dailySeries(app.stats.dailyDays, app.stats.mode), { height: 200 });
+      const ds = dailySeries(app.stats.dailyDays, app.stats.mode);
+      drawBars(dailyCanvas, ds, { height: 200 });
+      /* 读屏替代：柱状图念不出「哪天练了多少」，给出总量与最突出的一天。 */
+      const totalChars = ds.reduce((a, d) => a + d.chars, 0);
+      const best = ds.reduce((a, d) => (d.chars > (a ? a.chars : 0) ? d : a), null);
+      dailyCanvas.setAttribute('aria-label',
+        totalChars > 0 && best
+          ? `最近 ${ds.length} 天每日练习量：共练 ${totalChars} 字，最多的一天是 ${best.label}（${best.chars} 字）`
+          : `最近 ${ds.length} 天还没有练习记录`);
     }
 
     /* ---- 错误热力图 ---- */

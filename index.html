@@ -506,18 +506,22 @@
             <button class="chip" data-range="all">全部</button>
           </div>
         </div>
-        <div class="chart-wrap"><canvas id="historyChart" width="920" height="260"></canvas></div>
+        <!-- 三张图都是 Canvas：读屏软件只能念出「图像」二字，拿不到任何数据。
+             role="img" + aria-label 给它一个可念的名字，真正的**数据摘要**
+             由 main.js 在每次重绘时写进 aria-label（跟图上内容保持一致，
+             而不是一句永远不变的「统计图表」）。 -->
+        <div class="chart-wrap"><canvas id="historyChart" width="920" height="260" role="img" aria-label="练习成绩曲线"></canvas></div>
         <p class="panel-sub" id="chartAvgNote" aria-live="polite" hidden></p>
 
         <h3 class="sub-title">能力测验成绩</h3>
         <p class="panel-sub" style="margin-top:-6px">
           综合分满分 100，只有<strong>全程无提示</strong>且完成足够字数的测验才计入（无效的会被排除）。
         </p>
-        <div class="chart-wrap"><canvas id="scoreChart" width="920" height="220"></canvas></div>
+        <div class="chart-wrap"><canvas id="scoreChart" width="920" height="220" role="img" aria-label="能力测验成绩曲线"></canvas></div>
         <p class="panel-sub" id="scoreNote" aria-live="polite" hidden></p>
 
         <h3 class="sub-title">每日练习量</h3>
-        <div class="chart-wrap"><canvas id="dailyChart" width="920" height="200"></canvas></div>
+        <div class="chart-wrap"><canvas id="dailyChart" width="920" height="200" role="img" aria-label="每日练习量柱状图"></canvas></div>
 
         <!-- 热力图与易错表都按「键」/「字词」聚合，与上方的模式筛选联动；
              没有该模式的历史数据时会明确标注，而不是静默显示全量。 -->
