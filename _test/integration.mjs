@@ -8,10 +8,11 @@
  * 运行：node _test/integration.mjs
  */
 
-import { parseHTML } from 'linkedom';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { createHarness, createVirtualClock, virtualizeWindowTimers,
+         FakeEvent, FakeKeyboardEvent } from './tools/harness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -20,313 +21,28 @@ let fail = 0;
 const ok = (c, m) => { if (!c) { fail++; console.log('  ✗ ' + m); } else { console.log('  ✓ ' + m); } };
 
 /* ---------- 构建模拟浏览器环境 ---------- */
-const html = readFileSync(resolve(root, 'index.html'), 'utf8');
-const { window, document } = parseHTML(html);
-
-// linkedom 缺少的能力，用最小桩补齐
-const storageMap = new Map();
-const localStorage = {
-  get length() { return storageMap.size; },
-  getItem: (k) => (storageMap.has(k) ? storageMap.get(k) : null),
-  setItem: (k, v) => { storageMap.set(String(k), String(v)); },
-  removeItem: (k) => { storageMap.delete(k); },
-  clear: () => { storageMap.clear(); },
-  key: (i) => Array.from(storageMap.keys())[i] ?? null
-};
-
-const errors = [];
-const warnings = [];
-
-const fakeWindow = {
-  document,
-  localStorage,
-  location: { href: 'http://localhost/index.html', hash: '' },
-  navigator: { maxTouchPoints: 0, userAgent: 'node' },
-  devicePixelRatio: 1,
-  setInterval: (...a) => setInterval(...a),
-  clearInterval: (id) => clearInterval(id),
-  setTimeout: (...a) => setTimeout(...a),
-  clearTimeout: (id) => clearTimeout(id),
-  performance: { now: () => Number(process.hrtime.bigint() / 1000000n) },
-  addEventListener: (t, h) => { (fakeWindow._ls[t] ||= []).push(h); },
-  removeEventListener: () => {},
-  _ls: {},
-  /* getComputedStyle 要能读出 style.css 里的 CSS 自定义属性。
-     linkedom 完全不解析样式表，getPropertyValue 恒返回 ''，于是
-     main.js 画成绩曲线空态文案时拿不到 --text-3，只能走兜底色 ——
-     深色主题下那句提示会变成浅灰配深底，几乎看不见。
-     这里直接从 style.css 里解析出 :root / [data-theme="dark"] 两块，
-     按当前 <html data-theme> 选对应那块。
-
-     键位图的配色**不**走这条路：那是纯 CSS 规则（.kb-body 等用 var() 上色），
-     所以这里读不到它，运行时也测不出来 —— verify.mjs 查源码守着。 */
-  getComputedStyle(el) {
-    const theme = (document.documentElement && document.documentElement.getAttribute('data-theme')) || 'light';
-    const cache = {};
-    const read = () => {
-      if (cache[theme]) return cache[theme];
-      const src = readFileSync(resolve(root, 'assets/style.css'), 'utf8');
-      const sel = theme === 'dark' ? '[data-theme="dark"]' : ':root';
-      const at = src.indexOf(sel);
-      const block = at >= 0 ? src.slice(at, src.indexOf('\n}', at)) : '';
-      const map = {};
-      for (const m of block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) map[m[1]] = m[2].trim();
-      cache[theme] = map;
-      return map;
-    };
-    return {
-      getPropertyValue(name) { return read()[name] || ''; }
-    };
-  },
-  requestAnimationFrame: (fn) => setTimeout(() => fn(Date.now()), 16),
-  cancelAnimationFrame: (id) => clearTimeout(id),
-  alert: () => {},
-  confirm: () => true,
-  URL: { createObjectURL: () => 'blob:fake', revokeObjectURL: () => {} },
-  Blob: class { constructor() {} },
-  FileReader: class {},
-  onerror: null
-};
-fakeWindow.window = fakeWindow;
-
-/* ---------- 事件构造器（供测试派发） ---------- */
-class FakeEvent {
-  constructor(type, opts = {}) {
-    this.type = type;
-    this.bubbles = !!opts.bubbles;
-    this.cancelable = !!opts.cancelable;
-    this.defaultPrevented = false;
-    this.target = null;
-    this.currentTarget = null;
-    this._path = [];
-    this._stopped = false;
-  }
-  preventDefault() { this.defaultPrevented = true; }
-  stopPropagation() { this._stopped = true; }
-  stopImmediatePropagation() { this._stopped = true; }
-}
-class FakeKeyboardEvent extends FakeEvent {
-  constructor(type, opts = {}) {
-    super(type, opts);
-    this.key = opts.key ?? '';
-    this.code = opts.code ?? '';
-    this.keyCode = opts.keyCode ?? 0;
-    this.isComposing = !!opts.isComposing;
-    // 修饰键要齐。早先漏了 shiftKey，导致「Shift+Tab 反向循环焦点」这类
-    // 依赖修饰键的逻辑在测试里恒走 else 分支（shiftKey === undefined），
-    // 断言必然失败 —— 那是测试桩的缺陷，不是被测代码的问题。
-    this.ctrlKey = !!opts.ctrlKey;
-    this.shiftKey = !!opts.shiftKey;
-    this.metaKey = !!opts.metaKey;
-    this.altKey = !!opts.altKey;
-  }
-}
-fakeWindow.Event = FakeEvent;
-fakeWindow.KeyboardEvent = FakeKeyboardEvent;
-window.Event = FakeEvent;
-window.KeyboardEvent = FakeKeyboardEvent;
-
-/** 派发一个合成事件到元素（通过捕获的监听器表，规避 linkedom 私有存储） */
-function fire(el, type, opts = {}) {
-  if (!el) return false;
-  const ev = new FakeEvent(type, { bubbles: true, ...opts });
-  ev.target = el;
-  ev.currentTarget = el;
-  ev._path = [{ currentTarget: el, target: el }];
-
-  let fired = false;
-  // 1) 优先用捕获到的监听器（含冒泡路径上的祖先）
-  let node = el;
-  while (node && node.nodeType === 1) {
-    const hs = node.__handlers && node.__handlers[type];
-    if (hs) {
-      for (const h of hs.slice()) {
-        ev.currentTarget = node;
-        try { h.call(node, ev); fired = true; } catch (e) { console.error(e); }
-        if (ev._stopped) break;
-      }
-    }
-    if (ev._stopped) break;
-    node = node.parentNode;
-  }
-  if (fired) return true;
-
-  // 2) 退回原生 dispatchEvent
-  try { return el.dispatchEvent(ev); } catch (_) { return false; }
-}
-
-/** 派发键盘事件到 window（应用监听在 window 上） */
-function fireKey(key, opts = {}) {
-  const ev = new FakeKeyboardEvent('keydown', { key, bubbles: true, ...opts });
-  ev.target = document.body;
-  ev.currentTarget = fakeWindow;
-  ev._path = [{ currentTarget: fakeWindow, target: document.body }];
-  ev.preventDefault = function () { this.defaultPrevented = true; };
-  const ls = fakeWindow._ls && fakeWindow._ls.keydown;
-  if (ls) ls.slice().forEach(h => { try { h(ev); } catch (e) { console.error(e); } });
-  return ev;
-}
-
-// linkedom 的 element 需要 animate / closest 等
-const proto = Object.getPrototypeOf(document.createElement('div'));
-if (!proto.animate) proto.animate = () => ({ finished: Promise.resolve(), cancel() {}, onfinish: null });
-if (!proto.closest) {
-  proto.closest = function (sel) {
-    let el = this;
-    while (el && el.nodeType === 1) {
-      if (el.matches && el.matches(sel)) return el;
-      el = el.parentNode;
-      // linkedom 的 parentNode 到 document 为止
-      if (el && el.nodeType === 9) return null;
-    }
-    return null;
-  };
-}
-if (!proto.matches) {
-  proto.matches = function (sel) { return false; };
-}
-
-/**
- * linkedom 兼容层 0：焦点
- * linkedom 既没有 document.activeElement，Element.prototype.focus 也是空实现，
- * 于是「打开弹窗把焦点送进去 / 关闭后还回来」这类逻辑在测试里**完全观测不到**。
- * 这里补一个最小可观测的焦点模型：focus() 记录 activeElement，
- * blur() 清空，document.contains 判断元素是否还在树上。
- * 只要够测「焦点有没有被正确迁移」即可，不追求与浏览器完全一致。
+/*
+ * 模拟浏览器基座已抽到 tools/harness.mjs，与 clock.mjs 及各套集成测试共用
+ * 同一份（原来是每个文件各抄一遍 ~330 行，抄错一处就两地不一致）。
+ *
+ * 这里**用真实时钟**（realTimers: true）：本套测的是「真应用接到真事件链上
+ * 能不能跑通」，而应用自身的定时行为（8ms 按键防抖、250ms 心跳、反馈条
+ * 3200ms 自动清除）正是被测对象的一部分，整体虚拟化就不是在测它了。
+ *
+ * 所以这里的策略是**等状态**而不是等毫秒数：
+ *   · 点完立刻要「接线落定」→ await settle()（fire 是同步的，绝大多数等待
+ *     只是残留；settle 让出一轮事件循环，语义明确）；
+ *   · 要等某个状态成立（设置防抖落盘）→ await waitFor(pred)；
+ *   · 真正依赖时长的少数几处（按键 8ms 防抖、引擎提示/揭晓的时间线、
+ *     限时结束）→ 要么显式 sleep 并注明原因，要么单独借一台虚拟时钟。
+ * 这样既缩短了测试，也不再靠猜毫秒数去赌异步是否跑完。
  */
-if (!proto.focus || typeof document.activeElement === 'undefined') {
-  let active = null;
-  proto.focus = function () { active = this; };
-  proto.blur = function () { if (active === this) active = null; };
-  Object.defineProperty(document, 'activeElement', {
-    configurable: true,
-    get() { return active || document.body || null; }
-  });
-  Object.defineProperty(document, 'hasFocus', {
-    configurable: true,
-    value() { return true; }
-  });
-}
-
-/**
- * linkedom 兼容层 0b：offsetParent
- * trapModalTab 用 `offsetParent !== null` 过滤「可见」元素；linkedom 恒返回
- * undefined，会把所有候选都滤掉。这里统一返回一个非 null 值（视作可见），
- * 让 Tab 循环逻辑可被测。真实浏览器里隐藏元素的 offsetParent 才是 null。
- */
-if (!('offsetParent' in proto) || proto.offsetParent === undefined) {
-  Object.defineProperty(proto, 'offsetParent', {
-    configurable: true,
-    get() { return this.parentNode || null; }
-  });
-}
-
-// 简易 canvas 上下文桩
-const canvasStub = {
-  setTransform() {}, clearRect() {}, save() {}, restore() {}, beginPath() {}, moveTo() {},
-  lineTo() {}, stroke() {}, fill() {}, closePath() {}, arc() {}, fillText() {},
-  quadraticCurveTo() {}, setLineDash() {},
-  createLinearGradient: () => ({ addColorStop() {} })
-};
-const origCreate = document.createElement.bind(document);
-document.createElement = (tag) => {
-  const el = origCreate(tag);
-  if (String(tag).toLowerCase() === 'canvas' && !el.getContext) {
-    el.getContext = () => canvasStub;
-  }
-  return el;
-};
-
-/**
- * linkedom 兼容层 1：select/input 的 value 可写
- * 真实浏览器的 select.value / input.value 是可读写的；
- * linkedom 把 select.value 实现为只读 getter。这里补上 setter，
- * 使测试环境更贴近浏览器（应用代码无需为此改变）。
- */
-function patchValueProperty(el) {
-  if (!el || el.__valuePatched) return;
-  el.__valuePatched = true;
-  let v = '';
-  try {
-    const desc = Object.getOwnPropertyDescriptor(el, 'value');
-    if (desc && desc.get) v = desc.get.call(el) || '';
-  } catch (_) {}
-  try {
-    Object.defineProperty(el, 'value', {
-      configurable: true,
-      get() { return v; },
-      set(nv) { v = String(nv == null ? '' : nv); }
-    });
-  } catch (_) { /* 无法重定义则忽略 */ }
-}
-
-Array.from(document.querySelectorAll('select, input, textarea')).forEach(patchValueProperty);
-
-/**
- * linkedom 兼容层 2：捕获事件监听器
- * linkedom 把 addEventListener 的注册表存在模块私有 WeakMap 中，外部无法读取，
- * 导致测试无法触发应用绑定的事件。这里在元素层面拦截 addEventListener，
- * 把监听器额外记录到元素自身的 __handlers 上，供测试派发使用。
- */
-function captureListeners(el) {
-  if (!el || el.__listenerCapture) return;
-  el.__listenerCapture = true;
-  el.__handlers = {};
-  const origAdd = el.addEventListener.bind(el);
-  el.addEventListener = function (type, fn, opts) {
-    if (typeof fn === 'function') {
-      (this.__handlers[type] ||= []).push(fn);
-    }
-    return origAdd(type, fn, opts);
-  };
-  const origRemove = el.removeEventListener.bind(el);
-  el.removeEventListener = function (type, fn, opts) {
-    if (this.__handlers && this.__handlers[type]) {
-      this.__handlers[type] = this.__handlers[type].filter(h => h !== fn);
-    }
-    return origRemove(type, fn, opts);
-  };
-}
-
-Array.from(document.querySelectorAll('*')).forEach(captureListeners);
-
-const origCreate2 = document.createElement;
-document.createElement = (tag) => {
-  const el = origCreate2(tag);
-  const t = String(tag).toLowerCase();
-  if (t === 'canvas' && !el.getContext) el.getContext = () => canvasStub;
-  if (t === 'select' || t === 'input' || t === 'textarea') patchValueProperty(el);
-  captureListeners(el);
-  return el;
-};
-
-// 把 stub 注入全局（main.js 直接引用 window / document）
-globalThis.window = fakeWindow;
-globalThis.document = document;
-try {
-  Object.defineProperty(globalThis, 'navigator', {
-    value: fakeWindow.navigator, configurable: true, writable: true
-  });
-} catch (_) { /* Node 已有只读 navigator，忽略 */ }
-globalThis.localStorage = localStorage;
-// main.js 画图表空态文案时调的是**裸的** getComputedStyle（浏览器里
-// window 的属性同时就是全局），所以必须挂到 globalThis，只挂 fakeWindow 够不着。
-// matchMedia 同理：a11y.js 里的 prefersDark() / prefersReducedMotion() 走
-// window.matchMedia，挂全局是为了让走 window 之外的路径也能解析。
-globalThis.getComputedStyle = fakeWindow.getComputedStyle;
-globalThis.matchMedia = fakeWindow.matchMedia;
-globalThis.performance = fakeWindow.performance;
-globalThis.requestAnimationFrame = fakeWindow.requestAnimationFrame;
-globalThis.cancelAnimationFrame = fakeWindow.cancelAnimationFrame;
-globalThis.Blob = fakeWindow.Blob;
-globalThis.FileReader = fakeWindow.FileReader;
-globalThis.devicePixelRatio = 1;
-
-// 捕获 console
-const origError = console.error;
-const origWarn = console.warn;
-console.error = (...a) => { errors.push(a.map(String).join(' ')); };
-console.warn = (...a) => { warnings.push(a.map(String).join(' ')); };
+const H = await createHarness({ realTimers: true });
+const { window, document, fakeWindow, errors, warnings, localStorage, storageMap } = H;
+const { fire, fireKey, settle, waitFor } = H;
+const q = H.q;
+const qa = H.qa;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /* ---------- 加载被测模块（绕过 main.js 的自动 boot） ---------- */
 console.log('【1】模块加载');
@@ -345,23 +61,22 @@ ok(!!schMod.getKeymapData, 'scheme 模块加载');
 console.log('\n【2】应用启动（boot）');
 let bootError = null;
 try {
-  await import('../src/main.js');
+  // loadApp 内部会把实例挂到 fakeWindow.__app 上，并在导入后跑一轮 settle()。
+  await H.loadApp();
 } catch (e) {
   bootError = e;
 }
 ok(!bootError, `main.js 加载无异常${bootError ? '：' + bootError.message : ''}`);
-if (bootError) { console.error = origError; process.exit(1); }
+if (bootError) { H.restoreGlobals(); process.exit(1); }
 
-// 等待 DOMContentLoaded（linkedom 已解析完，main.js 会同步 boot）
-await new Promise(r => setTimeout(r, 60));
+// 等 boot 期间的异步接线落定（原来是盲等 60ms；改成等一轮事件循环 + 状态可观测）
+await settle();
 
 ok(errors.length === 0, `启动期间无 error${errors.length ? '：' + errors.join(' | ') : ''}`);
 
 
 /* ---------- 校验 DOM 渲染结果 ---------- */
 console.log('\n【3】初始界面');
-const q = (s) => document.querySelector(s);
-const qa = (s) => Array.from(document.querySelectorAll(s));
 
 ok(!!q('#nav'), '导航栏存在');
 ok(qa('#nav .nav-btn').length === 6, `导航按钮 6 个（实际 ${qa('#nav .nav-btn').length}）`);
@@ -499,7 +214,7 @@ ok(app.sessionMode === 'char', `模式已切换为 char（实际 ${app.sessionMo
 
 // 点击开始
 fire(q('#btnStart'), 'click');
-await new Promise(r => setTimeout(r, 40));
+await settle();
 
 ok(!!app.engine, '引擎已创建');
 ok(q('#setupPanel').hidden === true, '设置面板已隐藏');
@@ -512,8 +227,11 @@ const totalQ = app.engine.questions.length;
 ok(totalQ > 0, `题目数 ${totalQ}`);
 
 // 模拟完整作答（全部打对）
-// 说明：这里给每键加 ~12ms 的间隔，模拟真人打字节奏。
-// 否则机器瞬时完成，用时为 0，速度指标无从计算。
+/* 用时口径：引擎只在 durationSec >= 1 时才落库（拦空练习），而 headless 里
+   按键循环是瞬时的。旧写法给每键加 ~12ms 真实间隔来「把时间磨够」，CI 忙时
+   既慢又不稳。这里改成显式给引擎记账：每轮把 elapsedSec 抬到 1 秒以上，
+   终点由状态决定而不是由墙钟决定 —— 用时是**被测代码要展示的数据**，
+   不该用真实等待去凑。 */
 let guard = 0;
 let pressed = 0;
 while (app.engine.state === 'running' && guard < 20000) {
@@ -524,10 +242,11 @@ while (app.engine.state === 'running' && guard < 20000) {
   const keys = t.keys || [];
   const k = keys[t.pos];
   if (!k) break;
+  // 先记账再按键：最后一键会同步触发 finish → persistRecord，读到的是此刻的用时
+  app.engine.elapsedSec = 2;
   app.engine.pressKey(k.toLowerCase());
   pressed++;
-  // 每键之间让出事件循环，既模拟真人节奏，也让引擎计时器推进
-  await new Promise(r => setTimeout(r, 22));
+  await settle();
 }
 ok(pressed > 5, `模拟按键 ${pressed} 次`);
 ok(app.engine.state === 'finished', `全部打对后结束（实际 ${app.engine.state}）`);
@@ -552,7 +271,7 @@ ok(q('#modal').innerHTML.includes('正确率'), '弹窗含正确率指标');
 // 关闭弹窗
 const closeBtn = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'again');
 if (closeBtn) fire(closeBtn, 'click');
-await new Promise(r => setTimeout(r, 30));
+await settle();
 
 const history = sMod.loadHistory();
 ok(history.length === 1, `历史记录已写入 1 条（实际 ${history.length}）`);
@@ -575,7 +294,7 @@ app.engine.destroy();
 q('#sessionPanel').hidden = true;
 q('#setupPanel').hidden = false;
 fire(q('#btnStart'), 'click');
-await new Promise(r => setTimeout(r, 30));
+await settle();
 ok(app.engine.state === 'running', '第二次练习已开始');
 
 const t0 = app.engine.currentTarget();
@@ -598,8 +317,9 @@ while (app.engine.state === 'running' && guard < 20000) {
   if (t.kind === 'skip' || t.kind === 'punct') { app.engine.pressKey('a'); continue; }
   const k = (t.keys || [])[t.pos];
   if (!k) break;
+  app.engine.elapsedSec = 2;   // 同上：用时靠记账，不等真实秒
   app.engine.pressKey(k.toLowerCase());
-  await new Promise(r => setTimeout(r, 18));
+  await settle();
 }
 const sum2 = app.engine.summary();
 ok(sum2.accuracy < 100, `出错后正确率 < 100（${sum2.accuracy}%）`);
@@ -619,7 +339,7 @@ if (anyBtn) fire(anyBtn, 'click');
 q('#sessionPanel').hidden = false;
 q('#setupPanel').hidden = true;
 fire(q('#btnStart'), 'click');
-await new Promise(r => setTimeout(r, 30));
+await settle();
 const eng3 = app.engine;
 ok(eng3.state === 'running', '第三次练习运行中');
 eng3.pause();
@@ -636,7 +356,7 @@ for (const v of ['why', 'keymap', 'stats', 'review', 'settings', 'practice']) {
   if (!btn) { ok(false, `找不到 ${v} 导航按钮`); continue; }
   const errBefore = errors.length;
   fire(btn, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   const viewEl = q('#view-' + v);
   ok(viewEl && viewEl.classList.contains('is-active'), `${v} 视图已激活`);
   ok(errors.length === errBefore, `${v} 视图渲染无 error${errors.length > errBefore ? '：' + errors.slice(errBefore).join(' | ') : ''}`);
@@ -727,7 +447,7 @@ console.log('\n【10e】能力测验：无提示 + 评分');
   const examCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'exam');
   ok(!!examCard, '存在「能力测验」卡片');
   fire(examCard, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(app.sessionMode === 'exam', `模式切到 exam（实际 ${app.sessionMode}）`);
 
   // 卡片被选中即应弹出说明条
@@ -740,7 +460,7 @@ console.log('\n【10e】能力测验：无提示 + 评分');
 
   // 开跑
   fire(q('#btnStart'), 'click');
-  await new Promise(r => setTimeout(r, 40));
+  await settle();
   const eng = app.engine;
   ok(!!eng, '测验引擎已创建');
   ok(eng.examMode === true, '引擎进入考试模式');
@@ -764,12 +484,26 @@ console.log('\n【10e】能力测验：无提示 + 评分');
   const miniVisible = !!(miniWrap && !miniWrap.hasAttribute('hidden') && miniWrap.hidden !== true);
   ok(!miniVisible, '测验模式隐藏迷你键位图');
 
-  // 停一会，确认不会自己冒提示出来
+  /* 确认测验不会自己冒提示出来。
+     旧写法是「等 260ms 看有没有冒出来」—— 这是个**弱断言**：测验构造时
+     hintDelayMs/revealDelayMs 都是 0，阈值根本没开，260ms 里本来就不该、
+     也不可能有什么发生，等再久也只是白等。
+     这里改成两条确定性断言，零等待：
+       ① 结构：hintEnabled=false 时压根不建提示定时器（_resetHintTimer 直接 return）；
+       ② 行为：把两级阈值与空闲时间**强行**设成「早该触发」，examMode 硬闸门
+          仍必须压住 —— 这才是「测验=无辅助」真正要守的那条线。 */
   const hintEvents = [];
   eng.on('hint', x => hintEvents.push(x));
   eng.on('reveal', x => hintEvents.push(x));
-  await new Promise(r => setTimeout(r, 260));
-  ok(hintEvents.length === 0, `测验模式停留不产生任何提示（${hintEvents.length} 次）`);
+  ok(eng._hintTimer == null, '测验不建提示定时器（hintEnabled=false）');
+  {
+    const savedHint = eng.hintEnabled, savedHD = eng.hintDelayMs, savedRD = eng.revealDelayMs;
+    eng.hintEnabled = true; eng.hintDelayMs = 60; eng.revealDelayMs = 140;
+    eng._idleSince = Date.now() - 60000;   // 假装干坐了 60 秒
+    eng._checkHint();
+    eng.hintEnabled = savedHint; eng.hintDelayMs = savedHD; eng.revealDelayMs = savedRD;
+    ok(hintEvents.length === 0, `测验模式即使「空闲 60 秒」也不给提示（${hintEvents.length} 次）`);
+  }
 
   // 打完这一卷（全部打对）
   let g = 0;
@@ -787,8 +521,12 @@ console.log('\n【10e】能力测验：无提示 + 评分');
     if (t.kind === 'skip' || t.kind === 'punct') { app.engine.pressKey('a'); continue; }
     const k = (t.keys || [])[t.pos];
     if (!k) break;
+    /* 记一笔用时再按键：测验成绩要落库，而 persistRecord 只在
+       durationSec >= 1 时才写（拦空练习）。headless 里这一卷是瞬时打完的，
+       不记账就拿不到分数/等级，后面几条断言会跟着红。 */
+    app.engine.elapsedSec = 2;
     app.engine.pressKey(k.toLowerCase());
-    await new Promise(r => setTimeout(r, 2));
+    await settle();
   }
   ok(testedKinds.size === 3, '测验覆盖拆分、单字与词组三类题');
   ok(!answersExposed, '测验每次换题和逐键输入均保留题干，不提前暴露拆分键位或拼音悬浮提示');
@@ -839,7 +577,11 @@ const sel = q('#setDuration');
 if (sel) {
   sel.value = '300';
   fire(sel, 'change');
-  await new Promise(r => setTimeout(r, 500));
+  /* 设置是防抖落盘的（saveSettingsDebounced，400ms）。旧写法盲等 500ms：
+     快的时候白等，CI 忙的时候可能还没写下去。改成等**状态**成立 ——
+     只要落盘了就立刻返回，没落盘就一直等到超时。 */
+  await waitFor(() => sMod.loadSettings().duration === 300,
+    { label: '时长设置落盘（saveSettingsDebounced 400ms）' });
   const loaded = sMod.loadSettings();
   ok(loaded.duration === 300, `时长设置已持久化（实际 ${loaded.duration}）`);
 }
@@ -866,13 +608,14 @@ console.log('\n【9c】每日目标：设置、进度条与 HUD');
     fire(charsInput, 'change');
   }
 
-  await new Promise(r => setTimeout(r, 500));
+  await waitFor(() => sMod.loadSettings().dailyGoalChars === 250,
+    { label: '每日字数落盘（saveSettingsDebounced 400ms）' });
   const loadedGoal = sMod.loadSettings();
   ok(loadedGoal.dailyGoalChars === 250, `每日字数已持久化（实际 ${loadedGoal.dailyGoalChars}）`);
 
   // 统计页进度条：设了目标就应该可见，且展示百分比
   fire(q('[data-view="stats"]'), 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   const bar = q('#todayGoalBar');
   ok(bar && !bar.hidden, '设了目标后统计页进度条可见');
   ok(bar && /%/.test(bar.textContent), '进度条展示完成度百分比');
@@ -882,13 +625,13 @@ console.log('\n【9c】每日目标：设置、进度条与 HUD');
   if (charsInput && sessInput) {
     charsInput.value = '0'; fire(charsInput, 'change');
     sessInput.value = '0'; fire(sessInput, 'change');
-    await new Promise(r => setTimeout(r, 30));
+    await settle();
     ok(q('#todayGoalBar').hidden, '两项目标都为 0 时进度条隐藏');
 
     // 复原成有目标，供后续用例使用
     charsInput.value = '100'; fire(charsInput, 'change');
     sessInput.value = '1'; fire(sessInput, 'change');
-    await new Promise(r => setTimeout(r, 30));
+    await settle();
   }
 }
 
@@ -911,45 +654,45 @@ console.log('\n【9d】自定义文本：粘贴 → 开始 → 打字 → 落库
   const customCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'custom');
   ok(!!customCard, '存在「自定义文本」模式卡片');
   fire(customCard, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(app.sessionMode === 'custom', `模式切到 custom（实际 ${app.sessionMode}）`);
   ok(q('#customTextField').hidden === false, '自定义文本输入区已显示');
 
   // 切到别的模式 → 输入区隐藏（避免「填了却不生效」的误解）
   fire(qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char'), 'click');
-  await new Promise(r => setTimeout(r, 10));
+  await settle();
   ok(q('#customTextField').hidden === true, '切到其他模式后输入区隐藏');
   fire(customCard, 'click');
-  await new Promise(r => setTimeout(r, 10));
+  await settle();
 
   // 空文本点开始 → 拒绝并给出提示，不进入练习
   fire(q('[data-view="practice"]'), 'click');
-  await new Promise(r => setTimeout(r, 10));
+  await settle();
   ta.value = '';
   fire(ta, 'input');
   fire(q('#btnStart'), 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(q('#setupPanel').hidden === false && !app.engine, '空文本时不启动练习（停留在设置面板）');
 
   // 纯标点 → 同样拒绝
   ta.value = '，。！？';
   fire(ta, 'input');
   fire(q('#btnStart'), 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(!app.engine, '没有可练汉字时不启动练习');
 
   // 有效文本 → 正常开练
   const source = '今天天气不错我们出去走走然后回家吃饭';
   ta.value = source;
   fire(ta, 'input');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
 
   // 实时统计：显示了可练字数
   const stat = q('#customTextStat');
   ok(stat && stat.textContent.includes('可练'), `输入后显示可练字数（实际「${stat && stat.textContent}」)`);
 
   fire(q('#btnStart'), 'click');
-  await new Promise(r => setTimeout(r, 40));
+  await settle();
   ok(!!app.engine, '有效文本启动了练习');
   ok(app.engine.mode === 'custom', `引擎模式为 custom（实际 ${app.engine.mode}）`);
   ok(app.engine.currentQuestion()?.kind === 'passage', '自定义文本题目是 passage 类型');
@@ -966,9 +709,10 @@ console.log('\n【9d】自定义文本：粘贴 → 开始 → 打字 → 落库
     const keys = t.keys || [];
     const k = keys[t.pos];
     if (!k) break;
+    // 引擎只在 durationSec >= 1 时落库（拦空练习），用时靠记账而非真实等待
+    eng.elapsedSec = 2;
     eng.pressKey(k.toLowerCase());
-    // 引擎只在 durationSec >= 1 时落库（拦空练习），所以这里也要放慢节奏
-    await new Promise(r => setTimeout(r, 26));
+    await settle();
   }
   ok(guard > 0, `自定义文本可连续打字推进（循环 ${guard} 次）`);
   ok(eng.state === 'finished', `自定义文本能打完（实际状态 ${eng.state}）`);
@@ -1006,12 +750,12 @@ console.log('\n【9e】错题连成一段跟打：复习页 → 自定义文本'
 
   // 进入复习页
   fire(q('[data-view="review"]'), 'click');
-  await new Promise(r => setTimeout(r, 40));
+  await settle();
   const btn = q('#btnReviewToCustom');
   ok(!!btn, '复习页有「错题连成一段跟打」按钮');
 
   fire(btn, 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
 
   // 已有内容 → 必须先弹窗确认，不能直接覆盖
   ok(!q('#overlay').hidden, '已有自定义文本时先弹窗确认');
@@ -1019,7 +763,7 @@ console.log('\n【9e】错题连成一段跟打：复习页 → 自定义文本'
   const okBtn = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'ok');
   ok(!!okBtn, '弹窗有确认按钮');
   fire(okBtn, 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
 
   // 确认后：文本已写入设置 + 输入框 + 模式切到 custom
   const txt = app.settings.customText || '';
@@ -1032,9 +776,9 @@ console.log('\n【9e】错题连成一段跟打：复习页 → 自定义文本'
 
   // 导出后能真的开练（这才是这个功能的终点）
   fire(q('[data-view="practice"]'), 'click');
-  await new Promise(r => setTimeout(r, 10));
+  await settle();
   fire(q('#btnStart'), 'click');
-  await new Promise(r => setTimeout(r, 40));
+  await settle();
   ok(!!app.engine && app.engine.mode === 'custom', '导出的错题文本可直接开练');
   if (app.engine) { app.engine.destroy(); app.engine = null; }
   q('#sessionPanel').hidden = true;
@@ -1047,12 +791,12 @@ console.log('\n【9e】错题连成一段跟打：复习页 → 自定义文本'
   sMod.clearWeak();
   app.settings.customText = '';
   fire(q('[data-view="review"]'), 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   const btn2 = q('#btnReviewToCustom');
   // 无记录时复习页走的是空态分支，按钮可能不存在 —— 两种情况都接受
   if (btn2) {
     fire(btn2, 'click');
-    await new Promise(r => setTimeout(r, 20));
+    await settle();
     ok(app.settings.customText === '', '没有易错记录时不写入空文本');
   } else {
     ok(!!q('#reviewBody').textContent.match(/暂无需要复习/), '无记录时复习页走空态分支');
@@ -1133,14 +877,14 @@ const errCountBefore9b = errors.length;
 console.log('\n【10】键位图交互');
 const navKeymap = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'keymap');
 fire(navKeymap, 'click');
-await new Promise(r => setTimeout(r, 20));
+await settle();
 const svg = q('#fullKeymap svg');
 ok(!!svg, '完整键位图存在');
 const vKey = svg && svg.querySelector('[data-key="V"]');
 ok(!!vKey, '找到 V 键元素');
 if (vKey) {
   fire(vKey, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(q('#keyDetail').hidden === false, '点击键位后详情面板展开');
   ok(q('#keyDetail').innerHTML.includes('zh'), 'V 键详情包含 zh 声母');
   ok(q('#keyDetail').innerHTML.includes('ui'), 'V 键详情包含 ui 韵母');
@@ -1179,70 +923,88 @@ if (vKey) {
 /* ---------- 卡住自动提示 ---------- */
 console.log('\n【10b】卡住自动提示');
 {
-  // 用极短的时间线构造一次练习，验证「提示 → 给答案」与统计口径
-  const eng = new engineMod.PracticeEngine({
-    questions: qMod.generateQuestions({ mode: 'char', count: 4 }),
-    mode: 'char',
-    hintDelayMs: 60,
-    revealDelayMs: 140
-  });
-  const hints = [], reveals = [];
-  eng.on('hint', x => hints.push(x));
-  eng.on('reveal', x => reveals.push(x));
-  eng.start();
+  /* 这一段本质是时间线：hintDelayMs=60 该闪键位，revealDelayMs=140 该给答案，
+     引擎用 setInterval(max(80, min(60,140)) = 80ms) 反复检查 idle。
+     旧写法用 220ms / 320ms 真实等待去「赌」定时器已经触发 —— 慢，且 CI 忙时
+     定时器被推迟就会偶发红灯。这里把 window 的定时器与 Date.now 临时接到一个
+     虚拟时钟上，时间推进多少由测试说了算，于是到期边界可以精确断言：
+     79ms 不该有、80ms 该有；159ms 还没到检查点、160ms 才 reveal。 */
+  const vclock = createVirtualClock();
+  const restoreClock = virtualizeWindowTimers(vclock, fakeWindow);
+  try {
+    // 用极短的时间线构造一次练习，验证「提示 → 给答案」与统计口径
+    const eng = new engineMod.PracticeEngine({
+      questions: qMod.generateQuestions({ mode: 'char', count: 4 }),
+      mode: 'char',
+      hintDelayMs: 60,
+      revealDelayMs: 140
+    });
+    const hints = [], reveals = [];
+    eng.on('hint', x => hints.push(x));
+    eng.on('reveal', x => reveals.push(x));
+    eng.start();
 
-  // 暂停状态下绝不应触发提示
-  eng.pause();
-  await new Promise(r => setTimeout(r, 220));
-  ok(hints.length === 0, '暂停期间不触发提示');
-  eng.resume();
+    // 暂停会 clearHintTimer；即便把虚拟时间推过两级阈值也不该有任何提示
+    eng.pause();
+    vclock.advance(220);
+    ok(hints.length === 0, '暂停期间不触发提示');
 
-  await new Promise(r => setTimeout(r, 320));
-  ok(hints.length >= 1, `停留后触发 hint（${hints.length} 次）`);
-  ok(reveals.length >= 1, `继续停留触发 reveal（${reveals.length} 次）`);
-  ok(hints[0] && /^[a-z]$/.test(hints[0].key), `提示载荷带正确的键位（${hints[0] && hints[0].key}）`);
+    eng.resume();          // 重新计时：_idleSince = 此刻，检查间隔 80ms
+    vclock.advance(79);    // 尚未到第一个检查点
+    ok(hints.length === 0, '未到检查间隔不闪键位（79ms < 首个检查点 80ms）');
+    vclock.advance(1);     // t=80，idle=80 ≥ hintDelayMs(60) → hint
+    ok(hints.length >= 1, `停留后触发 hint（${hints.length} 次）`);
+    ok(reveals.length === 0, '未到 revealDelayMs 不给答案');
+    vclock.advance(79);    // t=159，下次检查在 160，此刻仍不给答案
+    ok(reveals.length === 0, '抵达 revealDelayMs 前不给答案（159ms）');
+    vclock.advance(1);     // t=160，idle=160 ≥ revealDelayMs(140) → reveal
+    ok(reveals.length >= 1, `继续停留触发 reveal（${reveals.length} 次）`);
+    ok(hints[0] && /^[a-z]$/.test(hints[0].key), `提示载荷带正确的键位（${hints[0] && hints[0].key}）`);
 
-  // 提示已连到「当前字符」上：hintedChars 在音节打完时才结算，
-  // 所以这里先验证提示确实登记到了当前作答目标（不是空转），
-  // 真正的计数校验放到整轮结束后（见下方 sm.hintedChars）。
-  ok(eng.hintLevel() !== '', `停留后引擎处于提示态（${eng.hintLevel()}）`);
-  const t = eng.currentTarget();
-  ok(!!(t && t.keys && t.keys.length), '提示后仍可正常取到当前作答目标');
-  eng.pressKey(String(t.keys[t.pos]).toLowerCase());
+    // 提示已连到「当前字符」上：hintedChars 在音节打完时才结算，
+    // 所以这里先验证提示确实登记到了当前作答目标（不是空转），
+    // 真正的计数校验放到整轮结束后（见下方 sm.hintedChars）。
+    ok(eng.hintLevel() !== '', `停留后引擎处于提示态（${eng.hintLevel()}）`);
+    const t = eng.currentTarget();
+    ok(!!(t && t.keys && t.keys.length), '提示后仍可正常取到当前作答目标');
+    eng.pressKey(String(t.keys[t.pos]).toLowerCase());
 
-  // 全部打完，检查两个正确率的关系
-  let gg = 0;
-  while (eng.state === 'running' && gg < 200) {
-    gg++;
-    const tt = eng.currentTarget();
-    if (!tt || !tt.keys || !tt.keys.length) break;
-    eng.pressKey(String(tt.keys[tt.pos]).toLowerCase());
-    await new Promise(r => setTimeout(r, 2));
+    // 全部打完，检查两个正确率的关系
+    let gg = 0;
+    while (eng.state === 'running' && gg < 200) {
+      gg++;
+      const tt = eng.currentTarget();
+      if (!tt || !tt.keys || !tt.keys.length) break;
+      eng.pressKey(String(tt.keys[tt.pos]).toLowerCase());
+      await settle();
+    }
+    const sm = eng.summary();
+    ok(sm.accuracy === 100, `全部打对时 accuracy 仍为 100（实际 ${sm.accuracy}）`);
+    ok(sm.independentAccuracy < sm.accuracy,
+      `独立正确率低于表面正确率，说明提示被剔除（${sm.independentAccuracy} < ${sm.accuracy}）`);
+    ok(sm.hintedChars >= 1, `打完整轮后提示过的字符计入 hintedChars（${sm.hintedChars}）`);
+
+    // 主动求助
+    eng.destroy();
+    const eng2 = new engineMod.PracticeEngine({
+      questions: qMod.generateQuestions({ mode: 'char', count: 2 }),
+      mode: 'char',
+      hintDelayMs: 60000, renderDelay: 0,
+      revealDelayMs: 60000
+    });
+    eng2.start();
+    await settle();
+    ok(eng2.hintLevel() === '', '自动提尚未到期时无提示态');
+    ok(eng2.requestHint('reveal') === true, 'requestHint 手动求助成功');
+    ok(eng2.hintLevel() === 'reveal', '手动求助后进入 reveal 态');
+    // 手动求助同样算「依赖提示」，但要打完整个音节才结算，
+    // 此处验证它确实施加到了当前目标上（hint 载荷键位合法）。
+    ok(/^[a-z]$/.test(String(eng2.currentTarget() && eng2.currentTarget().keys[0]).toLowerCase()),
+      '手动求助后当前目标键位合法');
+    eng2.destroy();
+  } finally {
+    restoreClock();
   }
-  const sm = eng.summary();
-  ok(sm.accuracy === 100, `全部打对时 accuracy 仍为 100（实际 ${sm.accuracy}）`);
-  ok(sm.independentAccuracy < sm.accuracy,
-    `独立正确率低于表面正确率，说明提示被剔除（${sm.independentAccuracy} < ${sm.accuracy}）`);
-  ok(sm.hintedChars >= 1, `打完整轮后提示过的字符计入 hintedChars（${sm.hintedChars}）`);
-
-  // 主动求助
-  eng.destroy();
-  const eng2 = new engineMod.PracticeEngine({
-    questions: qMod.generateQuestions({ mode: 'char', count: 2 }),
-    mode: 'char',
-    hintDelayMs: 60000, renderDelay: 0,
-    revealDelayMs: 60000
-  });
-  eng2.start();
-  await new Promise(r => setTimeout(r, 30));
-  ok(eng2.hintLevel() === '', '自动提尚未到期时无提示态');
-  ok(eng2.requestHint('reveal') === true, 'requestHint 手动求助成功');
-  ok(eng2.hintLevel() === 'reveal', '手动求助后进入 reveal 态');
-  // 手动求助同样算「依赖提示」，但要打完整个音节才结算，
-  // 此处验证它确实施加到了当前目标上（hint 载荷键位合法）。
-  ok(/^[a-z]$/.test(String(eng2.currentTarget() && eng2.currentTarget().keys[0]).toLowerCase()),
-    '手动求助后当前目标键位合法');
-  eng2.destroy();
 }
 
 /* ---------- 错误热力图（键维度持久化） ---------- */
@@ -1413,7 +1175,7 @@ console.log('\n【10f】语音朗读：接线与无语音降级');
     const b6 = qa('#modal [data-act]')[0];
     if (b6) fire(b6, 'click');
   }
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
 }
 
 /* ---------- 语音必须在离开练习页/隐藏页面时被掐断 ----------
@@ -1446,29 +1208,29 @@ console.log('\n【10h】语音掐断时机：切视图 / 页面隐藏');
     // ① 从练习页切到设置页 → 必须 cancel 一次
     if (app.view !== 'practice') {
       const navPractice = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
-      if (navPractice) { fire(navPractice, 'click'); await new Promise(r => setTimeout(r, 10)); }
+      if (navPractice) { fire(navPractice, 'click'); await settle(); }
     }
     fake._cancel = 0;
     fire(qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'settings'), 'click');
-    await new Promise(r => setTimeout(r, 10));
+    await settle();
     ok(fake._cancel >= 1, `离开练习页切到设置页 → 朗读被 cancel（调用 ${fake._cancel} 次）`);
 
     // ② 页面隐藏 → 必须 cancel 一次
     fake._cancel = 0;
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
     document.dispatchEvent(new fakeWindow.Event('visibilitychange'));
-    await new Promise(r => setTimeout(r, 10));
+    await settle();
     ok(fake._cancel >= 1, `页面隐藏 → 朗读被 cancel（调用 ${fake._cancel} 次）`);
     Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
 
     // ③ 留在练习页内部切题不应被这里的逻辑误伤（那是 speak() 自己的 cancel 负责）
-    await new Promise(r => setTimeout(r, 10));
+    await settle();
   } finally {
     if (hadSS) fakeWindow.speechSynthesis = prevSS; else delete fakeWindow.speechSynthesis;
     delete fakeWindow.SpeechSynthesisUtterance;
     // 回到练习页，恢复给后续用例的初始视图
     const navPractice2 = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
-    if (navPractice2) { fire(navPractice2, 'click'); await new Promise(r => setTimeout(r, 10)); }
+    if (navPractice2) { fire(navPractice2, 'click'); await settle(); }
   }
 }
 
@@ -1482,19 +1244,19 @@ console.log('\n【10i】弹窗焦点管理：初始聚焦 / Tab 陷阱 / 关闭�
 
   // 先确保弹窗是关着的
   if (overlay && !overlay.hidden) { const b = qa('#modal [data-act]')[0]; if (b) fire(b, 'click'); }
-  await new Promise(r => setTimeout(r, 10));
+  await settle();
 
   ok(!!modal, '（前置）#modal 存在');
 
   // 走真实入口驱动一次弹窗：统计页「清空全部练习记录」→ 确认框
   const navStats = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'stats');
-  if (navStats) { fire(navStats, 'click'); await new Promise(r => setTimeout(r, 20)); }
+  if (navStats) { fire(navStats, 'click'); await settle(); }
   const clearBtn = q('#btnClearStats');
   ok(!!clearBtn, '（前置）统计页有 #btnClearStats');
   if (clearBtn) {
     try { clearBtn.focus(); } catch (_) {}
     fire(clearBtn, 'click');
-    await new Promise(r => setTimeout(r, 20));
+    await settle();
 
     ok(overlay && overlay.hidden === false, '点「清空记录」后弹窗打开');
 
@@ -1542,7 +1304,7 @@ console.log('\n【10i】弹窗焦点管理：初始聚焦 / Tab 陷阱 / 关闭�
       || qa('#modal [data-act]')[0];
     if (cancelBtn) {
       fire(cancelBtn, 'click');
-      await new Promise(r => setTimeout(r, 20));
+      await settle();
       ok(overlay && overlay.hidden === true, '点取消后弹窗关闭');
       const back = document.activeElement;
       ok(!!back && back !== document.body,
@@ -1556,7 +1318,7 @@ console.log('\n【10i】弹窗焦点管理：初始聚焦 / Tab 陷阱 / 关闭�
 
   // 恢复视图
   const navPractice3 = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
-  if (navPractice3) { fire(navPractice3, 'click'); await new Promise(r => setTimeout(r, 10)); }
+  if (navPractice3) { fire(navPractice3, 'click'); await settle(); }
 }
 
 /* ---------- 键位掌握度层（接线层） ----------
@@ -1586,7 +1348,7 @@ console.log('\n【10g】键位掌握度：三层标记共存');
 
   // 走 UI：统计视图渲染后，掌握度标记要真的落在键位图上
   fire(q('[data-view="stats"]'), 'click');
-  await new Promise(r => setTimeout(r, 40));
+  await settle();
 
   const heat = q('#heatWrap');
   ok(!!heat, '统计页有热力图容器');
@@ -1659,7 +1421,7 @@ console.log('\n【10g】键位掌握度：三层标记共存');
   sMod.clearKeyTimings();
   sMod.clearKeyErrors();
   fire(q('[data-view="stats"]'), 'click');
-  await new Promise(r => setTimeout(r, 40));
+  await settle();
   const aAfter = q('#heatWrap').querySelector('.kb-key[data-key="A"]');
   ok(!aAfter.classList.contains('is-mastered'), '清空数据后绿点被撤销');
   ok(!aAfter.querySelector('.kb-mastery-dot'), '清空数据后圆点元素被移除');
@@ -1697,7 +1459,7 @@ for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passag
       fire(q('#selCount'), 'change');
     }
     fire(q('#btnStart'), 'click');
-    await new Promise(r => setTimeout(r, 20));
+    await settle();
 
     let g = 0;
     while (app.engine && app.engine.state === 'running' && g < 30000) {
@@ -1708,7 +1470,7 @@ for (const mode of ['keymap', 'sheng', 'yun', 'split', 'char', 'phrase', 'passag
       const k = (t.keys || [])[t.pos];
       if (!k) break;
       app.engine.pressKey(k.toLowerCase());
-      await new Promise(r => setTimeout(r, 3));
+      await settle();
     }
     const s = app.engine ? app.engine.summary() : null;
     // 测验模式额外确认无提示且出分（分数挂在 app.lastResult 上）
@@ -2152,19 +1914,22 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   const t = eng.currentTarget();
   eng.pressKey(t.keys[0].toLowerCase() === 'x' ? 'q' : 'x');
   const word = eng.currentQuestion().text;
-  /* 必须让真实时间走够 1 秒：persistRecord 只在 durationSec >= 1 时才落库，
-     headless 里按键循环是瞬时的，不 sleep 就什么都不会写进易错表。 */
-  for (let i = 0; i < 40 && (eng.stats.totalChars < 5 || eng.elapsedSec < 1.2); i++) {
+  /* 这里要够两个条件才好落库：打完 ≥5 个字，且 durationSec ≥ 1
+     （persistRecord 拦空练习）。旧写法用 40ms/键 的真实节奏把 1 秒磨出来，
+     慢且不稳。改成直接给引擎记账 —— 用时是被测代码要展示的数据，
+     靠 setTimeout 去凑既费时又不可靠。 */
+  for (let i = 0; i < 40 && eng.stats.totalChars < 5; i++) {
     const x = eng.currentTarget();
     if (!x || !x.keys || !x.keys.length) break;
+    eng.elapsedSec = 2;
     for (const k of x.keys) eng.pressKey(String(k).toLowerCase());
-    await new Promise(r => setTimeout(r, 40));
+    await settle();
   }
   const s = eng.summary();
   ok(s.durationSec >= 1, `用时已累计（${s.durationSec}s / state=${eng.state} / ticker=${!!eng._ticker}），否则不会落库`);
   ok(Object.keys(s.perWordErrors || {}).length >= 1, `按整条记录了词组错误（${JSON.stringify(s.perWordErrors)}）`);
   eng.finish('user');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   const weak = sMod.loadWeak();
   ok(!!weak[word], `词组「${word}」进了易错表`);
   ok(!!weak[word]?.word && weak[word].word === word, '整条记录的 word 字段非空（分组靠它）');
@@ -2174,7 +1939,7 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   const realDueOnly = app.settings.reviewDueOnly;
   app.settings.reviewDueOnly = false;
   fire(q('[data-view="review"]'), 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   const reviewHtml = q('#reviewBody').innerHTML;
   ok(reviewHtml.includes('易错词语'), '复习页出现「易错词语」分组（此前永远为空）');
   const phraseGroupHtml = reviewHtml.split('易错词语')[1] || '';
@@ -2185,7 +1950,7 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   app.settings.reviewDueOnly = realDueOnly;
   const done = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'again');
   if (done) fire(done, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
 
   /* 完成音效：一次有效练习结束要发声（此前 playFinish 从没被调用过）。
      ES module 的命名空间是只读的，不能改写 soundMod.play；
@@ -2214,13 +1979,15 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
     q('#selCount').value = '30'; fire(q('#selCount'), 'change');
     fire(q('#btnStart'), 'click');
     const e2 = app.engine;
-    // 同样要让真实时间走够 1 秒，否则成绩无效、不会触发收尾音
-    for (let i = 0; i < 60 && e2.state === 'running' && e2.elapsedSec < 1.2; i++) {
+    // 够 5 键且用时 ≥1 秒才算有效成绩（否则不出收尾音）。用时直接记账，不等真实秒。
+    for (let i = 0; i < 60 && e2.state === 'running' && e2.stats.keystrokes < 6; i++) {
       const x = e2.currentTarget();
       if (!x || !x.keys || !x.keys.length) break;
+      e2.elapsedSec = 2;
       for (const k of x.keys) e2.pressKey(String(k).toLowerCase());
-      await new Promise(r => setTimeout(r, 40));
+      await settle();
     }
+    e2.elapsedSec = Math.max(2, e2.elapsedSec);
     e2.finish('user');   // 主动结束，走与时间到/打完相同的结算路径
     ok(e2.state === 'finished', '练习已结束（有效成绩才会触发收尾音）');
     ok(audio.oscillators > 0, `有效练习结束会播收尾音（合成 ${audio.oscillators} 个振荡器）`);
@@ -2232,11 +1999,11 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   cleanup();
   const again2 = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'again');
   if (again2) fire(again2, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
 
   // 测验成绩曲线
   fire(q('[data-view="stats"]'), 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   ok(!!q('#scoreChart'), '统计页有测验成绩曲线画布');
   ok(!!q('#scoreNote'), '测验成绩曲线有口径说明节点');
   const hist = sMod.loadHistory();
@@ -2252,15 +2019,15 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   sMod.recordKeyErrors({ v: 3, h: 1 }, 'phrase');
   sMod.recordKeyErrors({ a: 2 }, 'char');
   fire(q('[data-view="stats"]'), 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   q('#statsMode').value = 'all'; fire(q('#statsMode'), 'change');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   // V×3 + H×1 + A×2 = 6 次，3 个键。断言总额比逐键断言更能说明「是全量」
   ok(/共\s*6\s*次按键错误/.test(q('#heatSummary').textContent) &&
     /涉及\s*3\s*个键/.test(q('#heatSummary').textContent),
     `全部模式下热力图是全量累计（${q('#heatSummary').textContent.replace(/\s+/g, ' ').trim().slice(0, 40)}）`);
   q('#statsMode').value = 'phrase'; fire(q('#statsMode'), 'change');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   const phraseHeat = q('#heatSummary').textContent;
   // 词组模式只有 V×3 + H×1 = 4 次、2 个键；A×2 属于单字模式，不该出现
   ok(/共\s*4\s*次按键错误/.test(phraseHeat) && /涉及\s*2\s*个键/.test(phraseHeat) &&
@@ -2273,7 +2040,7 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   sMod.clearKeyErrors();
   sMod.recordKeyErrors({ v: 7 }, '');
   q('#statsMode').value = 'char'; fire(q('#statsMode'), 'change');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(!!q('#heatSummary').querySelector('.heat-fallback-note'),
     '该模式无专属数据时明确说明此处仍为全量累计');
   q('#statsMode').value = 'all'; fire(q('#statsMode'), 'change');
@@ -2285,23 +2052,23 @@ console.log('【新增】词组易错归组、完成音效、测验成绩曲线�
   app.settings.showMiniKeymap = true;
   app.keymapHidden = null;
   fire(q('#btnStart'), 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   const km = q('#miniKeymap');
   ok(!km.hidden, '默认可见');
   const btnKm = q('#btnToggleKeymap');
   ok(btnKm.textContent === '隐藏', '按钮文案与实际一致');
   fire(btnKm, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(km.hidden, '点一次收起');
   ok(btnKm.textContent === '显示', '收起后按钮文案正确');
   // 再走一帧 renderSession，用户的选择必须活下来
   const t2 = app.engine.currentTarget();
   app.engine.pressKey(String(t2.keys[t2.pos]).toLowerCase());
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(km.hidden, '重绘后仍然保持收起（此前会被每帧覆盖回去）');
   ok(btnKm.textContent === '显示', '重绘后按钮文案仍然正确');
   fire(btnKm, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(!km.hidden, '再点一次恢复显示');
   cleanup();
   sMod.clearWeak();
@@ -2399,7 +2166,7 @@ console.log('【新增】按键耗时：结算面板的「反应最慢的键」�
 
   /* ---------- ③ 统计页：慢键层画在热力图上 ---------- */
   fire(q('[data-view="stats"]'), 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   ok(!!q('#slowKeysBox'), '统计页有慢键说明容器');
   const slowBoxText = q('#slowKeysBox')?.textContent || '';
   // 样本不足 5 次时必须**如实说明**，而不是安静地不显示
@@ -2418,7 +2185,7 @@ console.log('【新增】按键耗时：结算面板的「反应最慢的键」�
     D: { lead: [], follow: Array(12).fill(650) }
   }, 'char');
   fire(q('[data-view="stats"]'), 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   const rings = qa('#heatWrap .kb-slow-ring');
   ok(rings.length >= 2, `慢键环已画到键盘图上（${rings.length} 个）`);
   ok(q('#heatWrap .kb-key.is-slow'), '慢键同时带上 is-slow 类（供样式分级）');
@@ -2447,7 +2214,7 @@ console.log('【新增】按键耗时：结算面板的「反应最慢的键」�
   const dotsBefore = qa('#heatWrap .kb-mastery-dot').length;
   themeSel.value = 'dark';
   fire(themeSel, 'change');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   ok(qa('#heatWrap .kb-slow-ring').length === rings.length,
     `切换主题后慢键环没有丢失（${qa('#heatWrap .kb-slow-ring').length} 个）`);
   // 掌握度是第三个通道，重绘时同样不能被漏掉。
@@ -2457,12 +2224,12 @@ console.log('【新增】按键耗时：结算面板的「反应最慢的键」�
     const fake = Array.from({ length: 20 }, (_, i) => 200 + (i % 5) * 10);
     ls.recordKeyTimings({ Z: { lead: fake, follow: [] } }, 'char');
     fire(q('[data-view="stats"]'), 'click');
-    await new Promise(r => setTimeout(r, 30));
+    await settle();
     const dotsNow = qa('#heatWrap .kb-mastery-dot').length;
     ok(dotsNow >= 1, `注入已掌握键后出现圆点（${dotsNow} 个）`);
     themeSel.value = 'light';
     fire(themeSel, 'change');
-    await new Promise(r => setTimeout(r, 30));
+    await settle();
     ok(qa('#heatWrap .kb-mastery-dot').length === dotsNow,
       `切换主题后掌握度圆点没有丢失（${qa('#heatWrap .kb-mastery-dot').length} 个）`);
     ls.clearKeyTimings();
@@ -2470,12 +2237,12 @@ console.log('【新增】按键耗时：结算面板的「反应最慢的键」�
   }
   themeSel.value = 'auto';
   fire(themeSel, 'change');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
 
   /* ---------- ⑥ 清掉慢键层不残留 ---------- */
   ls.clearKeyTimings();
   fire(q('[data-view="stats"]'), 'click');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   ok(qa('#heatWrap .kb-slow-ring').length === 0, '数据清空后慢键环全部移除');
   ok(!!q('#heatWrap .kb-key.is-slow') === false, 'is-slow 类也被清掉');
   app.engine = null;
@@ -2500,14 +2267,14 @@ console.log('【新增】主题切换：属性、图表、键位图、设置持�
 
   // 默认跟随系统；测试环境 matchMedia 恒为 false → 浅色
   fire(q('[data-view="settings"]'), 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(html.getAttribute('data-theme') === 'light',
     `默认（系统浅色）解析为 light（实际 ${html.getAttribute('data-theme')}）`);
 
   // 切到深色
   sel.value = 'dark';
   fire(sel, 'change');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   ok(html.getAttribute('data-theme') === 'dark', '选择深色后 data-theme=dark');
   ok(app.settings.theme === 'dark', '设置已更新为 dark');
   ok(String(html.style.colorScheme || '').indexOf('dark') >= 0, 'color-scheme 同步（表单控件/滚动条跟随）');
@@ -2548,33 +2315,34 @@ console.log('【新增】主题切换：属性、图表、键位图、设置持�
   ok(darkText3.trim() === darkText3 && darkText3 !== '', `--text-3 深色可解析且无空白（${JSON.stringify(darkText3)}）`);
   sel.value = 'light';
   fire(sel, 'change');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   const lightText3 = readText3();
   ok(lightText3 !== '' && lightText3 !== darkText3,
     `--text-3 随主题变化（浅 ${lightText3} / 深 ${darkText3}）`);
   sel.value = 'dark';
   fire(sel, 'change');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
 
   // 切回浅色，颜色要真的回来
   ok(html.getAttribute('data-theme') === 'dark', '（对照）切回深色');
   sel.value = 'light';
   fire(sel, 'change');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   ok(html.getAttribute('data-theme') === 'light', '切回浅色');
   ok(chartMod.currentTheme() === lightPal, '图表配色回到浅色');
 
   // 非法值不能留下「无主题」状态
   sel.value = 'nonsense';
   fire(sel, 'change');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(app.settings.theme === 'auto' && html.getAttribute('data-theme') === 'light',
     '非法值回落 auto（仍解析出有效主题）');
 
   // 持久化：重开应用要沿用
   sel.value = 'dark';
   fire(sel, 'change');
-  await new Promise(r => setTimeout(r, 480));   // saveSettingsDebounced 400ms
+  await waitFor(() => sMod.loadSettings().theme === 'dark',
+    { label: '主题落盘（saveSettingsDebounced 400ms）' });
   const reloaded = sMod.loadSettings();
   ok(reloaded.theme === 'dark', `主题已落盘（实际 ${reloaded.theme}）`);
   ok(sMod.saveSettings({ theme: 'light' }) !== false, '可写回 light');
@@ -2583,7 +2351,7 @@ console.log('【新增】主题切换：属性、图表、键位图、设置持�
   ok(sMod.loadSettings().theme !== 'glow', `脏值被枚举白名单拦下（实际 ${sMod.loadSettings().theme}）`);
   sMod.saveSettings({ theme: 'auto' });
   fire(sel, 'change');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   cleanup();
 }
 
@@ -2626,7 +2394,7 @@ console.log('【新增】提示依赖度可见、存储降级如实告知');
   ok(sum.hintedChars >= 1, `存在依赖提示的字（${sum.hintedChars}）`);
   ok(sum.independentAccuracy <= sum.accuracy, '独立正确率不高于表面正确率');
   eng.finish('user');
-  await new Promise(r => setTimeout(r, 30));
+  await settle();
   // 结算页
   const modalText = q('#modal').textContent;
   ok(modalText.includes('依赖提示'), '结算页显示依赖提示字数');
@@ -2638,7 +2406,7 @@ console.log('【新增】提示依赖度可见、存储降级如实告知');
   cleanup();
   const again = qa('#modal [data-act]').find(b => b.getAttribute('data-act') === 'again');
   if (again) fire(again, 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
 
   // 存储降级：徽标与设置页文案都不能再说「保存在 localStorage」
   const badge = q('#storageBadge');
@@ -2651,7 +2419,7 @@ console.log('【新增】提示依赖度可见、存储降级如实告知');
     const { _resetStorageState } = await import('../src/core/storage.js');
     _resetStorageState();
     fire(q('[data-view="settings"]'), 'click');
-    await new Promise(r => setTimeout(r, 20));
+    await settle();
     const b2 = q('#storageBadge');
     ok(b2.classList.contains('is-warn'), '存储不可用时徽标高亮');
     ok(!b2.textContent.includes('本地存储') || b2.textContent.includes('内存'),
@@ -2666,7 +2434,7 @@ console.log('【新增】提示依赖度可见、存储降级如实告知');
     _resetStorageState();
     fire(q('[data-view="settings"]'), 'click');
   }
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
   ok(!q('#storageBadge').classList.contains('is-warn'), '恢复后徽标回到正常态');
   ok(q('#storageNote').textContent.includes('localStorage'), '恢复后设置页文案回到正常承诺');
 }
@@ -2680,7 +2448,7 @@ console.log('\n【12b】DOM 缓存：命中且不返回陈旧引用');
 {
   // 借练习页的 #hudSpeed 做样本（它就在每键路径上）
   const navPractice = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
-  if (navPractice) { fire(navPractice, 'click'); await new Promise(r => setTimeout(r, 20)); }
+  if (navPractice) { fire(navPractice, 'click'); await settle(); }
 
   const hud = q('#hudSpeed');
   ok(!!hud, '（前置）找到 #hudSpeed');
@@ -2702,7 +2470,7 @@ console.log('\n【12b】DOM 缓存：命中且不返回陈旧引用');
 
     // ② 通过真实答题驱动，值必须真的落到 DOM 上
     driveOnce();
-    await new Promise(r => setTimeout(r, 10));
+    await settle();
     const after = q('#hudSpeed').textContent;
     ok(typeof after === 'string' && after.length > 0,
       `经缓存写入后 DOM 上的文字可读（「${after}」）`);
@@ -2717,7 +2485,7 @@ console.log('\n【12b】DOM 缓存：命中且不返回陈旧引用');
     ok(!document.contains(hud), '旧节点已被移出文档（构造出「缓存陈旧」的场景）');
 
     driveOnce();
-    await new Promise(r => setTimeout(r, 10));
+    await settle();
     const live = q('#hudSpeed');
     ok(live === fresh, '缓存识别到旧节点已失效，改用新节点');
     ok(live.textContent !== 'SENTINEL',
@@ -2746,7 +2514,7 @@ console.log('\n【12b】DOM 缓存：命中且不返回陈旧引用');
 console.log('\n【12c】change 重绘粒度：key 不重写题干，char/question 要更新');
 {
   const navPractice = qa('#nav .nav-btn').find(b => b.getAttribute('data-view') === 'practice');
-  if (navPractice) { fire(navPractice, 'click'); await new Promise(r => setTimeout(r, 20)); }
+  if (navPractice) { fire(navPractice, 'click'); await settle(); }
 
   // 干净起一局（词组模式：保证有 2 键音节，才有「音节内推进」）
   if (app.engine) { app.engine.destroy(); app.engine = null; }
@@ -2756,7 +2524,7 @@ console.log('\n【12c】change 重绘粒度：key 不重写题干，char/questio
   const phraseCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'phrase');
   if (phraseCard) fire(phraseCard, 'click');
   fire(q('#btnStart'), 'click');
-  await new Promise(r => setTimeout(r, 20));
+  await settle();
 
   const engG = app.engine;
   ok(!!engG, '（前置）练习已启动');
@@ -2805,11 +2573,20 @@ console.log('\n【12c】change 重绘粒度：key 不重写题干，char/questio
       const promptEl = q('#prompt');
       const beforeInner = promptEl.innerHTML;
       const beforeChild = promptEl.firstElementChild;
+      const posBefore = tgt.pos;
 
-      // 走真实的按键链路（fireKey 会经过 onKeyDown → handleKeyInput → pressKey）
+      /* 走真实的按键链路（fireKey 会经过 onKeyDown → handleKeyInput → pressKey）。
+         先等过 8ms 防抖再按（见下方 ③ 的说明），否则这一按会被丢掉，
+         下面「题干未变」就成了**假的绿**：什么都没发生，当然没变。 */
+      await sleep(12);
       const key1 = String(tgt.keys[0]).toLowerCase();
       fireKey(key1);
-      await new Promise(r => setTimeout(r, 10));
+      await settle();
+
+      // 先证明这一按真的进了引擎（不然下面的「未变」不成立）
+      const tAfter = engG.currentTarget();
+      ok(!!tAfter && tAfter.pos === posBefore + 1,
+        `音节内推进：按键确实被受理（pos ${posBefore} → ${tAfter ? tAfter.pos : '?'}）`);
 
       const afterChild = q('#prompt').firstElementChild;
       ok(q('#prompt').innerHTML === beforeInner,
@@ -2824,8 +2601,14 @@ console.log('\n【12c】change 重绘粒度：key 不重写题干，char/questio
         const lastKey = String(t2.keys[t2.keys.length - 1]).toLowerCase();
         const beforeDone = q('#prompt').innerHTML;
         const beforeDoneChild = q('#prompt').firstElementChild;
+        /* 这里**必须**走真实时间：main.js:onKeyDown 有一道 8ms 的
+           「重复触发保护」（防输入法连发），两次按键间隔小于 8ms 时
+           第二下会被直接丢掉。② 刚按过一键，紧接着按第二键若不等，
+           这一按根本没进引擎 —— 题干自然「没变」，断言会以假乱真地红。
+           这是真实的防抖语义，不是可以省掉的等待。 */
+        await sleep(12);
         fireKey(lastKey);
-        await new Promise(r => setTimeout(r, 10));
+        await settle();
         const moved = q('#prompt').innerHTML !== beforeDone
           || q('#prompt').firstElementChild !== beforeDoneChild;
         ok(moved, '完成音节后题干确实被更新了（没有「永不重绘」的过度优化）');
@@ -2849,8 +2632,7 @@ console.log(`  （warnings ${warnings.length} 条）`);
 ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);
 console.log(`  （warnings ${warnings.length} 条）`);
 
-console.error = origError;
-console.warn = origWarn;
+H.restoreGlobals();
 
 console.log('\n' + (fail === 0
   ? '✅ 集成测试全部通过'

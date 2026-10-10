@@ -1,6 +1,12 @@
 /**
  * 引擎逻辑自检（Node 环境，用桩替代 window）
  */
+/* 虚拟时钟（零依赖）。倒计时 / 暂停计时 / 提示到期这几类用例天然是「时间」问题，
+   用真实 sleep 去等既慢又不稳（CI 忙时定时器被推迟就偶发红灯）。
+   见 _test/tools/vclock.mjs —— 与浏览器底座分开，所以这里不必为了一个假时钟
+   把 linkedom 整套拖进来。 */
+import { createVirtualClock, installVirtualWindow } from './tools/vclock.mjs';
+
 globalThis.window = {
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (id) => clearInterval(id)
@@ -186,90 +192,101 @@ console.log('\n【6】短文模式：标点自动跳过');
 
 console.log('\n【7】暂停 / 恢复 / 时间统计');
 {
-  const qs = generateQuestions({ mode: 'char', count: 5 });
-  const eng = new PracticeEngine({ questions: qs, mode: 'char', durationSec: 0 });
-  eng.start();
-  // 同样按「引擎自己说的用时」等，而不是固定 sleep —— 慢机上 350ms 可能
-  // 连一个 250ms 的 tick 都跑不完，断言就会在 CI 上间歇失败
-  const w0 = Date.now();
-  while (eng.activeSeconds() < 0.4 && Date.now() - w0 < 2000) {
-    await new Promise(r => setTimeout(r, 50));
+  /* 这一段量的就是「按了多久、暂停期间加不加时间」，天然是倒计时场景。
+     旧写法用真实 sleep 等引擎自己说「够了」（400ms 起，最多 2s 兜底）。
+     改成虚拟时钟：推进多少由测试说了算，边界成为确定值，也不占真实时间。
+     注意断言也从「差值 < 0.02」收紧成**严格相等** —— 虚拟时间下暂停期间
+     一秒都不该多算，模糊比较只会把 bug 掩盖掉。 */
+  const clock = createVirtualClock();
+  const restore = installVirtualWindow(clock);
+  try {
+    const qs = generateQuestions({ mode: 'char', count: 5 });
+    const eng = new PracticeEngine({ questions: qs, mode: 'char', durationSec: 0 });
+    eng.start();                 // ticker 挂在虚拟时钟上，间隔 250ms
+    clock.advance(500);          // 两个 tick → elapsedSec 恰为 0.5
+    ok(eng.elapsedSec > 0.2, `运行中累计用时 ${eng.elapsedSec.toFixed(2)}s`);
+
+    /* 基准必须在 pause() **之后**取。pause() 会调 syncActiveTime()，把上次
+       tick 之后的零头并进 elapsedSec —— 而 activeSeconds() 早就把这段零头
+       算进去了，所以 pause 前的 elapsedSec 天然偏小、pause 后会「跳」一下。
+       拿 pause 前的值当基准，等于在断言「pause 补时」而不是「暂停期间不计时」。 */
+    eng.pause();
+    const before = eng.elapsedSec;
+    clock.advance(400);          // 暂停期间：ticker 已停，不该有任何增长
+    const afterPause = eng.elapsedSec;
+    ok(afterPause === before, `暂停期间不计时（${before.toFixed(2)} → ${afterPause.toFixed(2)}）`);
+    const r = eng.pressKey('a');
+    ok(r.reason === 'paused', '暂停时按键被忽略');
+    eng.resume();
+    ok(eng.state === STATE.RUNNING, '恢复成功');
+    eng.destroy();
+  } finally {
+    restore();
   }
-  ok(eng.elapsedSec > 0.2, `运行中累计用时 ${eng.elapsedSec.toFixed(2)}s`);
-  /* 基准必须在 pause() **之后**取。pause() 会调 syncActiveTime()，把上次
-     tick 之后的零头并进 elapsedSec —— 而 activeSeconds() 早就把这段零头
-     算进去了，所以 pause 前的 elapsedSec 天然偏小、pause 后会「跳」一下。
-     拿 pause 前的值当基准，等于在断言「pause 补时」而不是「暂停期间不计时」，
-     慢机上零头接近上限（5s）就直接判失败。 */
-  eng.pause();
-  const before = eng.elapsedSec;
-  await new Promise(r => setTimeout(r, 400));
-  const afterPause = eng.elapsedSec;
-  ok(Math.abs(afterPause - before) < 0.02, `暂停期间不计时（${before.toFixed(2)} → ${afterPause.toFixed(2)}）`);
-  const r = eng.pressKey('a');
-  ok(r.reason === 'paused', '暂停时按键被忽略');
-  eng.resume();
-  ok(eng.state === STATE.RUNNING, '恢复成功');
-  eng.destroy();
 }
 
 console.log('\n【8】限时模式自动结束');
 {
-  const qs = generateQuestions({ mode: 'char', count: 50 });
-  const eng = new PracticeEngine({ questions: qs, mode: 'char', durationSec: 1 });
-  let finished = null;
-  eng.on('finish', s => { finished = s; });
-  eng.start();
-  // 等「引擎自己触发完成」而不是等固定 1.6s：慢机上定时器被节流时
-  // 1.6s 可能还不够（timeup 依赖 250ms 的 tick 推进），快机上则是白等
-  const w1 = Date.now();
-  while (!finished && Date.now() - w1 < 4000) {
-    await new Promise(r => setTimeout(r, 50));
+  /* 限时到点自动结束，靠的是 250ms 的 tick 推进 elapsedSec。
+     旧写法真实等到 finish 触发（最多 4s 兜底）。虚拟时钟下推进 1 秒即可：
+     第 4 个 tick（t=1000ms）正好把 elapsedSec 推到 1.0 ≥ durationSec=1。 */
+  const clock = createVirtualClock();
+  const restore = installVirtualWindow(clock);
+  try {
+    const qs = generateQuestions({ mode: 'char', count: 50 });
+    const eng = new PracticeEngine({ questions: qs, mode: 'char', durationSec: 1 });
+    let finished = null;
+    eng.on('finish', s => { finished = s; });
+    eng.start();
+    clock.advance(1000);
+    ok(!!finished, '限时到自动触发完成');
+    ok(finished && finished.reason === 'timeup', `结束原因为 timeup（实际 ${finished && finished.reason}）`);
+    eng.destroy();
+  } finally {
+    restore();
   }
-  ok(!!finished, '限时到自动触发完成');
-  ok(finished && finished.reason === 'timeup', `结束原因为 timeup（实际 ${finished && finished.reason}）`);
-  eng.destroy();
 }
 
 console.log('\n【9】速度与正确率计算（含 finish 补时）');
 {
-  const qs = generateQuestions({ mode: 'char', count: 20 });
-  const eng = new PracticeEngine({ questions: qs, mode: 'char' });
-  eng.start();
-  // 打对 10 个字符，打错 4 次
-  let done = 0;
-  let guard = 0;
-  while (done < 10 && guard < 500) {
-    guard++;
-    const t = eng.currentTarget();
-    if (!t || t.kind !== 'syllable') break;
-    if (done < 6) {
-      eng.pressKey(t.keys[t.pos].toLowerCase());
-      if (eng.keyIndex === 0) done++;   // 音节完成
-    } else {
-      // 故意错一次再打对
-      const wrong = 'qwertyuiop'.split('').find(c => !t.keys.map(x => x.toLowerCase()).includes(c));
-      eng.pressKey(wrong);
-      for (const k of t.split.code.toLowerCase()) eng.pressKey(k);
-      done++;
+  /* 打 10 个字本身在真机上要时间，旧写法用真实 sleep 等引擎累计到 1.2s
+     （最多 2.5s 兜底，注释里写着「第一次上 CI 时就是这么红的」）。
+     虚拟时钟下推进 1250ms（5 个 tick）即可，用时是确定值。 */
+  const clock = createVirtualClock();
+  const restore = installVirtualWindow(clock);
+  try {
+    const qs = generateQuestions({ mode: 'char', count: 20 });
+    const eng = new PracticeEngine({ questions: qs, mode: 'char' });
+    eng.start();
+    // 打对 10 个字符，打错 4 次
+    let done = 0;
+    let guard = 0;
+    while (done < 10 && guard < 500) {
+      guard++;
+      const t = eng.currentTarget();
+      if (!t || t.kind !== 'syllable') break;
+      if (done < 6) {
+        eng.pressKey(t.keys[t.pos].toLowerCase());
+        if (eng.keyIndex === 0) done++;   // 音节完成
+      } else {
+        // 故意错一次再打对
+        const wrong = 'qwertyuiop'.split('').find(c => !t.keys.map(x => x.toLowerCase()).includes(c));
+        eng.pressKey(wrong);
+        for (const k of t.split.code.toLowerCase()) eng.pressKey(k);
+        done++;
+      }
     }
+    clock.advance(1250);   // 5 个 tick → elapsedSec 恰为 1.25
+    const s = eng.summary();
+    console.log(`    用时 ${s.durationSec}s，正确字符 ${s.correctChars}，错误字符 ${s.wrongChars}，速度 ${s.speed} 字/分，正确率 ${s.accuracy}%`);
+    ok(s.accuracy > 0 && s.accuracy <= 100, '正确率在 0–100 之间');
+    ok(s.correctChars + s.wrongChars === s.totalChars, '正确+错误 = 总数');
+    ok(s.speed >= 0, '速度非负');
+    ok(s.durationSec >= 1, `finish 时补回零头，用时不为 0（实际 ${s.durationSec}s）`);
+    eng.destroy();
+  } finally {
+    restore();
   }
-  /* 【为什么改成循环等待】打完 10 个字本身要花时间（每次错误往返都带按键），
-     整段用时在 CI 慢机上可能不足 1 秒。下面等的是「引擎自己说的用时 ≥ 1.2s」，
-     而不是拍一个固定 sleep —— 固定 sleep 会在快机上白等、在慢机上不够，
-     表现为「本地过、CI 挂」的间歇性失败（第一次上 CI 时就是这么红的）。
-     2.5s 兜底是防抖：万一引擎一直不到 1.2s，循环退出后断言会给出可读的失败。 */
-  const wallStart = Date.now();
-  while (eng.activeSeconds() < 1.2 && Date.now() - wallStart < 2500) {
-    await new Promise(r => setTimeout(r, 50));
-  }
-  const s = eng.summary();
-  console.log(`    用时 ${s.durationSec}s，正确字符 ${s.correctChars}，错误字符 ${s.wrongChars}，速度 ${s.speed} 字/分，正确率 ${s.accuracy}%`);
-  ok(s.accuracy > 0 && s.accuracy <= 100, '正确率在 0–100 之间');
-  ok(s.correctChars + s.wrongChars === s.totalChars, '正确+错误 = 总数');
-  ok(s.speed >= 0, '速度非负');
-  ok(s.durationSec >= 1, `finish 时补回零头，用时不为 0（实际 ${s.durationSec}s）`);
-  eng.destroy();
 }
 
 console.log('\n【9b】零声母音节恒为 2 键（an → AJ，与 README 一致）');
@@ -600,11 +617,22 @@ console.log('【新增】不限量续题、统计与恢复');
   empty.destroy();
   const timed = new PracticeEngine({ questions: batch(), unlimited: true, questionSource: batch,
     durationSec: 1, hintEnabled: false });
-  let reason;
-  timed.on('finish', s => { reason = s.reason; }); timed.start();
-  timed._lastTickAt -= 1500;
-  await new Promise(resolve => setTimeout(resolve, 280));
-  ok(timed.state === STATE.FINISHED && reason === 'timeup', '不限量仍受倒计时限制');
+  {
+    /* 旧写法把 _lastTickAt 往回拨 1.5 秒，再真实等 280ms 让 ticker 跑一次
+       （拨表是为了让那一次 tick 就算出 ≥1 秒，触发 timeup）。虚拟时钟下
+       不必拨表：推进 1 秒，第 4 个 tick 自然把 elapsedSec 推到 1.0。 */
+    const clock = createVirtualClock();
+    const restore = installVirtualWindow(clock);
+    let reason;
+    try {
+      timed.on('finish', s => { reason = s.reason; });
+      timed.start();
+      clock.advance(1000);
+      ok(timed.state === STATE.FINISHED && reason === 'timeup', '不限量仍受倒计时限制');
+    } finally {
+      restore();
+    }
+  }
   timed.destroy();
 }
 

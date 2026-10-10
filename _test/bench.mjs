@@ -23,171 +23,20 @@
  * 运行：node _test/bench.mjs
  */
 
-import { parseHTML } from 'linkedom';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { createHarness } from './tools/harness.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = resolve(__dirname, '..');
-
+/* ---------- 模拟浏览器环境（共享基座，见 tools/harness.mjs） ---------- */
 let fail = 0;
 const ok = (c, m) => { if (!c) { fail++; console.log('  ✗ ' + m); } else { console.log('  ✓ ' + m); } };
 
-/* ---------- 模拟浏览器环境（与 integration.mjs 同构，按需裁剪） ---------- */
-const html = readFileSync(resolve(root, 'index.html'), 'utf8');
-const { window, document } = parseHTML(html);
-
-const storageMap = new Map();
-const localStorage = {
-  get length() { return storageMap.size; },
-  getItem: (k) => (storageMap.has(k) ? storageMap.get(k) : null),
-  setItem: (k, v) => { storageMap.set(String(k), String(v)); },
-  removeItem: (k) => { storageMap.delete(k); },
-  clear: () => { storageMap.clear(); },
-  key: (i) => Array.from(storageMap.keys())[i] ?? null
-};
-
-const fakeWindow = {
-  document, localStorage,
-  location: { href: 'http://localhost/index.html', hash: '' },
-  navigator: { maxTouchPoints: 0, userAgent: 'node' },
-  devicePixelRatio: 1,
-  setInterval: (...a) => setInterval(...a),
-  clearInterval: (id) => clearInterval(id),
-  setTimeout: (...a) => setTimeout(...a),
-  clearTimeout: (id) => clearTimeout(id),
-  performance: { now: () => Number(process.hrtime.bigint() / 1000000n) },
-  addEventListener: (t, h) => { (fakeWindow._ls[t] ||= []).push(h); },
-  removeEventListener: () => {},
-  _ls: {},
-  getComputedStyle: () => ({ getPropertyValue: () => '' }),
-  requestAnimationFrame: (fn) => setTimeout(() => fn(Date.now()), 16),
-  cancelAnimationFrame: (id) => clearTimeout(id),
-  alert: () => {}, confirm: () => true,
-  URL: { createObjectURL: () => 'blob:fake', revokeObjectURL: () => {} },
-  Blob: class {}, FileReader: class {},
-  onerror: null
-};
-fakeWindow.window = fakeWindow;
-
-class FakeEvent {
-  constructor(type, opts = {}) {
-    this.type = type; this.bubbles = !!opts.bubbles; this.cancelable = !!opts.cancelable;
-    this.defaultPrevented = false; this.target = null; this.currentTarget = null;
-    this._path = []; this._stopped = false;
-  }
-  preventDefault() { this.defaultPrevented = true; }
-  stopPropagation() { this._stopped = true; }
-  stopImmediatePropagation() { this._stopped = true; }
-}
-class FakeKeyboardEvent extends FakeEvent {
-  constructor(type, opts = {}) {
-    super(type, opts);
-    this.key = opts.key ?? ''; this.code = opts.code ?? ''; this.keyCode = opts.keyCode ?? 0;
-    this.isComposing = !!opts.isComposing;
-    this.ctrlKey = !!opts.ctrlKey; this.shiftKey = !!opts.shiftKey;
-    this.metaKey = !!opts.metaKey; this.altKey = !!opts.altKey;
-  }
-}
-fakeWindow.Event = FakeEvent;
-fakeWindow.KeyboardEvent = FakeKeyboardEvent;
-window.Event = FakeEvent;
-window.KeyboardEvent = FakeKeyboardEvent;
-
-const proto = Object.getPrototypeOf(document.createElement('div'));
-if (!proto.animate) proto.animate = () => ({ finished: Promise.resolve(), cancel() {}, onfinish: null });
-if (!proto.closest) {
-  proto.closest = function (sel) {
-    let el = this;
-    while (el && el.nodeType === 1) {
-      if (el.matches && el.matches(sel)) return el;
-      el = el.parentNode;
-      if (el && el.nodeType === 9) return null;
-    }
-    return null;
-  };
-}
-if (!proto.matches) proto.matches = function () { return false; };
-if (!proto.focus || typeof document.activeElement === 'undefined') {
-  let active = null;
-  proto.focus = function () { active = this; };
-  proto.blur = function () { if (active === this) active = null; };
-  Object.defineProperty(document, 'activeElement', { configurable: true, get() { return active || document.body || null; } });
-}
-if (!('offsetParent' in proto) || proto.offsetParent === undefined) {
-  Object.defineProperty(proto, 'offsetParent', { configurable: true, get() { return this.parentNode || null; } });
-}
-
-/* select/input value 可写 */
-function patchValueProperty(el) {
-  if (!el || el.__valuePatched) return;
-  el.__valuePatched = true;
-  let v = '';
-  try {
-    const desc = Object.getOwnPropertyDescriptor(el, 'value');
-    if (desc && desc.get) v = desc.get.call(el) || '';
-  } catch (_) {}
-  try {
-    Object.defineProperty(el, 'value', { configurable: true, get() { return v; }, set(nv) { v = String(nv == null ? '' : nv); } });
-  } catch (_) {}
-}
-Array.from(document.querySelectorAll('select, input, textarea')).forEach(patchValueProperty);
-
-/* 捕获监听器 */
-const origAdd = proto.addEventListener;
-const origRemove = proto.removeEventListener;
-proto.addEventListener = function (type, handler, opts) {
-  (this.__handlers ||= {});
-  (this.__handlers[type] ||= []).push(handler);
-  return origAdd ? origAdd.call(this, type, handler, opts) : undefined;
-};
-proto.removeEventListener = function (type, handler, opts) {
-  if (this.__handlers && this.__handlers[type]) {
-    this.__handlers[type] = this.__handlers[type].filter(h => h !== handler);
-  }
-  return origRemove ? origRemove.call(this, type, handler, opts) : undefined;
-};
-
-const canvasStub = {
-  setTransform() {}, clearRect() {}, save() {}, restore() {}, beginPath() {}, moveTo() {},
-  lineTo() {}, stroke() {}, fill() {}, closePath() {}, arc() {}, fillText() {},
-  quadraticCurveTo() {}, setLineDash() {},
-  createLinearGradient: () => ({ addColorStop() {} })
-};
-const origCreate = document.createElement.bind(document);
-document.createElement = (tag) => {
-  const el = origCreate(tag);
-  if (String(tag).toLowerCase() === 'canvas' && !el.getContext) el.getContext = () => canvasStub;
-  return el;
-};
-
-/* ---------- 安装全局（与 integration.mjs 同法） ---------- */
-globalThis.window = fakeWindow;
-globalThis.document = document;
-try {
-  Object.defineProperty(globalThis, 'navigator', {
-    value: fakeWindow.navigator, configurable: true, writable: true
-  });
-} catch (_) { /* Node 已有只读 navigator，忽略 */ }
-globalThis.localStorage = localStorage;
-globalThis.getComputedStyle = fakeWindow.getComputedStyle;
-globalThis.matchMedia = fakeWindow.matchMedia;
-globalThis.performance = fakeWindow.performance;
-globalThis.requestAnimationFrame = fakeWindow.requestAnimationFrame;
-globalThis.cancelAnimationFrame = fakeWindow.cancelAnimationFrame;
-globalThis.Blob = fakeWindow.Blob;
-globalThis.FileReader = fakeWindow.FileReader;
-globalThis.devicePixelRatio = 1;
-globalThis.HTMLCanvasElement = class {};
+/* 与 integration.mjs 共用同一份 linkedom 桩与全局注入；
+   这里用真实时钟：基准量的是 DOM 写入次数（结构指标），不依赖虚拟时间。 */
+const H = await createHarness({ realTimers: true });
+const { document, fakeWindow } = H;
 
 /* ---------- 加载被测模块（先引擎，再 main.js 触发 boot） ---------- */
-const { PracticeEngine } = await import('../src/core/engine.js');
-const qMod = await import('../src/core/questions.js');
-
-await import('../src/main.js');
-await new Promise(r => setTimeout(r, 40));
-
+await H.loadApp();
+await H.settle();
 const app = fakeWindow.__app;
 
 /* ---------- 统计 DOM 写入 ---------- */
@@ -253,23 +102,9 @@ async function measure(fn) {
 console.log('\n【基准】renderSession 每键开销');
 console.log('（指标：一次按键引发的 DOM 写入次数。毫秒仅作参考，CI 抖动大）\n');
 
-const q = (sel) => document.querySelector(sel);
-const qa = (sel) => Array.from(document.querySelectorAll(sel));
-function fire(el, type) {
-  if (!el) return false;
-  const ev = new FakeEvent(type, { bubbles: true, cancelable: true });
-  ev.target = el; ev.currentTarget = el;
-  ev._path = [{ currentTarget: el, target: el }];
-  let fired = false;
-  let node = el;
-  while (node && node.nodeType === 1) {
-    const hs = node.__handlers && node.__handlers[type];
-    if (hs) { for (const h of hs.slice()) { try { h(ev); fired = true; } catch (e) { console.error(e); } } }
-    if (ev._stopped) break;
-    node = node.parentNode;
-  }
-  return fired;
-}
+const q = H.q;
+const qa = H.qa;
+const fire = H.fire;   // 共享基座的事件派发（支持选择器、含冒泡路径）
 
 ok(!!app, '应用实例已暴露（fakeWindow.__app）');
 

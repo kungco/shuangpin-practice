@@ -14,7 +14,7 @@
  *
  * 运行：node _test/launcher.mjs
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -228,6 +228,45 @@ console.log('\n【I】工作流必须真的能在三版本上跑通');
       '★ actions/checkout 用 v5（v4 目标 Node 20，已被 CI runner 弃用）');
     ok(/uses:\s*actions\/setup-node@v5/.test(wf),
       '★ actions/setup-node 用 v5（同上）');
+  }
+}
+
+console.log('\n【J】每套自检都必须挂进 npm test，且脚本里的文件都真实存在');
+{
+  /* 背景：曾经出现过 npm test 漏掉 training.mjs 的情况 —— 那套测试一直在仓库里，
+     却从来没被跑过。CI 是「绿的」，但绿得没有意义（覆盖有洞）。
+     单靠人眼盯 scripts 一行很容易漏，这里钉成机器可查的不变式：
+       ① package.json 的 test 链里每一个 node xxx.mjs 都真实存在（防错别字）；
+       ② _test/ 根目录下每一个自检文件都出现在 test 链里（防漏挂）。
+     serve.mjs 是本地静态服务器，不是自检，白名单排除。 */
+  const NON_SUITE = new Set(['serve.mjs']);
+
+  const testPkg = JSON.parse(readFileSync(resolve(ROOT, '_test/package.json'), 'utf8'));
+  const testScript = String((testPkg.scripts && testPkg.scripts.test) || '');
+  // 抽出 `node xxx.mjs` 里的文件名（忽略 node 之后的其它参数）
+  const wired = new Set();
+  for (const m of testScript.matchAll(/node\s+([\w.-]+\.mjs)/g)) wired.add(m[1]);
+
+  ok(wired.size > 0, '★ npm test 里能解析出被测套件（解析失败说明脚本写法变了）');
+
+  for (const f of wired) {
+    ok(existsSync(resolve(__dirname, f)),
+      `★ test 链引用的 ${f} 真实存在（写错文件名 = 永远跑不到）`);
+  }
+
+  const suiteFiles = readdirSync(__dirname)
+    .filter(n => n.endsWith('.mjs') && !NON_SUITE.has(n));
+  for (const f of suiteFiles) {
+    ok(wired.has(f),
+      `★ 自检文件 ${f} 已挂进 npm test（历史上 training.mjs 就是这样被漏掉的）`);
+  }
+
+  // 反向：每个自检文件都该有自己的 test:xxx 单项入口，方便单独调试
+  const single = Object.keys(testPkg.scripts || {}).filter(k => k.startsWith('test:'));
+  for (const f of suiteFiles) {
+    const base = f.replace(/\.mjs$/, '');
+    ok(single.some(k => k === `test:${base}`),
+      `自检文件 ${f} 有单项入口 test:${base}`);
   }
 }
 
