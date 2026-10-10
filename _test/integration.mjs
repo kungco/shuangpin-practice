@@ -1572,7 +1572,11 @@ console.log('\n【10g】键位掌握度：三层标记共存');
   // 造出「已掌握」与「在练」两种键：A 练 20 次全对且快；B 同样快但错误多
   const fakeLead = Array.from({ length: 20 }, (_, i) => 200 + (i % 5) * 10);
   sMod.recordKeyTimings({ A: { lead: fakeLead.slice(), follow: [] }, B: { lead: fakeLead.slice(), follow: [] } }, 'char');
-  sMod.recordKeyErrors({ B: 6 }, 'char');
+  /* 错误次数刻意拉开档次，覆盖**四个**热力等级：
+     scale = max = 6 时，6→L4、4→L3、2→L2、1→L1。
+     只造一个键的话，「条数 = 等级」这句话退化成「一直是 4 根」，
+     断言就分不出「按等级画」和「永远画满」—— 那是两种完全不同的实现。 */
+  sMod.recordKeyErrors({ B: 6, C: 4, D: 2, E: 1 }, 'char');
 
   const m = keyMastery({ range: 'all', mode: 'char' });
   const byKey = Object.fromEntries(m.items.map(i => [i.key, i]));
@@ -1605,6 +1609,52 @@ console.log('\n【10g】键位掌握度：三层标记共存');
   ok(/已掌握/.test(boxText), '掌握度说明块给出「已掌握」进度');
   ok(/个键/.test(boxText), '说明块给出键数口径');
 
+  /* ---- 等级的非颜色通道（色盲可读）----
+     这里验的是**运行期**行为：键上标的 --heat-level 与热力覆盖层里
+     画出的竖条根数必须一致。静态断言（verify【10e】）只能证明
+     「代码里写了竖条」，证明不了「渲染出来的根数真的随等级变」——
+     两者是两回事（上一轮 renderSession 的 emit 吞参数就是这个教训：
+     代码齐全、测试全绿、功能一点没生效）。 */
+  const levelOf = (K) => {
+    const el = heat.querySelector(`.kb-key[data-key="${K}"]`);
+    return Number((el && el.getAttribute('style') || '').match(/--heat-level:\s*(\d)/)?.[1] || 0);
+  };
+  const barsOf = (K) => {
+    const g = heat.querySelector(`[data-heat-for="${K}"] .kb-heat-pips`);
+    return g ? g.querySelectorAll('rect').length : -1;
+  };
+
+  // 四档都要出现，否则「条数 = 等级」可能只是碰巧
+  const levelsSeen = ['B', 'C', 'D', 'E'].map(levelOf);
+  ok(levelsSeen.every(l => l >= 1 && l <= 4),
+    `B/C/D/E 四键都带合法热力等级（实际 ${levelsSeen.join('/')}）`);
+  ok(new Set(levelsSeen).size === 4,
+    `四个等级都被造出来了（实际 ${levelsSeen.join('/')}）—— 否则断言分不出「按等级画」与「永远画满」`);
+
+  const bPips = heat.querySelector('[data-heat-for="B"] .kb-heat-pips');
+  ok(!!bPips, '热力覆盖层里画出了等级竖条组 .kb-heat-pips（B 键）');
+  ok(barsOf('B') === levelOf('B'),
+    `竖条根数等于热力等级（等级 ${levelOf('B')} → 竖条 ${barsOf('B')} 根）`);
+
+  // 逐键校验：等级 ↔ 条数一一对应，且等级 1 就只有 1 根（不是永远画满）
+  let mismatched = 0;
+  const detail = [];
+  for (const g of Array.from(heat.querySelectorAll('[data-heat-for]'))) {
+    const K = g.getAttribute('data-heat-for');
+    const lv = levelOf(K);
+    const bars = g.querySelectorAll('.kb-heat-pips rect').length;
+    detail.push(`${K}:${lv}/${bars}`);
+    if (lv < 1 || bars !== lv) mismatched += 1;
+  }
+  ok(mismatched === 0,
+    `全部热力键的竖条根数都等于等级（[${detail.join(' ')}]，不一致 ${mismatched} 个）`);
+  ok(barsOf('E') === 1, `最低等级只画 1 根竖条（E 键实际 ${barsOf('E')} 根）`);
+
+  // 竖条不能去改 .kb-key 内部 === 不能与热力填充/慢键环抢同一个元素
+  ok(!!bKey.querySelector('.kb-body'), 'B 键仍有 .kb-body（竖条没把它替换掉）');
+  ok(!bKey.querySelector('.kb-heat-pips'),
+    '竖条不在 .kb-key 内部，而在热力覆盖层里（不碰 .kb-body）');
+
   // 清空数据后标记必须被撤掉（不能留下残影）
   sMod.clearKeyTimings();
   sMod.clearKeyErrors();
@@ -1613,6 +1663,9 @@ console.log('\n【10g】键位掌握度：三层标记共存');
   const aAfter = q('#heatWrap').querySelector('.kb-key[data-key="A"]');
   ok(!aAfter.classList.contains('is-mastered'), '清空数据后绿点被撤销');
   ok(!aAfter.querySelector('.kb-mastery-dot'), '清空数据后圆点元素被移除');
+  // 竖条也挂在覆盖层里，同样不能留残影（否则会「有竖条但没等级」）
+  ok(q('#heatWrap').querySelectorAll('.kb-heat-pips').length === 0,
+    '清空数据后等级竖条一并撤掉（无残影）');
 
   // 恢复现场
   app.stats.heatRange = 'all';

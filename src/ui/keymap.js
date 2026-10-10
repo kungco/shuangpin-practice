@@ -24,6 +24,13 @@ const KEY_H = 62;
 const GAP = 6;
 const PAD = 10;
 
+/* 等级竖条的水平步距（条宽 2.6 + 间隙）。
+   间隙要容得下 CSS 给竖条加的 1px 描边（每边 0.5px 向外扩），
+   否则 4 条时描边会把相邻两条黏成一块、数不出根数。
+   4 条占 4 * 4.4 = 17.6px，从 x=9 排到 x≈27 结束，
+   再到次数小字（x≈31 起）—— 62px 宽的键里留得下 3 位数字。 */
+const PIP_STEP = 4.4;
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /**
@@ -196,7 +203,9 @@ export function renderKeymap(container, opts = {}) {
         el.style.setProperty('--heat-level', String(lv));
         el.style.setProperty('--heat-max', String(maxLevel));
         el.classList.add('is-heat');
-        const num = heatLayerText(K, item);
+        // 把等级同时交给形状通道 —— 只上色、不给条数，色盲用户就只剩
+        // 「深浅差不多的一条橙带」可看（见 heatLevelPips 的注释）。
+        const num = heatLayerText(K, item, lv);
         if (num) heatLayer.appendChild(num);
       }
       if (heatLayer.childNodes.length && !heatLayer.parentNode) {
@@ -307,22 +316,69 @@ export function renderKeymap(container, opts = {}) {
     destroy() { container.innerHTML = ''; }
   };
 
-  /** 在键底右下角生成「次数」小字 */
-  function heatLayerText(K, item) {
+  /**
+   * 等级竖条：把热力等级 1–4 画成同样数量的细竖条。
+   *
+   * **为什么需要它**：热力图原先只用填充色的深浅表达等级（--heat-1..4 的橙色梯度）。
+   * 红绿色盲（约占男性 8%）看到的是一条几乎等亮度的色带，「偶尔」和「最集中」
+   * 分不出来 —— 而这个页面恰恰是拿来决定「接下来该练哪个键」的，等级读不出来
+   * 等于这个页面废掉一半。WCAG 1.4.1（Use of Color）要求信息不能只靠颜色传达。
+   *
+   * **为什么放在底部而不是另找一个角**：62×62 的键里已经挤了四样东西 ——
+   * 主字母（左上）、声母（右上）、掌握度绿点（右上角）、韵母（居中横向、
+   * 最长时几乎横贯整键）。真正空着的只有**底线**那条带子，而它本来就被
+   * 热力层的「次数小字」占着。所以竖条贴着次数小字排在同一条基线上：
+   * 复用一条已经占用的带子，不引入任何新的碰撞区。条数可数（1–4 条），
+   * 比圆点更贴近「等级刻度」的直觉。
+   *
+   * 条本身不带 aria：这层是纯视觉冗余，读屏用户走的是键的 aria-label，
+   * 念一串「竖条竖条竖条」只会变成噪声。
+   *
+   * @param {number} level 1–4
+   * @param {number} x0    首条的左边缘
+   */
+  function heatLevelPips(level, x0) {
+    const lv = Math.max(1, Math.min(4, Number(level) || 1));
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', 'kb-heat-pips');
+    g.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < lv; i++) {
+      const r = document.createElementNS(SVG_NS, 'rect');
+      r.setAttribute('x', String(x0 + i * PIP_STEP));
+      r.setAttribute('y', String(KEY_H - 13));
+      r.setAttribute('width', '2.6');
+      r.setAttribute('height', '8');
+      r.setAttribute('rx', '1.2');
+      // fill 由 .kb-heat-pips 的 CSS 规则负责（SVG 的 fill 会向下继承给 rect）
+      g.appendChild(r);
+    }
+    return g;
+  }
+
+  /** 在键底生成「等级竖条 + 次数」小字 */
+  function heatLayerText(K, item, level) {
+    const lv = Math.max(1, Math.min(4, Number(level) || 1));
+
+    // 竖条在前（贴左边缘），次数紧跟在竖条右侧 —— 两者在同一条基线上
+    // 但**横向分开**，所以再长的次数也不会压到竖条上。
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('data-heat-for', K);
+    g.setAttribute('data-heat-level', String(lv));
+    // 用 <g> 包一层并**带上与键相同的 translate**。
+    // 早先这里漏了 transform，所有键的数字都落在同一个坐标上叠成一坨
+    // （浏览器实测 8 个数字只有 1 个不同的 bounding box）—— 等于没显示。
+    g.setAttribute('transform', keyTransform(K));
+    g.appendChild(heatLevelPips(lv, 9));
+
     const t = document.createElementNS(SVG_NS, 'text');
     t.setAttribute('class', 'kb-heat-num');
-    t.setAttribute('x', 9);
+    // 让开竖条占的宽度，再留 4px 空隙，避免和竖条/图形粘连
+    t.setAttribute('x', String(9 + lv * PIP_STEP + 4));
     t.setAttribute('y', KEY_H - 6);
     t.setAttribute('font-size', 10.5);
     t.setAttribute('font-weight', 700);
     // fill 交给 .kb-heat-num 的 CSS 规则（用 var(--heat-text-2)）
     t.textContent = String(Number(item.count) || 0);
-    // 用 <g> 包一层并**带上与键相同的 translate**。
-    // 早先这里漏了 transform，所有键的数字都落在同一个坐标上叠成一坨
-    // （浏览器实测 8 个数字只有 1 个不同的 bounding box）—— 等于没显示。
-    const g = document.createElementNS(SVG_NS, 'g');
-    g.setAttribute('data-heat-for', K);
-    g.setAttribute('transform', keyTransform(K));
     g.appendChild(t);
     return g;
   }

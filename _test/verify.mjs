@@ -536,6 +536,97 @@ console.log('\n【10c】慢键诊断：视觉通道必须与错误热力分离')
   console.log(`  已校验 ${checked} 项：慢键与热力分属独立视觉通道、覆盖层坐标正确、上下限一致`);
 }
 
+console.log('\n【10e】热力图等级必须有颜色以外的表达（色盲可读）');
+{
+  let checked = 0;
+  const checkedOk = (cond, msg) => { checked++; ok(cond, msg); };
+  const css = readFileSync(resolve(ROOT, 'assets/style.css'), 'utf8');
+  const keymapSrc = readFileSync(resolve(ROOT, 'src/ui/keymap.js'), 'utf8');
+  const html = readFileSync(resolve(ROOT, 'index.html'), 'utf8');
+
+  /* WCAG 1.4.1：信息不能只靠颜色传达。
+     热力等级 1–4 原先**只**是 --heat-1..4 的橙色梯度 ——
+     红绿色盲（约 8% 男性）看到的是几乎等亮度的一条橙带，
+     分不出「偶尔」和「最集中」。而这个页面的用途正是「决定下一个练哪个键」，
+     等级读不出来，这个页面就废了一半。
+     修法：条数 = 等级的细竖条。下面的断言盯住「编码真的接上了」这件事，
+     而不是只盯「存在一个叫 pips 的函数」。 */
+  checkedOk(/function\s+heatLevelPips\s*\(\s*level\s*,/.test(keymapSrc),
+    '★ keymap.js 提供 heatLevelPips(level, x0) —— 等级的形状通道');
+  checkedOk(/for\s*\(\s*let\s+i\s*=\s*0;\s*i\s*<\s*lv;\s*i\+\+\s*\)/.test(keymapSrc),
+    '★ 竖条数量由等级 lv 决定（1–4 根，可数）');
+
+  /* 最关键的一条：setHeat 算出的 lv 必须**真的**传进形状通道。
+     只写一个 heatLevelPips 却忘了调用，是这类改动最容易出的错 ——
+     和上一轮 renderSession「引擎标了粒度但 emit 把参数吞掉」是同一类：
+     代码看起来齐全，功能完全没生效，且不报任何错。 */
+  checkedOk(/heatLayerText\s*\(\s*K\s*,\s*item\s*,\s*lv\s*\)/.test(keymapSrc),
+    '★ setHeat 把等级 lv 传给了绘制函数（漏传 = 竖条永远只有 1 根且不报错）');
+  checkedOk(/heatLevelPips\s*\(\s*lv\s*,/.test(keymapSrc),
+    '★ 绘制函数把 lv 交给了 heatLevelPips');
+
+  /* 竖条不能用 fill 以外的通道去和热力填充抢元素：
+     它必须是**独立**的一组 rect，挂在热力覆盖层里（不在 .kb-key 内），
+     否则会与慢键环 / 热力填充共用 .kb-body 而互相覆盖。 */
+  checkedOk(/class',\s*'kb-heat-pips'/.test(keymapSrc),
+    '★ 竖条挂在独立的 .kb-heat-pips 组里（不碰 .kb-body）');
+  checkedOk(/\.kb-heat-pips\s*\{[^}]*fill:/.test(css),
+    '★ .kb-heat-pips 有 fill 规则（说明颜色仍由 CSS 管，深浅主题都覆盖）');
+  // 深浅两主题都必须给出 --heat-text（竖条的取色），缺一个就有一半场景看不见
+  const darkAt = css.indexOf('[data-theme="dark"]');
+  const darkBlock = css.slice(darkAt, css.indexOf('\n}', darkAt));
+  const rootBlock = css.slice(css.indexOf(':root'), css.indexOf('\n}', css.indexOf(':root')));
+  checkedOk(/--heat-text:/.test(rootBlock) && /--heat-text:/.test(darkBlock),
+    '★ 深浅主题都定义了 --heat-text（竖条的取色，缺一个就有一半场景看不见）');
+
+  /* 竖条坐在**热力填充色**上，不是坐在页面背景上 —— 对比度必须对着
+     --heat-1..4 算，不是对着 --surface。
+     这是本轮实测出来的真缺陷：竖条最初沿用 --heat-text-2（与次数小字同色，
+     看着最省事），但它在最热的两档只有 2.40:1（浅）/ 1.75:1（深），
+     低于 WCAG 1.4.11 对非文本元素要求的 3:1 —— 而最热那档恰恰是这个通道
+     最该起作用的地方（色盲用户最需要靠它区分「偏多」和「最集中」）。
+     单靠换文字色解决不了：深色热力 4 档是中调橙，纯浅/纯深都压不住
+     （--heat-text 也才 2.63:1），所以必须像 .kb-mastery-dot 那样
+     加一圈 --surface 描边，把竖条和橙底隔开。
+     下面直接断言这个描边存在 —— 它不是一个装饰，而是 3:1 的**实现手段**：
+     描边色是页面底色，与任何热力填充天然强对比，去掉它，
+     最热那档就退回 2.4:1 / 2.6:1 的不可辨状态。 */
+  checkedOk(/\.kb-heat-pips\s*\{[^}]*stroke:\s*var\(--surface\)/.test(css),
+    '★ 竖条带 --surface 描边（中调热力底色上唯一能保住 3:1 的办法）');
+  checkedOk(/\.kb-heat-pips\s*\{[^}]*stroke-width:\s*[\d.]+/.test(css),
+    '★ 竖条描边宽度显式声明（为 0 等于没有描边）');
+  // 步距必须容得下描边，否则相邻竖条会被描边黏成一坨、数不出根数
+  const step = Number((keymapSrc.match(/const PIP_STEP = ([\d.]+);/) || [])[1]);
+  checkedOk(step >= 4.4,
+    `★ 竖条步距 ${step} ≥ 4.4（2.6 条宽 + 1 描边 + 可见间隙，否则条数数不出来）`);
+
+  // 纯视觉冗余：这层不该进读屏（否则念一串「竖条竖条竖条」）
+  checkedOk(/kb-heat-pips'[\s\S]{0,90}aria-hidden/.test(keymapSrc),
+    '★ 竖条组带 aria-hidden（纯视觉冗余，不干扰读屏）');
+
+  /* 图例必须同步编码 —— 只给键加竖条却不解释，用户不知道条数是什么意思，
+     等于把「颜色猜等级」换成「条数猜等级」。 */
+  const legendPips = html.match(/class="pips pips-\d"/g) || [];
+  checkedOk(legendPips.length === 5,
+    `★ 图例五档都带竖条标记（实际 ${legendPips.length} 个）`);
+  for (const n of [0, 1, 2, 3, 4]) {
+    // 条数用 background-size 写死（4.2px = 一条竖条），刻意**不引**自定义属性：
+    // verify 另有一条全局不变量要求 var(--x) 必须在 :root / 深色块里有定义，
+    // 而「第几档」是逐元素的值，塞成 --n 会被那条不变量判红。
+    // 取 background-size 的第一个分量（宽度），如 "12.6px 10px" → "12.6"
+    const w = (css.match(new RegExp(
+      '\\.heat-legend\\s+\\.pips-' + n + '\\s*\\{\\s*background-size:\\s*([\\d.]+)(?:px)?')) || [])[1];
+    // 用 parseFloat 比较数值，避开 12.600000000000001 与 "0" vs "0.0" 这类字符串差异
+    checkedOk(parseFloat(w) === parseFloat((n * 4.2).toFixed(1)),
+      `★ 图例 pips-${n} 的条数 = ${n}（宽 ${w}px = ${n} × 4.2）`);
+  }
+  // 图例用 currentColor：深浅主题自动跟随，不必再补一套 dark 规则
+  checkedOk(/\.heat-legend\s+\.pips\s*\{[^}]*currentColor/.test(css),
+    '★ 图例竖条用 currentColor（深浅主题自动跟随）');
+
+  console.log(`  已校验 ${checked} 项：等级有非颜色通道、编码真的接上、图例同步、深浅主题可见`);
+}
+
 /* ============================================================
    测验模式（exam）：出题与评分
    ============================================================ */

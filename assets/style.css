@@ -897,6 +897,18 @@ textarea:focus {
 .kb-key.is-heat .kb-pinyin { fill: var(--heat-text-2); }
 .kb-key.is-heat .kb-sub { fill: var(--heat-text-2); }
 .kb-heat-num { font-family: var(--mono); }
+/* 等级竖条：条数 = 热力等级（1–4），色盲用户不看填充色也能读等级（WCAG 1.4.1）。
+   取色用 --heat-text（热力键上主字母用的那支，不是 --heat-text-2）：
+   竖条是**坐在热力填充色上**的，不是坐在页面背景上，所以必须对着
+   --heat-1..4 算对比度，而不是对着 --surface。实测 --heat-text-2 在最热的
+   两档只有 2.40:1（浅）/ 1.75:1（深），低于非文本元素要求的 3:1 —— 而最热
+   那档恰恰是这个通道最该起作用的地方。
+   --heat-text 好得多（浅色最差 4.43:1），但深色下对 --heat-4 仍只有 2.63:1：
+   深色的热力 4 档是一支中间调的橙，纯浅色或纯深色文字都压不住它。
+   所以照搬掌握度圆点那套（见 .kb-mastery-dot）：**填充 + 一圈背景色描边**，
+   用描边把竖条和橙色底隔开，中调底上的可辨性就不再取决于文字色本身。
+   fill 设在 <g> 上会继承给里面的 <rect>，不必逐条上色。 */
+.kb-heat-pips { fill: var(--heat-text); stroke: var(--surface); stroke-width: 1; }
 .kb-error { color: var(--text-3); font-size: 13px; padding: 16px; }
 .kb-heat-layer { pointer-events: none; }
 
@@ -1119,11 +1131,40 @@ textarea:focus {
 }
 
 .heat-legend { margin-top: 12px; }
+.heat-legend > div { display: inline-flex; align-items: center; }
 .heat-dot-0 { background: var(--heat-0); border: 1px solid var(--border-strong); }
 .heat-dot-1 { background: var(--heat-1); border: 1px solid var(--heat-stroke-1); }
 .heat-dot-2 { background: var(--heat-2); border: 1px solid var(--heat-stroke-2); }
 .heat-dot-3 { background: var(--heat-3); border: 1px solid var(--heat-stroke-3); }
 .heat-dot-4 { background: var(--heat-4); border: 1px solid var(--heat-stroke-4); }
+
+/* 图例里的等级竖条：与键上那组竖条是同一套编码（条数 = 等级）。
+   用 repeating-linear-gradient 画竖条，而不是塞几个 <i>：
+   图例是静态 HTML，改条数只需改 background-size 的一个数字。
+   currentColor 保证深浅主题都跟随文字色，不用再补一套 dark 覆盖。
+   宽度刻意写死、不引自定义属性：verify 有一条全局不变量 ——
+   凡在样式表里被 var() 取用的变量，必须在 :root 或深色块里有定义；
+   而「第几档」是逐元素的值，写成变量会被那条不变量判红。
+   （下面注释里也刻意不写出 var() 的完整写法，否则会被那条规则扫到。） */
+.heat-legend .pips {
+  display: inline-block;
+  width: 22px; height: 10px;
+  margin-left: 6px;
+  vertical-align: -1px;
+  color: var(--heat-text-2);
+  background-image: repeating-linear-gradient(
+    90deg, currentColor 0 2.6px, transparent 2.6px 4.2px);
+  background-repeat: no-repeat;
+}
+.heat-legend .pips-0 { background-size: 0 10px; }
+.heat-legend .pips-1 { background-size: 4.2px 10px; }
+.heat-legend .pips-2 { background-size: 8.4px 10px; }
+.heat-legend .pips-3 { background-size: 12.6px 10px; }
+.heat-legend .pips-4 { background-size: 16.8px 10px; }
+.heat-legend-note {
+  margin: 8px 0 0; font-size: 12px; color: var(--text-3); line-height: 1.6;
+}
+.heat-legend-note b { color: var(--text-2); }
 
 .heat-top {
   display: flex; gap: 8px; flex-wrap: wrap;

@@ -219,6 +219,15 @@ console.log('\n【I】工作流必须真的能在三版本上跑通');
     ok(/working-directory:\s*_test/.test(wf), 'CI 在 _test 目录下执行');
     ok(!/run:\s*npm install(\s|$)/m.test(wf),
       'CI 不用 npm install（会解析出不同的依赖树，通过与否就成了运气）');
+
+    /* 官方 action 必须用 v5 起。v4 自身跑在 Node 20 上，而 GitHub 已在
+       runner 上弃用它 —— 每次 CI 都会刷一条 deprecation 告警。
+       一直响的告警等于没有告警：真正要紧的那条会被淹掉。
+       钉在这里是为了防止将来改工作流时无声退回 v4。 */
+    ok(/uses:\s*actions\/checkout@v5/.test(wf),
+      '★ actions/checkout 用 v5（v4 目标 Node 20，已被 CI runner 弃用）');
+    ok(/uses:\s*actions\/setup-node@v5/.test(wf),
+      '★ actions/setup-node 用 v5（同上）');
   }
 }
 

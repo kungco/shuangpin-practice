@@ -22,9 +22,12 @@ jobs:
         node: ['18', '20', '22']
 
     steps:
-      - uses: actions/checkout@v4
+      # v5 起 action 自身跑在 Node 24 上。停在 v4 会让每次 CI 都刷一条
+      # 「Node.js 20 is deprecated」告警 —— 一直在响的告警等于没有告警，
+      # 真正要紧的那条会被淹掉。launcher.mjs【I】段钉住了这两个版本号。
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
 
