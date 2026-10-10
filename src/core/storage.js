@@ -1551,7 +1551,13 @@ export function shelfEntryAverages(entry) {
 export function loadShelf() {
   const raw = readJSON(KEYS.shelf, []);
   const list = Array.isArray(raw) ? raw : [];
-  return list.map(normalizeShelfEntry);
+  const safe = list.map(normalizeShelfEntry);
+  // Persist generated ids once. Otherwise legacy/imported invalid ids would
+  // get a different random replacement on every read, breaking row actions.
+  if (safe.some((entry, i) => String(list[i]?.id || '') !== entry.id)) {
+    writeJSON(KEYS.shelf, safe);
+  }
+  return safe;
 }
 
 export function saveShelf(list) {

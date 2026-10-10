@@ -2004,7 +2004,7 @@ html.reduce-motion *::after {
 .shelf-item-main { display: grid; gap: 2px; min-width: 0; }
 .shelf-item-title { font-size: 13.5px; color: var(--text); }
 .shelf-item-meta { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.shelf-item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.shelf-item-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 
 .course {
   margin-top: 14px; padding: 12px 14px;

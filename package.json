@@ -1,6 +1,6 @@
 {
   "name": "shuangpin-practice",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "description": "小鹤双拼打字练习器。应用本体零依赖、零构建，这个文件的作用见下方 type 字段的说明。",
   "type": "module",

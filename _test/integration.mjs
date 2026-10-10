@@ -216,6 +216,34 @@ console.log('\n【4】驱动练习流程');
 const app = fakeWindow.__app;
 ok(!!app, '应用实例已暴露');
 
+/* 书架编辑使用独立的小流程，放在任何练习结算弹窗打开之前，
+   验证真实的编辑入口、保存动作和标签列表展示。 */
+{
+  const ta = q('#customTextInput');
+  const text = '书架编辑功能集成测试材料。';
+  ta.value = text;
+  fire(q('#btnShelfSave'), 'click');
+  await settle();
+  const entry = sMod.loadShelf().find(e => e.text === text);
+  ok(!!entry, '书架编辑测试材料已创建');
+  fire(q(`#shelfList [data-id="${entry.id}"][data-act="edit"]`), 'click');
+  await settle();
+  ok(!q('#overlay').hidden, '点击编辑打开材料信息弹窗');
+  q('#shelfEditTitle').value = '双拼复习材料';
+  q('#shelfEditTags').value = '复习，短文, 每日';
+  fire(q('#modal [data-act="save"]'), 'click');
+  await settle();
+  const edited = sMod.loadShelf().find(e => e.id === entry.id);
+  ok(edited.title === '双拼复习材料' && edited.tags.join('|') === '复习|短文|每日',
+    `标题和多种分隔符标签保存成功（${edited.tags.join('、')}）`);
+  ok(edited.text === text && edited.stats.sessions === 0,
+    '编辑资料保留原文与既有统计');
+  ok(qa('#shelfList .shelf-item-meta').some(el => /复习、短文、每日/.test(el.textContent)),
+    '标签显示在书架列表');
+  sMod.removeShelfEntry(entry.id);
+  app.shelfActiveId = null;
+}
+
 // 选择「单字打字」模式
 const charCard = qa('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'char');
 ok(!!charCard, '找到单字模式卡片');
@@ -2746,6 +2774,49 @@ console.log('\n【12d】智能混合 · 书架 · 课程（接线层）');
     // 打开后重画的书架要显示「上一轮已打完」而不是「还没练过」
     const metaText = (qa('#shelfList .shelf-item-meta').map(el => el.textContent).join(''));
     ok(/上一轮已打完/.test(metaText), '列表文案反映已练（不再是「还没练过」）');
+
+  }
+
+  /* 续打进度仍按全文段数显示。只完成上一段材料最后一段的少量字符，
+     不足以结束该段时，不得因「剩余段数」被当作全文总段数而误报完成。 */
+  {
+    const longText = '中国人民学习双拼练习文字'.repeat(50);
+    ta.value = longText;
+    fire(q('#btnShelfSave'), 'click');
+    await settle();
+    const longEntry = sMod.loadShelf().find(e => e.text === longText);
+    ok(!!longEntry, '长材料已加入书架');
+    fire(q(`#shelfList [data-id="${longEntry.id}"][data-act="open"]`), 'click');
+    await settle();
+    fire(q('#btnStart'), 'click');
+    await settle();
+    const initialCount = app.engine.questions.length;
+    app.engine.destroy(); app.engine = null;
+    app.sessionActive = false;
+    q('#sessionPanel').hidden = true;
+    q('#setupPanel').hidden = false;
+    sMod.updateShelfEntry(longEntry.id, {
+      progress: { segIndex: initialCount - 1, segCount: initialCount }
+    });
+    fire(q(`#shelfList [data-id="${longEntry.id}"][data-act="open"]`), 'click');
+    await settle();
+    fire(q('#btnStart'), 'click');
+    await settle();
+    const eng = app.engine;
+    const resumeCount = eng.questions.length;
+    ok(resumeCount === 1, `从最后一段继续（剩余 ${resumeCount} 段）`);
+    eng.elapsedSec = 2;
+    for (let i = 0; i < 3; i++) {
+      const t = eng.currentTarget();
+      for (const key of t.keys) eng.pressKey(String(key).toLowerCase());
+    }
+    const partial = eng.finish('user');
+    await settle();
+    const progress = sMod.loadShelf().find(e => e.id === longEntry.id).progress;
+    ok(partial.doneQuestions === 0, '结束前没有完成这一整段');
+    ok(progress.segIndex < progress.segCount && progress.segCount === initialCount,
+      `未完成材料仍显示第 ${progress.segIndex + 1}/${progress.segCount} 段`);
+    fire(q('#overlay'), 'click');
   }
   // 清掉现场，别让书架状态泄漏到其它用例
   app.shelfActiveId = null;

@@ -683,6 +683,7 @@ function initShelf() {
       const id = btn.getAttribute('data-id');
       const act = btn.getAttribute('data-act');
       if (act === 'open') openShelfEntry(id);
+      else if (act === 'edit') editShelfEntry(id);
       else if (act === 'del') confirmRemoveShelfEntry(id);
     });
   }
@@ -717,7 +718,8 @@ function renderShelf() {
         ? '上一轮已打完'
         : `练到第 ${e.progress.segIndex + 1}/${e.progress.segCount} 段`)
       : '';
-    const meta = [avg.sessions ? `${avg.sessions} 次` : '还没练过',
+    const meta = [e.tags.length ? e.tags.join('、') : '',
+      avg.sessions ? `${avg.sessions} 次` : '还没练过',
       avg.sessions ? `均 ${avg.avgSpeed} 字/分 · 正确率 ${avg.avgAccuracy}%` : '',
       last, prog].filter(Boolean).join(' · ');
     const canResume = e.progress.segIndex > 0 && e.progress.segIndex < e.progress.segCount;
@@ -744,6 +746,13 @@ function renderShelf() {
     openBtn.dataset.act = 'open';
     openBtn.dataset.id = e.id;                      // setAttribute 语义：值就是值
     openBtn.textContent = canResume ? '继续' : '练习';
+    const editBtn = document.createElement('button');
+    editBtn.className = 'btn btn-ghost btn-sm';
+    editBtn.type = 'button';
+    editBtn.dataset.act = 'edit';
+    editBtn.dataset.id = e.id;
+    editBtn.setAttribute('aria-label', `编辑 ${e.title} 的标题和标签`);
+    editBtn.textContent = '编辑';
     const delBtn = document.createElement('button');
     delBtn.className = 'btn btn-ghost btn-sm';
     delBtn.type = 'button';
@@ -751,12 +760,52 @@ function renderShelf() {
     delBtn.dataset.id = e.id;
     delBtn.setAttribute('aria-label', `删除 ${e.title}`);
     delBtn.textContent = '删除';
-    actions.append(openBtn, delBtn);
+    actions.append(openBtn, editBtn, delBtn);
 
     li.append(main, actions);
     frag.append(li);
   }
   list.append(frag);
+}
+
+/** 编辑书架材料的显示名与标签，保留正文、练习进度和统计。 */
+function editShelfEntry(id) {
+  const entry = S.loadShelf().find(e => e.id === id);
+  if (!entry) return;
+  openModal(`
+    <h2>编辑书架材料</h2>
+    <label class="field">
+      <span>标题</span>
+      <input id="shelfEditTitle" type="text" maxlength="60" value="${escapeHtml(entry.title)}" required />
+    </label>
+    <label class="field">
+      <span>标签</span>
+      <input id="shelfEditTags" type="text" maxlength="120" value="${escapeHtml(entry.tags.join(', '))}"
+        placeholder="例如：小说、工作、复习" />
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-act="cancel">取消</button>
+      <button class="btn btn-primary" data-act="save">保存</button>
+    </div>
+  `, (act, close) => {
+    if (act !== 'save') { close(); return; }
+    const title = String($('#shelfEditTitle')?.value || '').trim();
+    if (!title) {
+      toast('标题不能为空', 'err');
+      $('#shelfEditTitle')?.focus();
+      return;
+    }
+    const tags = String($('#shelfEditTags')?.value || '')
+      .split(/[,，、;；]/).map(tag => tag.trim()).filter(Boolean).slice(0, 6);
+    if (!S.updateShelfEntry(id, { title, tags })) {
+      toast('保存失败，材料可能已被删除', 'err');
+      close();
+      return;
+    }
+    close();
+    toast('书架信息已更新');
+    renderShelf();
+  });
 }
 
 /** 打开一份材料：文本进 textarea，并从上次的段继续 */
@@ -831,7 +880,7 @@ function touchShelfAfterSession(s) {
      进度是 8 而不是 5 —— doneQuestions 只数得了本次会话内的。 */
   S.touchShelfEntry(id, {
     segIndex: segBase + (s.doneQuestions || 0),
-    segCount: s.questionCount || 0
+    segCount: segBase + (s.questionCount || 0)
   }, s);
   renderShelf();
 }

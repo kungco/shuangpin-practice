@@ -1244,6 +1244,25 @@ console.log('\n【18b】恶意备份：条目 id 注入不进来');
   ok(shelf.some(e => e.id === 'ok-id_9'), '合法 id 不被改写（合并身份稳定）');
 }
 
+console.log('\n【18c】旧版本非法 id：净化后持久化，条目身份稳定');
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+  ls.setItem(S.KEYS.shelf, JSON.stringify([
+    { id: 'legacy id', title: '旧条目', text: '旧版本导入的正文' }
+  ]));
+
+  const first = S.loadShelf()[0];
+  const stored = JSON.parse(ls.getItem(S.KEYS.shelf))[0];
+  const second = S.loadShelf()[0];
+  ok(/^[A-Za-z0-9_-]{1,40}$/.test(first.id), '旧非法 id 被替换成安全格式');
+  ok(first.id === stored.id && first.id === second.id,
+    '替换后的 id 写回存储，后续读取保持稳定');
+  ok(S.updateShelfEntry(first.id, { title: '可编辑旧条目' })?.title === '可编辑旧条目',
+    '升级后的旧材料仍可通过 id 编辑');
+}
+
 console.log('\n【19】课程进度：晋级判定不过就不前进（不会跳过关键基础）');
 {
   const ls = makeLocalStorage();
