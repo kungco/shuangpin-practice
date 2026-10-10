@@ -1156,6 +1156,60 @@ textarea:focus {
 .today-goal.is-done .tg-fill { background: linear-gradient(90deg, var(--ok), var(--ok-text)); }
 .today-goal.is-done .tg-detail { color: var(--ok-text); }
 
+/* ---------------- 每日练习计划（首页） ----------------
+   与上方「今日目标」的区别：目标是**结果**（练了多少字），
+   计划是**处方**（现在该练什么）。所以这里带一个行动按钮。 */
+.daily-plan {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 12px 16px;
+}
+.dp-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 7px;
+}
+.dp-title { font-size: 12.5px; font-weight: 600; }
+.dp-pct { font-size: 13px; font-weight: 700; font-family: var(--mono); color: var(--primary); }
+.dp-track {
+  height: 8px; border-radius: 999px;
+  background: var(--bg-soft); overflow: hidden;
+}
+.dp-fill {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), var(--primary-2));
+  transition: width .3s ease;
+}
+.dp-detail { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+.dp-actions {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 10px;
+}
+.dp-hint { font-size: 11.5px; color: var(--text-3); }
+
+/* 达标：整块转绿，与 .today-goal.is-done 口径一致 */
+.daily-plan.is-done { border-color: var(--ok-border); background: var(--ok-soft); }
+.daily-plan.is-done .dp-pct { color: var(--ok-text); }
+.daily-plan.is-done .dp-fill { background: linear-gradient(90deg, var(--ok), var(--ok-text)); }
+.daily-plan.is-done .dp-detail { color: var(--ok-text); }
+
+/* 练习包导入后的「已跳过」清单 */
+.pack-skipped {
+  margin: 10px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 10px 14px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.pack-skipped-head { font-size: 12px; color: var(--text-3); margin-bottom: 6px; }
+.pack-skipped ul { margin: 0; padding-left: 18px; }
+.pack-skipped li { font-size: 12.5px; line-height: 1.7; }
+
+/* 每日计划进度条（练习页 HUD 里也有一份，与首页卡片同口径） */
+
 .chart-tools { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
 
 /* ---------------- 错误热力图 ---------------- */

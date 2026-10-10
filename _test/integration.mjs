@@ -2912,9 +2912,117 @@ console.log('\n【12d】智能混合 · 书架 · 课程（接线层）');
   cleanupAll();
 }
 
-/* ---------- 【12e】刷新 → 续练 → 达标 → 晋级 ---------- */
-console.log('\n【12e】课程续练：归属跟着存档走');
+/* ---------- 【12d2】每日练习计划：首页卡片 → 一键组题 ---------- */
+console.log('\n【12d2】每日练习计划（接线层）');
 {
+  const cleanupAll = () => {
+    if (app.engine) { app.engine.destroy(); app.engine = null; }
+    app.sessionActive = false;
+    q('#sessionPanel').hidden = true;
+    q('#setupPanel').hidden = false;
+    q('#overlay').hidden = true;
+  };
+  cleanupAll();
+
+  /* 设成 0 → 整块卡片隐藏（不占首页空间） */
+  app.settings.dailyPlanMinutes = 0;
+  sMod.saveSettings(app.settings);
+  // 走公开路径刷新：切到练习视图总会经过 showResumeHint
+  fire(q('[data-view="practice"]'), 'click');
+  await settle();
+  ok(q('#dailyPlanBox').hidden === true, '计划时长为 0 时首页不显示计划卡片');
+
+  /* 设成 10 分钟 → 卡片出现，显示「还差 N 分钟」 */
+  app.settings.dailyPlanMinutes = 10;
+  sMod.saveSettings(app.settings);
+  fire(q('[data-view="practice"]'), 'click');
+  await settle();
+  ok(q('#dailyPlanBox').hidden === false, '设了时长后卡片出现');
+  ok(/今日计划/.test(q('#dailyPlanBox').textContent), '卡片标题为「今日计划」');
+  ok(/还差|已练/.test(q('#dpDetail').textContent),
+    `显示进度明细（${q('#dpDetail').textContent}）`);
+  ok(!!q('#btnDailyPlan'), '「开始今日计划」按钮存在');
+
+  /* 点击开始 → 用 mix 模式开局，且理由里说明这一局在计划中的位置 */
+  fire(q('#btnDailyPlan'), 'click');
+  await settle();
+  ok(!!app.engine, '点击后进入练习');
+  ok(app.engine.mode === 'mix', `会话模式为 mix（实际 ${app.engine.mode}）`);
+  ok(!q('#mixReasons').hidden && /今日计划/.test(q('#mixReasons').textContent),
+    '理由里说明了本轮在计划中的位置（不只是「为什么练这些」）');
+  app.engine.destroy(); app.engine = null;
+  cleanupAll();
+}
+
+/* ---------- 【12d3】练习包：导出 → 导入 → 判重 ---------- */
+console.log('\n【12d3】练习包导出导入（接线层）');
+{
+  const cleanupAll = () => {
+    if (app.engine) { app.engine.destroy(); app.engine = null; }
+    app.sessionActive = false;
+    q('#sessionPanel').hidden = true;
+    q('#setupPanel').hidden = false;
+    q('#overlay').hidden = true;
+  };
+  cleanupAll();
+
+  ok(!!q('#btnExportPack'), '「导出练习包」按钮存在');
+  ok(!!q('#fileImportPack'), '「导入练习包」文件输入存在');
+
+  /* 数据管理区里同时存在两套：完整备份与练习包。
+     两者的说明文字必须能让人分清 —— 混用会把个人成绩发出去。 */
+  ok(!!q('#btnExport2') && !!q('#fileImport'),
+    '完整备份的「导出数据 / 导入数据」仍在（两套并存，各司其职）');
+
+  /* 导出内容不含成绩 —— 这是练习包最硬的一条承诺。
+     直接调存储层导出，检查字段（UI 层的下载动作在 Node 里跑不了）。 */
+  sMod.clearAll();
+  sMod.addShelfEntry({ title: '集成测试材料', tags: ['测试'], text: '集成测试用的正文内容。' });
+  sMod.appendRecord({
+    id: 'pack-r1', ts: Date.now(), date: sMod.dateStr(new Date()), mode: 'char',
+    durationSec: 60, totalChars: 20, correctChars: 20, wrongChars: 0,
+    keystrokes: 40, speed: 20, accuracy: 100
+  });
+  const pack = sMod.exportPack();
+  ok(pack.app === sMod.PACK_APP, '练习包带专用标识');
+  ok(pack.entries.length === 1, '包里装进了 1 份材料');
+  ok(pack.history === undefined, '练习包不含历史成绩');
+  ok(pack.daily === undefined, '练习包不含每日统计');
+  ok(pack.weak === undefined, '练习包不含易错表');
+  ok(pack.settings && pack.settings.theme === undefined,
+    '练习包不带主题等个人偏好');
+
+  /* 导入到「本机」：同样内容应被跳过，不同内容应新增 */
+  const res = sMod.importPack({
+    app: sMod.PACK_APP, version: sMod.PACK_VERSION,
+    entries: [
+      { title: '重复的', text: '集成测试用的正文内容。' },
+      { title: '新的', text: '这是另一段全新的内容。' }
+    ]
+  });
+  ok(res.ok === true, '导入成功');
+  ok(res.added === 1, `只新增 1 份（重复的跳过，实际 ${res.added}）`);
+  ok(res.skipped === 1, '跳过 1 份重复材料');
+  ok(sMod.loadShelf().filter(e => e.text === '集成测试用的正文内容。').length === 1,
+    '重复正文没有产生第二份');
+
+  // 认错文件类型时给得出正确指引
+  const wrong = sMod.importPack({ app: 'shuangpin-practice', version: 3 });
+  ok(wrong.ok === false && /完整数据备份/.test(wrong.message),
+    '把完整备份当练习包导入时，提示该用「导入数据」');
+
+  // UI 侧：导入后书架要刷新（renderShelf 被调用）
+  sMod.saveShelf([]);
+  sMod.saveShelf([{ id: 'p1', title: 'UI 刷新验证', tags: [], text: '刷新验证正文' }]);
+  app.settings = sMod.loadSettings();
+  fire(q('[data-view="practice"]'), 'click');
+  await settle();
+  ok(qa('#shelfList .shelf-item').length >= 1, '切回首页后书架列表已渲染');
+  cleanupAll();
+}
+
+/* ---------- 【12e】刷新 → 续练 → 达标 → 晋级 ---------- */
+console.log('\n【12e】课程续练：归属跟着存档走');{
   const cleanupAll = () => {
     if (app.engine) { app.engine.destroy(); app.engine = null; }
     app.sessionActive = false;

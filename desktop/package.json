@@ -1,6 +1,6 @@
 {
   "name": "shuangpin-practice-desktop",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "双拼练习的 Windows 桌面封装（Electron 套壳）。应用本体仍是仓库根的零依赖静态站点，此目录只负责打包。",
   "author": "kungco",

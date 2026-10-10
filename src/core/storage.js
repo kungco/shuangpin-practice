@@ -310,6 +310,19 @@ export const DEFAULT_SETTINGS = {
      字数反映练习量，次数反映「有坐下来练」这件事本身。 */
   dailyGoalChars: 300,
   dailyGoalSessions: 1,
+  /* 每日练习计划：今天打算练几分钟。0 = 不启用计划。
+     【与 dailyGoalChars / dailyGoalSessions 的关系】两者**并存、互不替代**：
+     - dailyGoal*  是「结果目标」——今天一共练了多少字、坐了几次；
+     - dailyPlan*  是「过程处方」——今天该练哪几分钟、练什么内容。
+     前者衡量「有没有达标」，后者回答「现在该练什么」，用同一套
+     组合算法（planMixedSession）按时长现组一套题并给出进度。
+     为什么不合并成一个：字数目标无法回答「该练什么内容」，
+     而「练 5 分钟」也无法体现「今天还差多少字」。 */
+  dailyPlanMinutes: 10,
+  /* 今日计划完成的期号。存的是日期字符串（YYYY-MM-DD），
+     不是布尔 —— 跨零点后自动失效，不用定时器去重置。
+     达到当日计划时长即写入当天日期；进度显示按「今日已练时长」实时算。 */
+  dailyPlanDoneOn: '',
   /* 自定义文本内容。跟打自己的材料 —— 内置语料练到头之后，
      边际收益趋近于零。存进设置而不是单独的 key，是为了跟着
      「导出数据」一起备份：用户辛苦粘的长文不该导出时丢掉。
@@ -2549,9 +2562,210 @@ export function importAll(payload) {
   }
 }
 
-/** 清空所有数据 */
-export function clearAll() {
+/* ============================================================
+   可分享的练习包
+   ------------------------------------------------------------
+   与「导出数据」（exportAll）是**两件事**，不要混用：
+
+   |            | 导出数据（备份） | 练习包 |
+   | 用途       | 换设备 / 防丢    | 分享给别人 |
+   | 含成绩     | 有（历史、日报、易错表…） | **无** |
+   | 含文章     | 有               | 有     |
+   | 含设置     | 全部（含主题、快捷键等个人偏好） | **只有与练习相关的** |
+
+   为什么必须分开：把完整备份发给别人，等于把自己的练习成绩、易错字
+   和技术习惯一起送出去 —— 对方导入后自己的记录会被合并进来一堆陌生
+   数据，界面上还看不出哪些是别人的。练习包只装「材料 + 怎么练」，
+   接收方导入的是**内容**，不是**别人的成绩**。
+
+   【包内不含什么】
+   - 任何成绩：history / daily / weak / keyErrors / keyConfusions /
+     keyTimings / course —— 全部排除。
+   - 个人偏好设置：主题、音效、快捷键、隐私相关项不进包 ——
+     这些是「我习惯怎么用」，跟分享的材料无关。
+   ============================================================ */
+
+/** 练习包格式标识。与完整备份的 `app` 字段区分开，避免互相误认。 */
+export const PACK_APP = 'shuangpin-practice-pack';
+/** 练习包格式版本。将来加字段时递增，导入端据此判断能否识别。 */
+export const PACK_VERSION = 1;
+
+/**
+ * 进包设置项白名单。
+ *
+ * 【为什么是白名单而不是黑名单】黑名单要穷举「哪些不该带」，
+ * 以后新增一个设置（比如新的隐私开关）时忘了加进黑名单，它就会
+ * 悄悄跟着练习包发出去。白名单相反：没列进来的默认不带，
+ * 新增设置时最多是「忘了带」，不会造成泄露。
+ *
+ * 只收「影响怎么练」的项：时长、题量、模式、档位、严格模式等。
+ * 主题 / 音效 / 语音 / 快捷键 / 减少动效 一律不带 —— 那是个人习惯。
+ */
+const PACK_SETTING_KEYS = [
+  'scheme',            // 双拼方案：材料是按某方案写的编码提示，必须带
+  'mode',              // 默认练什么
+  'duration',          // 时长
+  'count',             // 题量
+  'charTier',          // 单字档位
+  'trainingPolicy',    // 训练策略
+  'phraseCategory',    // 词组类别
+  'phraseLength',      // 词组长度
+  'weakBoost',         // 是否侧重易错
+  'strict',            // 严格模式
+  'skipPunct',         // 跳过标点
+  'showDecode',        // 是否显示声韵提示
+  'reviewDueOnly',     // 复习是否只练到期项
+  'dailyPlanMinutes'   // 每日计划时长
+];
+
+/**
+ * 一份练习包里的单条材料形状。
+ * 只保留「材料本身」：标题、标签、正文。进度与统计一概不带 ——
+ * 那是发送者自己的练习痕迹，对接收方毫无意义。
+ */
+function normalizePackEntry(raw) {
+  const e = (raw && typeof raw === 'object') ? raw : {};
+  const tags = Array.isArray(e.tags)
+    ? e.tags.map(t => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 6)
+    : [];
+  return {
+    title: String(e.title || '').trim().slice(0, 60) || '未命名材料',
+    tags,
+    text: clampText(e.text)
+  };
+}
+
+/**
+ * 导出一份练习包。
+ *
+ * @param {object} [opts]
+ *   - ids      只导出这些书架条目（默认全部）
+ *   - title    包名（默认「双拼练习包」）
+ * @returns {object} 可 JSON.stringify 的纯对象
+ */
+export function exportPack(opts = {}) {
+  const settings = loadSettings();
+  const wanted = Array.isArray(opts.ids) && opts.ids.length
+    ? new Set(opts.ids.map(String)) : null;
+
+  const entries = loadShelf()
+    .filter(e => !wanted || wanted.has(e.id))
+    .map(e => normalizePackEntry(e))
+    .filter(e => e.text.trim());   // 空正文的材料没有分享价值，不占包
+
+  /* 设置只挑白名单里的键。逐键取，而不是整个 settings 减黑名单 —— 
+     这样将来新增设置不会因为忘记维护黑名单而泄漏。 */
+  const packSettings = {};
+  for (const k of PACK_SETTING_KEYS) {
+    if (settings[k] !== undefined) packSettings[k] = settings[k];
+  }
+
+  return {
+    app: PACK_APP,
+    version: PACK_VERSION,
+    title: String(opts.title || '').trim().slice(0, 60) || '双拼练习包',
+    exportedAt: new Date().toISOString(),
+    settings: packSettings,
+    entries
+  };
+}
+
+/** 正文归一化 —— 用于判重。去掉全部空白后比对，
+ *  避免「从不同地方复制同一篇文章」因空格/换行差异被当成两份。 */
+function packTextKey(text) {
+  return String(text || '').replace(/\s+/g, '');
+}
+
+/**
+ * 导入练习包。
+ *
+ * 【合并语义】与完整备份的 `importAll` 一致：只增不减，
+ * 重复材料跳过，不覆盖本地已有内容。
+ *
+ * 【判重口径】按**正文内容**比对（去掉空白后完全相同即视为重复）。
+ * 为什么不用标题：标题是用户随手起的，「导入的形近字」这种名字
+ * 十有八九重名，而正文完全相同的才是同一份材料 —— 反过来，
+ * 同一篇文章被人改了标题，正文比对仍能正确认出这是重复的。
+ *
+ * @returns {{ok:boolean, message:string, added?:number, skipped?:number,
+ *            skippedTitles?:string[]}}
+ */
+export function importPack(payload) {
   try {
+    if (!payload || typeof payload !== 'object') {
+      return { ok: false, message: '文件内容不是有效的 JSON 对象' };
+    }
+    if (payload.app !== PACK_APP) {
+      // 特别提示「这是完整备份」的情况 —— 用户很可能是拿错了文件，
+      // 直接说「不是练习包」他会以为文件坏了，说清楚该用哪个入口才有用。
+      if (payload.app === 'shuangpin-practice') {
+        return { ok: false, message: '这是「完整数据备份」，不是练习包。请改用「导入数据」。' };
+      }
+      return { ok: false, message: '这不是本应用的练习包文件' };
+    }
+    if (!Array.isArray(payload.entries)) {
+      return { ok: false, message: '练习包格式不正确：缺少材料列表' };
+    }
+
+    const cur = loadShelf();
+    const seen = new Set(cur.map(e => packTextKey(e.text)));
+    let added = 0;
+    const skippedTitles = [];
+
+    for (const raw of payload.entries) {
+      const e = normalizePackEntry(raw);
+      if (!e.text.trim()) continue;
+      const key = packTextKey(e.text);
+      if (seen.has(key)) { skippedTitles.push(e.title); continue; }
+      seen.add(key);
+      cur.push(normalizeShelfEntry({
+        title: e.title, tags: e.tags, text: e.text,
+        createdAt: Date.now(), lastAt: 0
+      }));
+      added++;
+    }
+
+    if (added > 0) saveShelf(cur);
+
+    /* 设置：**只补齐本地没有显式设置过的项**是不对的 —— 设置项总有
+       默认值，无法区分「用户设成了这个值」和「只是默认」。
+       所以这里采取更保守的策略：练习包里的设置**不覆盖**本机设置，
+       只用于「本机还是全新状态」时提供一套合理的起手参数。
+       判据：本机从未保存过设置（localStorage 里没有 settings 键）。 */
+    let appliedSettings = false;
+    if (added > 0 && payload.settings && typeof payload.settings === 'object') {
+      const hasLocalSettings = readRaw(KEYS.settings) != null;
+      if (!hasLocalSettings) {
+        const safe = {};
+        for (const k of PACK_SETTING_KEYS) {
+          if (payload.settings[k] !== undefined) safe[k] = payload.settings[k];
+        }
+        saveSettings(Object.assign(loadSettings(), safe));
+        appliedSettings = true;
+      }
+    }
+
+    const parts = [`新增 ${added} 份材料`];
+    if (skippedTitles.length) parts.push(`跳过 ${skippedTitles.length} 份重复材料`);
+    if (appliedSettings) parts.push('并应用了包内的练习设置');
+
+    return {
+      ok: true,
+      message: added === 0 && skippedTitles.length
+        ? `没有新材料：${skippedTitles.length} 份都已存在`
+        : parts.join('，'),
+      added,
+      skipped: skippedTitles.length,
+      skippedTitles
+    };
+  } catch (err) {
+    console.error('[storage] 导入练习包失败', err);
+    return { ok: false, message: '导入失败：' + (err && err.message ? err.message : '未知错误') };
+  }
+}
+
+/** 清空所有数据 */
+export function clearAll() {  try {
     // 两处都要清：降级期间 localStorage 里可能还留着配额满之前的老副本，
     // 只清 memoryStore 会导致「清空后刷新页面，老数据又回来了」。
     for (const k of Object.values(KEYS)) {

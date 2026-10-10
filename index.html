@@ -215,6 +215,24 @@
           </p>
         </div>
 
+        <!-- 每日练习计划：设定「每天练几分钟」，按进度自动组题。
+             与下方的「智能混合」（一次性快捷键）区分：
+             这个有跨天状态，会显示今天还差多久。 -->
+        <div class="daily-plan" id="dailyPlanBox" hidden>
+          <div class="dp-head">
+            <span class="dp-title">今日计划</span>
+            <span class="dp-pct" id="dpPct">0%</span>
+          </div>
+          <div class="dp-track"><div class="dp-fill" id="dpFill" style="width:0%"></div></div>
+          <div class="dp-detail" id="dpDetail"></div>
+          <div class="dp-actions">
+            <button class="btn btn-primary" id="btnDailyPlan" type="button">
+              开始今日计划
+            </button>
+            <span class="dp-hint" id="dpHint"></span>
+          </div>
+        </div>
+
         <!-- 智能混合：按易错字词 / 慢键 / 没练熟的键位自动组题。
              推荐理由必须展示出来 —— 「为什么练这些」说不清楚，
              用户就只能把它当成又一个随机按钮。 -->
@@ -710,6 +728,14 @@
             <input id="setDailyGoalSessions" type="number" min="0" max="100" step="1" value="1"
                    aria-label="每日目标练习次数，0 表示不设目标" />
           </label>
+          <!-- 每日练习计划：用「练几分钟」驱动，首页按这个时长现组一套题。
+               与上面两个「目标」是并存关系 —— 那两项衡量今天做够了没有，
+               这一项回答「现在该练什么」。 -->
+          <label class="field">
+            <span>每日计划时长（分钟）</span>
+            <input id="setDailyPlanMinutes" type="number" min="0" max="120" step="1" value="10"
+                   aria-label="每日练习计划时长，单位分钟，0 表示不启用计划" />
+          </label>
         </div>
 
         <div class="settings-toggles">
@@ -826,6 +852,21 @@
           </label>
           <button class="btn btn-danger btn-sm" id="btnResetSettings">恢复默认设置</button>
         </div>
+
+        <!-- 练习包：只装「材料 + 练习设置」，不含任何成绩。
+             与上面的「导出数据」是两件事 —— 数据备份给自己换设备用，
+             练习包给别人练。混用会把个人成绩一起送出去。 -->
+        <h3 class="sub-title">练习包</h3>
+        <div class="danger-zone">
+          <button class="btn btn-ghost btn-sm" id="btnExportPack">导出练习包</button>
+          <label class="btn btn-ghost btn-sm">
+            导入练习包<input type="file" id="fileImportPack" accept=".json,application/json" hidden />
+          </label>
+        </div>
+        <p class="footnote" style="margin-top:2px">
+          练习包包含书架里的文章、标签与练习设置，<strong>不包含任何练习成绩</strong>，可以放心分享给别人。
+          导入时会按正文内容比对，已有相同材料的会自动跳过。
+        </p>
 
         <!-- 这段是「数据安全」承诺的唯一出处。降级到内存存储时
              main.js 会改掉它并加上 is-warn —— 不能再声称保存在 localStorage。 -->

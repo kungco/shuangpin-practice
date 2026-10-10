@@ -27,7 +27,7 @@ export function summarize(history) {
     sessions: 0, totalChars: 0, totalSeconds: 0,
     bestSpeed: 0, avgSpeed: 0, avgAccuracy: 0,
     bestAccuracy: 0, streakDays: 0, totalDays: 0,
-    lastTs: 0, todayChars: 0, todaySessions: 0
+    lastTs: 0, todayChars: 0, todaySessions: 0, todaySeconds: 0
   };
   if (!list.length) return empty;
 
@@ -83,7 +83,10 @@ export function summarize(history) {
     totalDays,
     lastTs,
     todayChars: todayRecs.reduce((s, r) => s + num(r.totalChars), 0),
-    todaySessions: todayRecs.length
+    todaySessions: todayRecs.length,
+    /* 今日已练时长（秒）。每日练习计划的进度按**时间**算而不是按题数 ——
+       用户设的是分钟，进度就该用同一单位回报（理由见 core/daily.js）。 */
+    todaySeconds: todayRecs.reduce((s, r) => s + num(r.durationSec), 0)
   };
 }
 

@@ -18,6 +18,9 @@ import {
   ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS, phrasePool
 } from './core/questions.js';
 import { planMixedSession } from './core/mix.js';
+import {
+  dailyPlanProgress, buildDailyPlan, planDoneToday, clampPlanMinutes
+} from './core/daily.js';
 import { COURSE, currentLesson, buildLessonQuestions, recordLessonAttempt } from './core/course.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import { TRAINING_LABELS } from './core/training.js';
@@ -347,6 +350,13 @@ function switchView(view) {
   if (v === 'stats') renderStatsView();
   if (v === 'review') renderReviewView();
   if (v === 'keymap') renderSyllableList();
+  /* 进练习页时重画每日计划卡片。
+     它是「今天已练多久」的函数，而进度可能被别处改掉 ——
+     在设置页改了计划时长、导入数据、恢复默认设置，都会让卡片上的
+     分母变掉。不在这里刷的话，用户改完切回来看到的还是旧进度，
+     会以为设置没生效。showResumeHint 只在特定几处被调用，
+     覆盖不到「从设置页切回来」这条最常见的路径。 */
+  if (v === 'practice') renderDailyPlan();
   // 进设置页时刷新存储状态：配额可能在练习途中写满，
   // 而设置页那段文案是「数据安全」承诺的唯一出处。
   if (v === 'settings') watchStorageMode();
@@ -585,6 +595,7 @@ function initSetupPanel() {
   } catch (err) { console.warn('[shelf] 迁移失败', err); }
   initCustomText();
   initSmartMix();
+  initDailyPlan();
   initShelf();
   initCourse();
 
@@ -735,6 +746,98 @@ function renderMixReasons(list) {
   box.hidden = false;
   box.innerHTML = `<div class="mix-reasons-title">为什么练这些</div>` +
     `<ul class="mix-reason-list">${list.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>`;
+}
+
+/* ============================================================
+   每日练习计划
+   ------------------------------------------------------------
+   与「智能混合」的区别：智能混合是一次性的快捷键（固定 5 分钟、无状态），
+   本功能有**跨天状态** —— 今天练了多久、还差多少、明天重新开始。
+
+   进度按**时间**算而不是题数（理由见 core/daily.js）。
+   ============================================================ */
+
+/** 当前计划进度。每次渲染首页 / 结算后都重新算，不缓存。 */
+function currentDailyPlan() {
+  const sum = summarize();
+  return {
+    progress: dailyPlanProgress({
+      settings: app.settings,
+      todaySec: sum.todaySeconds,
+      today: S.dateStr(new Date())
+    }),
+    sum
+  };
+}
+
+/** 把计划进度画到首页卡片上。 */
+function renderDailyPlan() {
+  const box = $('#dailyPlanBox');
+  if (!box) return;
+  const { progress: p } = currentDailyPlan();
+
+  // 未启用计划（时长为 0）→ 整块隐藏，不占用首页空间
+  if (!p.enabled) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const pct = $('#dpPct');
+  const fill = $('#dpFill');
+  const detail = $('#dpDetail');
+  const hint = $('#dpHint');
+  const btn = $('#btnDailyPlan');
+
+  box.className = 'daily-plan' + (p.achieved ? ' is-done' : '');
+  if (pct) pct.textContent = p.achieved ? '已完成' : `${p.percent}%`;
+  if (fill) fill.style.width = `${p.percent}%`;
+
+  const doneMin = Math.floor(p.doneSec / 60);
+  const doneSecPart = Math.round(p.doneSec % 60);
+  const shown = p.doneSec >= 60 ? `${doneMin} 分 ${doneSecPart} 秒` : `${Math.round(p.doneSec)} 秒`;
+
+  if (detail) {
+    detail.textContent = p.achieved
+      ? `今天已练 ${shown}，达成 ${p.minutes} 分钟的目标` +
+        (p.overAchieved ? '（超额完成）' : '')
+      : `今天已练 ${shown}，还差 ${Math.ceil(p.leftSec / 60)} 分钟`;
+  }
+  if (hint) {
+    hint.textContent = p.achieved
+      ? '已完成，可以自由练习'
+      : '会按到期错题、慢键和没练熟的键位组题';
+  }
+  if (btn) btn.textContent = p.achieved ? '再练一局' : '开始今日计划';
+}
+
+/** 「开始今日计划」：按剩余时长组一套题并开练。 */
+function startDailyPlan() {
+  try {
+    const { progress } = currentDailyPlan();
+    const built = buildDailyPlan({
+      plan: progress,
+      weakList: weakRanking(30),
+      /* 必须传 .all —— loadKeyTimings() 返回的是 {all, byMode, recent, sigs}
+         容器，整个传进去会被 normalize 按「键名是否为单字母」全部拒收，
+         静默返回空表（与 initSmartMix 里同样的坑）。 */
+      slowKeys: S.slowestKeys(S.loadKeyTimings().all, { min: KEY_SLOW_MIN_SAMPLES, top: 5 }),
+      mastery: keyMastery({ range: 'all', mode: 'all' })
+    });
+    if (!built.questions.length) {
+      toast('暂时组不出练习，请稍后再试', 'err');
+      return;
+    }
+    renderMixReasons(built.reasons);
+    startSession(built.questions, 'mix', { durationSec: built.roundSec });
+  } catch (err) {
+    console.error('[dailyplan] 组题失败', err);
+    toast('今日计划组题失败：' + (err && err.message ? err.message : '未知错误'), 'err');
+  }
+}
+
+function initDailyPlan() {
+  const btn = $('#btnDailyPlan');
+  if (!btn || btn._bound) return;
+  btn._bound = true;
+  btn.addEventListener('click', startDailyPlan);
 }
 
 /* ============================================================
@@ -1853,6 +1956,24 @@ function persistRecord(summary) {
       if (s.keyTimings && Object.keys(s.keyTimings).length) {
         S.recordKeyTimings(s.keyTimings, s.mode);
       }
+    }
+
+    /* 每日计划：本局落库后若今天已达标，把「完成日」写上。
+       存日期而不是布尔，跨零点自动失效（见 core/daily.js::planDoneToday 的注释）。
+       注意在 appendRecord **之后**算 —— summarize() 读的是历史，
+       要包含刚写完的这一局，否则永远差一局。 */
+    if (meaningful) {
+      try {
+        const p = dailyPlanProgress({
+          settings: app.settings,
+          todaySec: summarize().todaySeconds,
+          today: S.dateStr(new Date())
+        });
+        if (p.enabled && p.achieved && !planDoneToday(app.settings.dailyPlanDoneOn, S.dateStr(new Date()))) {
+          app.settings.dailyPlanDoneOn = S.dateStr(new Date());
+          saveSettingsDebounced();
+        }
+      } catch (err) { console.warn('[dailyplan] 完成标记失败', err); }
     }
 
     /* 收尾音。playFinish / playSoften 早就写好、index.html 也写着「完成提示音」，
@@ -3131,6 +3252,10 @@ function showResumeHint() {
   } catch (err) {
     console.warn('[resume] 读取失败', err);
   }
+  /* 每日计划进度也跟着刷新 —— 它是「今天已练多久」的函数，
+     每练完一局、每次回到首页都可能变。挂在这里是因为 showResumeHint
+     本来就是「回到设置视图」的统一收尾点，各处都已调用它。 */
+  try { renderDailyPlan(); } catch (err) { console.warn('[dailyplan] 渲染失败', err); }
 }
 
 /* ============================================================
@@ -4359,7 +4484,10 @@ function initSettingsView() {
      统计页的完成度也要跟着变（不然切过去还是旧分母）。 */
   const goalParts = [
     ['#setDailyGoalChars', 'dailyGoalChars', 0, 1000000],
-    ['#setDailyGoalSessions', 'dailyGoalSessions', 0, 100]
+    ['#setDailyGoalSessions', 'dailyGoalSessions', 0, 100],
+    // 每日计划时长：上限 120 分钟（与 core/daily.js 的 PLAN_MAX_MINUTES 一致）。
+    // 0 = 不启用计划，首页那块卡片整块隐藏。
+    ['#setDailyPlanMinutes', 'dailyPlanMinutes', 0, 120]
   ];
   goalParts.forEach(([sel, key, lo, hi]) => {
     const el = $(sel);
@@ -4372,6 +4500,9 @@ function initSettingsView() {
       el.value = String(v);              // 回写夹取后的值，用户看得见
       saveSettingsDebounced();
       renderGoalHud();
+      // 计划时长改了就立刻重画首页那块卡片 —— 设成 0 要马上消失，
+      // 改大改小要马上反映新的进度分母。
+      renderDailyPlan();
       if (app.view === 'stats') renderStatsView();
     });
   });
@@ -4431,6 +4562,57 @@ function initSettingsView() {
         initShortcutSettings();
         toast('已恢复默认设置');
       });
+    });
+  }
+
+  /* ---- 练习包导出 / 导入 ----
+     与上面的「导出数据 / 导入数据」并列但用途不同：
+     数据备份给自己换设备，练习包给别人练（不含成绩，见 storage.js）。 */
+  const btnExportPack = $('#btnExportPack');
+  if (btnExportPack && !btnExportPack._bound) {
+    btnExportPack._bound = true;
+    btnExportPack.addEventListener('click', exportPack);
+  }
+
+  const fileImportPack = $('#fileImportPack');
+  if (fileImportPack && !fileImportPack._bound) {
+    fileImportPack._bound = true;
+    fileImportPack.addEventListener('change', () => {
+      const f = fileImportPack.files && fileImportPack.files[0];
+      fileImportPack.value = '';
+      if (!f) return;
+      if (f.size > 8 * 1024 * 1024) { toast('文件过大（上限 8MB）', 'err'); return; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const payload = JSON.parse(String(reader.result || ''));
+          const res = S.importPack(payload);
+          if (!res.ok) { toast(res.message, 'err', 5000); return; }
+          toast(res.message, 'ok', 5000);
+          /* 重复材料的标题列出来 —— 只说「跳过 2 份」用户不知道
+             跳的是哪两份，会怀疑该导的没导进来。 */
+          if (res.skipped && res.skippedTitles && res.skippedTitles.length) {
+            openModal(`
+              <h2>导入完成</h2>
+              <p class="modal-sub">${escapeHtml(res.message)}</p>
+              <div class="pack-skipped">
+                <div class="pack-skipped-head">以下材料已存在，未重复导入：</div>
+                <ul>${res.skippedTitles.slice(0, 20).map(t => `<li>${escapeHtml(t)}</li>`).join('')}</ul>
+              </div>
+              <div class="modal-actions">
+                <button class="btn btn-primary" data-act="ok">知道了</button>
+              </div>
+            `, (act, close) => close());
+          }
+          renderShelf();
+          app.settings = S.loadSettings();
+          syncSettingsUI();
+        } catch (err) {
+          toast('解析失败：不是有效的 JSON 文件', 'err');
+        }
+      };
+      reader.onerror = () => toast('文件读取失败', 'err');
+      reader.readAsText(f, 'utf-8');
     });
   }
 
@@ -4814,7 +4996,8 @@ function syncSettingsUI() {
   // 每日目标是数字输入框（不是 select 也不是 checkbox），单独同步。
   // 放在这里而不是散落在各调用点：syncSettingsUI 是「设置变化后统一刷新
   // 所有 UI」的唯一入口，漏掉它会导致「导入数据后目标框还是旧值」。
-  [['#setDailyGoalChars', 'dailyGoalChars'], ['#setDailyGoalSessions', 'dailyGoalSessions']]
+  [['#setDailyGoalChars', 'dailyGoalChars'], ['#setDailyGoalSessions', 'dailyGoalSessions'],
+   ['#setDailyPlanMinutes', 'dailyPlanMinutes']]
     .forEach(([sel, key]) => {
       const el = $(sel);
       if (el) el.value = String(app.settings[key]);
@@ -4862,8 +5045,44 @@ function exportData() {
   }
 }
 
-function confirmClearStats() {
-  openModal(`
+/**
+ * 导出练习包 —— 只装「材料 + 练习设置」，不含任何成绩。
+ *
+ * 【为什么书架为空时不让导出】一个没有任何材料的练习包，对方导入后
+ * 什么也练不了，还以为是文件坏了。与其生成一个空包，不如明确告诉
+ * 用户「先去书架存点东西」。这比「导出成功但内容为空」有用得多。
+ */
+function exportPack() {
+  try {
+    const shelf = S.loadShelf();
+    if (!shelf.length) {
+      toast('书架里还没有材料，先存一篇再导出练习包', 'err', 5000);
+      return;
+    }
+    const data = S.exportPack();
+    if (!data.entries.length) {
+      toast('书架里的材料都是空的，没有可分享的内容', 'err');
+      return;
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    a.href = url;
+    a.download = `双拼练习包_${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast(`已导出练习包（${data.entries.length} 份材料，不含成绩）`, 'ok', 4000);
+  } catch (err) {
+    console.error('[pack] 导出失败', err);
+    toast('导出失败：' + (err && err.message ? err.message : '未知错误'), 'err');
+  }
+}
+
+function confirmClearStats() {  openModal(`
     <h2>清空全部练习记录？</h2>
     <p class="modal-sub">
       将删除：所有历史成绩、每日统计、易错字词表、键位热力图数据。<br>
