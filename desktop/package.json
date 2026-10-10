@@ -26,6 +26,11 @@
       "main.cjs",
       "package.json"
     ],
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "compression": "maximum",
     "extraResources": [
       {
         "from": "../index.html",

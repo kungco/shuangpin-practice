@@ -43,6 +43,15 @@ if (process.env.SHUANGPIN_ENABLE_GPU !== '1') {
   app.commandLine.appendSwitch('disable-gpu-compositing');
 }
 
+// 关闭本应用用不到的能力，省内存也少几个后台进程。
+// 这些都是纯练习器不需要的：拼写检查、后台网络预取、打印预览。
+app.commandLine.appendSwitch('disable-features', [
+  'SpellcheckService',
+  'CalculateNativeWinOcclusion',
+  'NetworkServiceInProcess',
+].join(','));
+app.commandLine.appendSwitch('disable-spell-checking');
+
 // 静态资源根目录：打包后置于 resources/app-root，开发时是仓库根
 const ROOT = app.isPackaged
   ? path.join(process.resourcesPath, 'app-root')
