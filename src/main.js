@@ -499,7 +499,12 @@ function initSetupPanel() {
   // 注意：必须用箭头函数包装。若直接传 startSession，
   // 浏览器会把 click 事件对象当作第一个参数 questionsOverride 传入，
   // 导致「有题目但格式不对」而静默失败。
-  if (btnStart) btnStart.addEventListener('click', () => startSession());
+  if (btnStart) btnStart.addEventListener('click', () => startSession(null, null, {
+    /* 书架归属在这里显式带上：openShelfEntry 已把材料 id 记在 app 上。
+       不带的话 startSession 会按「无归属」清空 —— 「打开材料 → 开始练习」
+       练完书架上却永远显示「还没练过」（上报的 P1 缺陷）。 */
+    shelfId: app.shelfActiveId
+  }));
 
   const btnResume = $('#btnResume');
   if (btnResume) btnResume.addEventListener('click', resumeSession);
@@ -609,7 +614,11 @@ function initSmartMix() {
       const plan = planMixedSession({
         durationSec: 300,
         weakList: weakRanking(30),
-        slowKeys: S.slowestKeys(S.loadKeyTimings(), { min: KEY_SLOW_MIN_SAMPLES, top: 5 }),
+        /* 注意传 **.all**：slowestKeys 要的是「键 → 样本」的映射，
+           而 loadKeyTimings() 返回的是 {all, byMode, recent, sigs} 整个容器。
+           整个传过去会被 normalize 按「键名是否为单字母」全部拒收，
+           静默返回空表 —— 慢键段永远出不了题，还不报错（上报的 P2 缺陷）。 */
+        slowKeys: S.slowestKeys(S.loadKeyTimings().all, { min: KEY_SLOW_MIN_SAMPLES, top: 5 }),
         mastery: keyMastery({ range: 'all', mode: 'all' })
       });
       if (!plan.questions.length) {
@@ -690,7 +699,17 @@ function renderShelf() {
   const entries = S.loadShelf();
   box.hidden = entries.length === 0;
   if (count) count.textContent = entries.length ? `${entries.length} 份` : '';
-  list.innerHTML = entries.map(e => {
+
+  /* 用 DOM API 逐个节点搭，不用 innerHTML 拼字符串。
+     理由是安全而非风格：条目数据（id / 标题 / 标签）最终来自**导入的备份**，
+     是别人的输入。拼 HTML 的写法只要漏转义一个字段就是脚本注入
+     （曾经验证过：构造一份 id 带 `"><img onerror=...>` 的备份能注入成功）。
+     textContent / setAttribute 从机制上杜绝这一整类问题，
+     就算将来有人在 normalize 阶段漏了校验也炸不了。 */
+  list.innerHTML = '';
+  const frag = document.createDocumentFragment();
+
+  for (const e of entries) {
     const avg = S.shelfEntryAverages(e);
     const last = e.lastAt ? new Date(e.lastAt).toLocaleDateString() : '没练过';
     const prog = e.progress.segCount > 0
@@ -702,18 +721,42 @@ function renderShelf() {
       avg.sessions ? `均 ${avg.avgSpeed} 字/分 · 正确率 ${avg.avgAccuracy}%` : '',
       last, prog].filter(Boolean).join(' · ');
     const canResume = e.progress.segIndex > 0 && e.progress.segIndex < e.progress.segCount;
-    return `<li class="shelf-item" data-id="${e.id}">
-      <div class="shelf-item-main">
-        <span class="shelf-item-title">${escapeHtml(e.title)}</span>
-        <span class="shelf-item-meta">${escapeHtml(meta)}</span>
-      </div>
-      <div class="shelf-item-actions">
-        <button class="btn btn-ghost btn-sm" data-act="open" data-id="${e.id}">${canResume ? '继续' : '练习'}</button>
-        <button class="btn btn-ghost btn-sm" data-act="del" data-id="${e.id}"
-          aria-label="删除 ${escapeHtml(e.title)}">删除</button>
-      </div>
-    </li>`;
-  }).join('');
+
+    const li = document.createElement('li');
+    li.className = 'shelf-item';
+    li.dataset.id = e.id;
+
+    const main = document.createElement('div');
+    main.className = 'shelf-item-main';
+    const title = document.createElement('span');
+    title.className = 'shelf-item-title';
+    title.textContent = e.title;                    // textContent：防注入
+    const metaEl = document.createElement('span');
+    metaEl.className = 'shelf-item-meta';
+    metaEl.textContent = meta;
+    main.append(title, metaEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'shelf-item-actions';
+    const openBtn = document.createElement('button');
+    openBtn.className = 'btn btn-ghost btn-sm';
+    openBtn.type = 'button';
+    openBtn.dataset.act = 'open';
+    openBtn.dataset.id = e.id;                      // setAttribute 语义：值就是值
+    openBtn.textContent = canResume ? '继续' : '练习';
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn btn-ghost btn-sm';
+    delBtn.type = 'button';
+    delBtn.dataset.act = 'del';
+    delBtn.dataset.id = e.id;
+    delBtn.setAttribute('aria-label', `删除 ${e.title}`);
+    delBtn.textContent = '删除';
+    actions.append(openBtn, delBtn);
+
+    li.append(main, actions);
+    frag.append(li);
+  }
+  list.append(frag);
 }
 
 /** 打开一份材料：文本进 textarea，并从上次的段继续 */
@@ -772,7 +815,9 @@ function confirmRemoveShelfEntry(id) {
 /** 练完一次自定义文本后回写书架（进度 + 该材料自己的统计） */
 function touchShelfAfterSession(s) {
   const id = app.shelfActiveId;
+  const segBase = app.shelfSegBase || 0;
   app.shelfActiveId = null;
+  app.shelfSegBase = 0;
   app.shelfSegOffset = 0;
   if (!id || s.mode !== 'custom') return;
   const entry = S.loadShelf().find(e => e.id === id);
@@ -782,8 +827,10 @@ function touchShelfAfterSession(s) {
   const ta = $('#customTextInput');
   const cur = ta ? ta.value : (app.settings.customText || '');
   if (cur !== entry.text) return;
+  /* 段号要加上**本次开局的基数**：从第 3 段续打又完成了 5 段，
+     进度是 8 而不是 5 —— doneQuestions 只数得了本次会话内的。 */
   S.touchShelfEntry(id, {
-    segIndex: s.doneQuestions || 0,
+    segIndex: segBase + (s.doneQuestions || 0),
     segCount: s.questionCount || 0
   }, s);
   renderShelf();
@@ -1069,7 +1116,14 @@ function saveProgress(force = false) {
   if (!eng || ![STATE.RUNNING, STATE.PAUSED].includes(eng.state) || !eng.stats.keystrokes) return;
   const now = Date.now();
   if (!force && now - app.lastResumeSave < 2000) return;
-  S.saveResume(eng.exportResume());
+  const state = eng.exportResume();
+  /* 会话归属跟存档走：刷新后续练时才能知道「这局是书架里的哪份材料、
+     哪门课」，练完才判得了晋级、写得了统计。字段可选 ——
+     普通练习没有归属，行为不变。 */
+  if (app.shelfActiveId) state.shelfId = app.shelfActiveId;
+  if (app.courseActiveId) state.courseLessonId = app.courseActiveId;
+  if (app.shelfSegBase) state.shelfSegBase = app.shelfSegBase;
+  S.saveResume(state);
   app.lastResumeSave = now;
 }
 
@@ -1107,9 +1161,25 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
     const mode = safeModeOverride || app.sessionMode;
     const durationSec = Number(opts.durationSec != null ? opts.durationSec : app.settings.duration) || 0;
     const count = Number(app.settings.count) || 0;
-    // 本次会话的归属：书架材料 / 课程。练完（persistRecord）按它回写。
+    /* 本次会话的归属：书架材料 / 课程。练完（persistRecord）按它回写。
+       【语义】默认**清空**，只由明确入口通过 opts 传入 ——
+       否则「上了一半退出课程，再随便开一局单字」也会被记成课程成绩。
+       传入方只有三处：btnStart（带上打开的书架材料）、btnCourseStart、
+       resumeSession（从存档恢复）。
+       另外归属必须与模式匹配：普通模式的一局不能记到书架材料头上，
+       也不该记成模式对不上的课。 */
     app.shelfActiveId = (typeof opts.shelfId === 'string' && opts.shelfId) || null;
     app.courseActiveId = (typeof opts.courseLessonId === 'string' && opts.courseLessonId) || null;
+    if (mode !== 'custom') app.shelfActiveId = null;
+    if (app.courseActiveId) {
+      const owned = COURSE.find(l => l.id === app.courseActiveId);
+      if (!owned || owned.mode !== mode) app.courseActiveId = null;
+    }
+    /* 书架续打的段基数：打开材料时记的 shelfSegOffset 在这里**消费**掉 ——
+       不清的话，之后从别处再开一局自定义文本会莫名跳过开头几段。 */
+    const shelfSegBase = (mode === 'custom' && app.shelfActiveId) ? (app.shelfSegOffset || 0) : 0;
+    app.shelfSegOffset = 0;
+    app.shelfSegBase = shelfSegBase;
 
     const unlimited = !preset && count === 0 && mode !== 'exam';
     const generation = {
@@ -1141,8 +1211,8 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
       }
       /* 从书架条目「继续」：跳过上次已经打完的段。
          越界（上次已打完）时从头再来 —— 进度会随本次练习覆盖。 */
-      if (app.shelfSegOffset > 0) {
-        const off = Math.min(app.shelfSegOffset, customPreset.length);
+      if (shelfSegBase > 0) {
+        const off = Math.min(shelfSegBase, customPreset.length);
         const rest = customPreset.slice(off);
         customPreset = rest.length ? rest : buildCustomQuestions(text);
       }
@@ -1219,6 +1289,19 @@ function resumeSession() {
     if (app.engine) app.engine.destroy();
     app.engine = eng;
     app.sessionMode = eng.mode;
+    /* 恢复会话归属：存档里带了 shelfId / courseLessonId / shelfSegBase
+       （saveProgress 写入）。没有这三个字段的就是普通练习，置空即可。
+       有了它们，「刷新 → 续练 → 打完」才能正确判晋级、写材料统计 ——
+       否则续练完成的那一局是无主成绩（上报的 P1 缺陷）。
+       课程归属还要过一次模式匹配：存档被手工改过课号时不会错记。 */
+    app.shelfActiveId = (typeof saved.shelfId === 'string' && saved.shelfId) || null;
+    app.courseActiveId = (typeof saved.courseLessonId === 'string' && saved.courseLessonId) || null;
+    if (app.courseActiveId) {
+      const owned = COURSE.find(l => l.id === app.courseActiveId);
+      if (!owned || owned.mode !== eng.mode) app.courseActiveId = null;
+    }
+    app.shelfSegBase = Number.isFinite(Number(saved.shelfSegBase)) ? Math.max(0, Math.floor(Number(saved.shelfSegBase))) : 0;
+    app.shelfSegOffset = 0;
     bindEngineEvents();
     showSessionUI(true);
     ensureMiniKeymap();

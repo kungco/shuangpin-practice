@@ -196,6 +196,56 @@ console.log('\n【7】时长换算：5 分钟 ≈ 目标题量，且被夹在 6�
   ok(sig(five) === sig(again), '同 seed 两次组题结果一致（失败可重放）');
 }
 
+console.log('\n【8】段间重叠：慢键同时也是没练熟的键，最终队列不得混入重复题');
+{
+  /* E 既是慢键（slow 段的目标）又是「在练」（coverage 段的目标）——
+     两段各自生成时都会产出 E 上的成分题。曾验证过：去重统计是对的
+     （说去掉了 2 道重复），但交错队列拿的是**原始数组**，
+     重复题换个位置又混回来，40 题里只有 38 道不同的。 */
+  const r = planMixedSession({
+    durationSec: 300,
+    weakList: fakeWeak([['海豚', 2], ['经济', 1]]),
+    slowKeys: fakeSlow(['E', 'R']),
+    mastery: fakeMastery({ mastered: ['A', 'S', 'D', 'F', 'J', 'K', 'L'], learning: ['E', 'R'], untouched: ['U', 'I'] }),
+    seed: 77
+  });
+  const ids = r.questions.map(q => `${q.kind}|${q.role || ''}|${q.text || q.promptText}`);
+  ok(new Set(ids).size === ids.length,
+    `段间重叠时最终队列无重复（${ids.length} 题 / ${new Set(ids).size} 唯一）`);
+  ok(r.questions.length <= r.target, `总题数不超过目标（${r.questions.length} ≤ ${r.target}）`);
+  // 理由里报的题数必须与实际进入队列的各段数量一致（曾报生成量而非入队量）
+  const slowReason = r.reasons.find(x => /慢键专项/.test(x)) || '';
+  const claimed = Number((slowReason.match(/（(\d+) 题）/) || [])[1]);
+  const actualSlow = r.plan.find(p => p.kind === 'slow').produced;
+  ok(claimed === actualSlow,
+    `慢键理由的题数与实际一致（理由 ${claimed} / 实际 ${actualSlow}）`);
+  // 慢键段与覆盖段的键位题，只能落在各自的目标键上（E、R 慢 + U、I 没练熟）
+  const allowed = new Set(['E', 'R', 'U', 'I']);
+  const keyQs = r.questions.filter(q => q.kind === 'key' && q.keyDetail);
+  ok(keyQs.length > 0 && keyQs.every(q => allowed.has(q.keyDetail.key)),
+    `键位题落在目标键上（${[...new Set(keyQs.map(q => q.keyDetail.key))].join(',')}）`);
+}
+
+console.log('\n【9】产能补题后仍不足：宁缺不重，且总数如实');
+{
+  // 极端：三类产能加起来远小于目标，缺口全靠基础练习补
+  const r = planMixedSession({
+    durationSec: 1800,            // 目标 40 题
+    weakList: fakeWeak([['请', 1]]),          // 产能 1
+    slowKeys: fakeSlow(['Q']),               // 产能 2
+    mastery: fakeMastery({ mastered: ['A'], learning: ['S'] }),  // 产能 ~2
+    seed: 9
+  });
+  const ids = r.questions.map(q => `${q.kind}|${q.role || ''}|${q.text || q.promptText}`);
+  ok(new Set(ids).size === ids.length, '补题后仍无重复题');
+  ok(r.questions.length === r.target,
+    `目标仍被填满（${r.questions.length} = ${r.target}，缺口由基础练习补）`);
+  const basic = r.plan.find(p => p.kind === 'basic');
+  const others = r.plan.filter(p => p.kind !== 'basic').reduce((s, p) => s + p.produced, 0);
+  ok(basic && basic.produced === r.target - others,
+    `基础练习精确补足缺口（${basic && basic.produced} = ${r.target} - ${others}）`);
+}
+
 console.log('\n' + (fail === 0
   ? `✅ 混合组题自检全部通过（${pass} 项）`
   : `❌ 混合组题自检共 ${fail} 项未通过（${pass} 通过）`));

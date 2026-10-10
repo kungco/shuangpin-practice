@@ -26,11 +26,22 @@ export function evaluatePromotion(lesson, s) {
   const failed = [];
 
   const acc = Math.max(0, Math.min(100, Number(s && s.accuracy) || 0));
+  // 独立正确率：不含提示辅助的作答占比。summary 一定会带这个字段
+  // （engine.summary() 恒输出），缺了按 0 算 —— 宁可严，不可把
+  // 「全程看提示」误判成掌握。
+  const ind = Math.max(0, Math.min(100, Number(s && s.independentAccuracy) || 0));
   const speed = Math.max(0, Number(s && s.speed) || 0);
   const chars = Math.max(0, Math.floor(Number(s && s.totalChars) || 0));
 
   if (check.minAccuracy != null && acc < check.minAccuracy) {
     failed.push({ label: '正确率', got: `${Math.round(acc)}%`, need: `≥ ${check.minAccuracy}%` });
+  }
+  if (check.minIndependent != null && ind < check.minIndependent) {
+    failed.push({
+      label: '独立正确率',
+      got: `${Math.round(ind)}%`,
+      need: `≥ ${check.minIndependent}%（不含提示辅助的作答）`
+    });
   }
   if (check.minSpeed != null && speed < check.minSpeed) {
     failed.push({ label: '速度', got: `${Math.round(speed)} 字/分`, need: `≥ ${check.minSpeed} 字/分` });
@@ -41,6 +52,7 @@ export function evaluatePromotion(lesson, s) {
 
   const parts = [];
   if (check.minAccuracy != null) parts.push(`正确率 ≥${check.minAccuracy}%`);
+  if (check.minIndependent != null) parts.push(`独立正确率 ≥${check.minIndependent}%`);
   if (check.minSpeed != null) parts.push(`速度 ≥${check.minSpeed} 字/分`);
   if (check.minChars != null) parts.push(`完成 ≥${check.minChars} 字`);
   const summary = parts.join(' 且 ');
@@ -86,13 +98,15 @@ export function recordLessonAttempt(lessonId, s) {
   }
 
   const acc = Math.max(0, Math.min(100, Number(s.accuracy) || 0));
+  const ind = Math.max(0, Math.min(100, Number(s.independentAccuracy) || 0));
   const speed = Math.max(0, Number(s.speed) || 0);
   const chars = Math.max(0, Math.floor(Number(s.totalChars) || 0));
   const rec = p.lessons[lessonId] || {
-    attempts: 0, bestAcc: 0, bestSpeed: 0, bestChars: 0, completedAt: 0
+    attempts: 0, bestAcc: 0, bestInd: 0, bestSpeed: 0, bestChars: 0, completedAt: 0
   };
   rec.attempts += 1;
   rec.bestAcc = Math.max(rec.bestAcc, acc);
+  rec.bestInd = Math.max(rec.bestInd || 0, ind);
   rec.bestSpeed = Math.max(rec.bestSpeed, speed);
   rec.bestChars = Math.max(rec.bestChars, chars);
 

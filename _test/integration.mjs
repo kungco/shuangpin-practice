@@ -59,6 +59,16 @@ ok(!!schMod.getKeymapData, 'scheme 模块加载');
 
 /* ---------- 加载 main.js（会执行 boot） ---------- */
 console.log('\n【2】应用启动（boot）');
+// 【12d】的安全前置：往书架塞一条**恶意 id** 的原始数据（模拟导入的坏备份）。
+// boot 时的书架渲染必须把它净化掉 —— 不会出现 img/onerror，
+// id 会因为不在白名单内被重新生成。断言在【12d】里。
+localStorage.setItem('shuangpin.v1.shelf', JSON.stringify([{
+  id: '"><img src=x onerror=window.__pwned=1>',
+  title: '注入测试材料', text: '这条来自一份恶意构造的备份。',
+  createdAt: 1, lastAt: 0,
+  progress: { segIndex: 0, segCount: 0 },
+  stats: { sessions: 0, chars: 0, durationSum: 0, speedWSum: 0, accWSum: 0, bestSpeed: 0 }
+}]));
 let bootError = null;
 try {
   // loadApp 内部会把实例挂到 fakeWindow.__app 上，并在导入后跑一轮 settle()。
@@ -2635,8 +2645,13 @@ console.log('\n【12d】智能混合 · 书架 · 课程（接线层）');
 
   /* 智能混合：按钮在、点击能开局、理由展示出来。
      组题逻辑本身的边界在 mix.mjs（数据为空 / 重复 / 样本不足），
-     这里只验「按钮真的把局开起来了」。 */
+     这里只验「按钮真的把局开起来了」。
+     另外验 P2 缺陷的修复：慢键数据必须真的进得了组题 ——
+     以前把 loadKeyTimings() 的整个容器传给了只认映射的 slowestKeys，
+     存了样本也永远返回空表、慢键段永远缺席。 */
   ok(!!q('#btnSmartMix'), '「练 5 分钟」按钮存在');
+  // 造 5 次同一键的有效慢键样本（门槛是每键 ≥5 次作答）
+  sMod.recordKeyTimings({ V: { lead: [900, 910, 920, 930, 940], follow: [] } }, 'char');
   fire(q('#btnSmartMix'), 'click');
   await settle();
   ok(!!app.engine, '点击后进入练习（智能混合开局）');
@@ -2644,10 +2659,15 @@ console.log('\n【12d】智能混合 · 书架 · 课程（接线层）');
   ok(!q('#mixReasons').hidden && q('#mixReasons').textContent.length > 0,
     '推荐理由已展示（为什么练这些）');
   ok(/为什么练这些/.test(q('#mixReasons').textContent), '理由区有标题');
+  ok(/慢键专项/.test(q('#mixReasons').textContent),
+    `真实存储的慢键样本进了组题（理由：${/慢键专项[^）]*）/.exec(q('#mixReasons').textContent) || '无'}）`);
+  ok(app.engine.questions.some(qq => qq.kind === 'key' && qq.promptText === 'zh'),
+    '慢键 V（韵母 zh 所在键）的成分题确实在题目里');
   app.engine.destroy(); app.engine = null;
   cleanupAll();
 
-  /* 课程：卡片渲染当前课，开始按钮用课程参数开局并标记 courseActiveId */
+  /* 课程：卡片渲染当前课，开始按钮用课程参数开局并标记 courseActiveId。
+     开完课**不做完**，留给【12e】验证「刷新 → 续练 → 达标 → 晋级」。 */
   ok(q('#courseBox') && !q('#courseBox').hidden, '课程卡片可见（还有未完成的课）');
   ok(/第 1 课/.test(q('#courseTitle').textContent), `当前课正确（${q('#courseTitle').textContent}）`);
   ok(/过关条件/.test(q('#courseCheck').textContent), '过关条件展示（晋级判定透明）');
@@ -2655,10 +2675,13 @@ console.log('\n【12d】智能混合 · 书架 · 课程（接线层）');
   await settle();
   ok(!!app.engine && app.engine.mode === 'yun', '「开始本课」用课程参数开局（yun）');
   ok(app.courseActiveId === 'c1-yun', '会话标记了课程 id（练完做晋级判定）');
-  app.engine.destroy(); app.engine = null;
+  ok(!q('#courseCheck').textContent.includes('独立正确率'),
+    '第 1 课不卡独立正确率（基础教学允许提示）');
   cleanupAll();
 
-  /* 书架：存入 → 列表渲染 → 打开回填 textarea */
+  /* 【P1】书架完整链路：存入 → 打开 → 开始 → 结束 → 统计回写。
+     曾验证过：openShelfEntry 记下的材料 id 会被 startSession 清掉
+     （默认按「无归属」处理），练完书架上永远显示「还没练过」。 */
   ok(!!q('#btnShelfSave'), '「存入书架」按钮存在');
   const ta = q('#customTextInput');
   ta.value = '书架迁移验证专用文本。';
@@ -2668,17 +2691,138 @@ console.log('\n【12d】智能混合 · 书架 · 课程（接线层）');
   ok(shelfItems.length >= 1, `条目出现在列表里（${shelfItems.length} 项）`);
   ok(/书架迁移验证专用文本/.test(ta.value), 'textarea 内容保持不变');
 
-  // 打开：文本回填（打开即「继续上次材料」的入口）
-  const openBtn = shelfItems.map(el => el.querySelector('[data-act="open"]')).find(Boolean);
+  /* 【P1】恶意 id 在渲染层也进不来（白名单 + DOM API 双保险）：
+     boot 前已经往书架塞了一条 id 带脚本的原始数据。 */
+  ok(!document.querySelector('#shelfList img'), '列表里没有被注入的 img 元素');
+  ok(!qa('#shelfList [onerror]').length, '没有任何元素带 onerror 属性');
+  const idRe = /^[A-Za-z0-9_-]{1,40}$/;
+  const renderedIds = qa('#shelfList [data-id]').map(el => el.getAttribute('data-id'));
+  ok(renderedIds.length > 0 && renderedIds.every(v => idRe.test(v)),
+    `data-id 全部在白名单内（${renderedIds.length} 个）`);
+  ok(sMod.loadShelf().every(e => idRe.test(e.id)), '存储读出的 id 也已净化');
+
+  // 打开：文本回填（打开即「继续上次材料」的入口）。
+  // 注意定位到**刚存进去的那条** —— 列表最前面还有 boot 前塞进来的恶意 id 条目。
+  const newEntry = sMod.loadShelf().find(e => e.text === '书架迁移验证专用文本。');
+  ok(!!newEntry, '能在书架里找到刚存的条目');
+  const openBtn = newEntry
+    ? q(`#shelfList [data-id="${newEntry.id}"][data-act="open"]`) : null;
+  ok(!!openBtn, '找到了该条目的「练习」按钮');
   fire(openBtn, 'click');
   await settle();
   ok(q('#customTextInput').value.includes('书架迁移验证专用文本'),
     '打开条目后文本回填到输入框');
   ok(typeof app.shelfActiveId === 'string', '记录了本次材料 id（练完回写进度用）');
+  const shelfTestId = app.shelfActiveId;
+
+  // 开始 → 打完全文 → 材料统计必须真的回写
+  fire(q('#btnStart'), 'click');
+  await settle();
+  ok(!!app.engine && app.engine.mode === 'custom', '从书架开局（自定义文本模式）');
+  ok(app.shelfActiveId === shelfTestId, '开局后材料归属仍在（P1 缺陷的修复点）');
+  {
+    const eng = app.engine;
+    const segCount = eng.questions.length;
+    let guard = 0;
+    while (eng.state === 'running' && guard++ < 20000) {
+      const t = eng.currentTarget();
+      if (!t) break;
+      if (t.kind === 'skip' || t.kind === 'punct') { eng.pressKey('a'); continue; }
+      const k = (t.keys || [])[t.pos];
+      if (!k) break;
+      eng.elapsedSec = 2;            // 用时记账：persistRecord 只收 durationSec ≥ 1 的
+      eng.pressKey(String(k).toLowerCase());
+      await settle();
+    }
+    ok(eng.state === 'finished', '书架材料的练习打完了');
+    await settle();
+    const entry = sMod.loadShelf().find(e => e.id === shelfTestId);
+    ok(!!entry, '条目还在');
+    ok(entry.stats.sessions === 1, `该材料 sessions = 1（实际 ${entry.stats.sessions}）`);
+    ok(entry.stats.chars > 0, `该材料字数已累计（${entry.stats.chars}）`);
+    ok(entry.lastAt > 0, 'lastAt 已更新（「继续上次材料」能找到它）');
+    ok(entry.progress.segCount === segCount && entry.progress.segIndex === segCount,
+      `进度记到已打完（${entry.progress.segIndex}/${entry.progress.segCount}，共 ${segCount} 段）`);
+    // 打开后重画的书架要显示「上一轮已打完」而不是「还没练过」
+    const metaText = (qa('#shelfList .shelf-item-meta').map(el => el.textContent).join(''));
+    ok(/上一轮已打完/.test(metaText), '列表文案反映已练（不再是「还没练过」）');
+  }
   // 清掉现场，别让书架状态泄漏到其它用例
   app.shelfActiveId = null;
   app.shelfSegOffset = 0;
   cleanupAll();
+}
+
+/* ---------- 【12e】刷新 → 续练 → 达标 → 晋级 ---------- */
+console.log('\n【12e】课程续练：归属跟着存档走');
+{
+  const cleanupAll = () => {
+    if (app.engine) { app.engine.destroy(); app.engine = null; }
+    app.sessionActive = false;
+    q('#sessionPanel').hidden = true;
+    q('#setupPanel').hidden = false;
+    q('#overlay').hidden = true;
+  };
+  cleanupAll();
+  // 从第 1 课干净开始
+  sMod.saveCourseProgress({ completed: [], lessons: {}, currentId: '', updatedAt: 0 });
+  fire(q('#btnCourseStart'), 'click');
+  await settle();
+  ok(!!app.engine && app.courseActiveId === 'c1-yun', '课程第 1 课开局');
+
+  /* 打 4 键（**真实按键路径**：onKeyDown → handleKeyInput → saveProgress，
+     存档才会带上归属。直接调 engine.pressKey 会绕过 UI 链路，
+     存档根本不会生成 —— 这正是要验的东西）。键间等过 8ms 防抖。 */
+  const eng = app.engine;
+  let pressed = 0;
+  for (let i = 0; i < 4 && eng.state === 'running'; i++) {
+    const t = eng.currentTarget();
+    if (!t || !t.keys || !t.keys.length) break;
+    await sleep(12);
+    fireKey(String(t.keys[t.pos]).toLowerCase());
+    await settle();
+    pressed++;
+  }
+  ok(pressed === 4, `打了 ${pressed} 键`);
+  ok(!!sMod.loadResume(), '存档已生成（saveProgress 随按键自动保存）');
+  ok(sMod.loadResume().courseLessonId === 'c1-yun',
+    '存档带课程归属（P1 缺陷的修复点：以前没这个字段）');
+  app.engine.destroy(); app.engine = null;
+  app.sessionActive = false;
+  app.courseActiveId = null;          // 刷新后内存里什么都不剩
+  app.shelfActiveId = null;
+  q('#sessionPanel').hidden = true;
+  q('#setupPanel').hidden = false;
+
+  // 续练
+  fire(q('#btnResume'), 'click');
+  await settle();
+  ok(!!app.engine, '续练恢复了会话');
+  ok(app.courseActiveId === 'c1-yun',
+    `续练恢复了课程归属（实际 ${JSON.stringify(app.courseActiveId)}）`);
+
+  // 打完全部 → 达标 → 晋级
+  const eng2 = app.engine;
+  let guard = 0;
+  while (eng2.state === 'running' && guard++ < 20000) {
+    const t = eng2.currentTarget();
+    if (!t) break;
+    if (t.kind === 'skip' || t.kind === 'punct') { eng2.pressKey('a'); continue; }
+    const k = (t.keys || [])[t.pos];
+    if (!k) break;
+    eng2.elapsedSec = 2;
+    eng2.pressKey(String(k).toLowerCase());
+    await settle();
+  }
+  ok(eng2.state === 'finished', '续练打完了整卷');
+  await settle();
+  const prog = sMod.loadCourseProgress();
+  ok(prog.completed.includes('c1-yun'),
+    `续练完成的那一局判了晋级（completed: ${JSON.stringify(prog.completed)}）`);
+  ok(prog.currentId === 'c2-sheng', `下一课推进到第 2 课（${prog.currentId}）`);
+  cleanupAll();
+  sMod.clearResume();
+  sMod.saveCourseProgress({ completed: [], lessons: {}, currentId: '', updatedAt: 0 });
 }
 
 /* ---------- 收尾 ---------- */

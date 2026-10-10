@@ -1433,7 +1433,14 @@ export function saveResume(state) {
     skipped: state.skipped,
     elapsedSec: state.elapsedSec,
     stats: state.stats,
-    settings: state.settings
+    settings: state.settings,
+    /* 会话归属：这份现场属于书架里的哪份材料、哪门课，以及书架续打的
+       段基数。没有它们，「练到一半刷新 → 续练 → 打完」这一局就成了
+       无主的成绩 —— 书架统计不更新、课程不判晋级（上报的 P1 缺陷）。
+       字段是可选的：旧存档没有就当无归属，行为与从前一致。 */
+    shelfId: (typeof state.shelfId === 'string' && state.shelfId) || undefined,
+    courseLessonId: (typeof state.courseLessonId === 'string' && state.courseLessonId) || undefined,
+    shelfSegBase: Number.isFinite(Number(state.shelfSegBase)) ? Math.max(0, Math.floor(Number(state.shelfSegBase))) : undefined
   };
   try {
     writeJSON(KEYS.resume, slim);
@@ -1486,6 +1493,18 @@ export function clearResume() {
  *   progress    最近练到哪：{ segIndex, segCount }（切段口径与跟打一致）
  *   stats       本材料自己的累计：按「速度按时长、正确率按字数」加权
  */
+/**
+ * 条目 id 的合法形态。id 会被写进 DOM 属性（书架列表的 data-id），
+ * 曾经验证过：不设白名单的话，一份恶意构造的备份能让 id 带上
+ * `"><img onerror=...>`，渲染时直接变成可执行脚本。
+ * 白名单是最靠得住的一道闸 —— 字符集之外的一律重新生成，
+ * 而不是试着「转义」；转义只能证明当前渲染点安全，拦不住下一个调用方。
+ */
+const SHELF_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
+function genShelfId() {
+  return `m${Date.now().toString(36)}${Math.floor(Math.random() * 1e12).toString(36)}`;
+}
+
 function normalizeShelfEntry(raw) {
   const e = (raw && typeof raw === 'object') ? raw : {};
   const st = (e.stats && typeof e.stats === 'object') ? e.stats : {};
@@ -1493,8 +1512,9 @@ function normalizeShelfEntry(raw) {
   const tags = Array.isArray(e.tags)
     ? e.tags.map(t => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 6)
     : [];
+  const rawId = String(e.id || '');
   return {
-    id: String(e.id || '').slice(0, 40) || `m${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
+    id: SHELF_ID_RE.test(rawId) ? rawId : genShelfId(),
     title: String(e.title || '').trim().slice(0, 60) || '未命名材料',
     tags,
     text: clampText(e.text),
@@ -1640,7 +1660,7 @@ export function migrateCustomTextToShelf() {
  * 这里只存「学到哪了」：
  *   currentId   当前正在上的课（第一门未达标的课，由 core/course.js 推导）
  *   completed   已晋级的课 id 列表
- *   lessons     每门课的累计：{ attempts, bestAcc, bestSpeed, bestChars, completedAt }
+ *   lessons     每门课的累计：{ attempts, bestAcc, bestInd, bestSpeed, bestChars, completedAt }
  */
 export function loadCourseProgress() {
   const raw = readJSON(KEYS.course, {});
@@ -1652,6 +1672,7 @@ export function loadCourseProgress() {
       lessons[id] = {
         attempts: clampInt(v.attempts, 0, 1000000),
         bestAcc: clampNum(v.bestAcc, 0, 100, 0),
+        bestInd: clampNum(v.bestInd, 0, 100, 0),
         bestSpeed: Math.max(0, Number(v.bestSpeed) || 0),
         bestChars: clampInt(v.bestChars, 0, 1000000),
         completedAt: Number(v.completedAt) || 0
@@ -1975,12 +1996,14 @@ export function importAll(payload) {
         lessons[id] = a ? {
           attempts: Math.max(a.attempts || 0, clampInt(v.attempts, 0, 1000000)),
           bestAcc: Math.max(a.bestAcc || 0, clampNum(v.bestAcc, 0, 100, 0)),
+          bestInd: Math.max(a.bestInd || 0, clampNum(v.bestInd, 0, 100, 0)),
           bestSpeed: Math.max(a.bestSpeed || 0, Math.max(0, Number(v.bestSpeed) || 0)),
           bestChars: Math.max(a.bestChars || 0, clampInt(v.bestChars, 0, 1000000)),
           completedAt: Math.max(a.completedAt || 0, Number(v.completedAt) || 0)
         } : {
           attempts: clampInt(v.attempts, 0, 1000000),
           bestAcc: clampNum(v.bestAcc, 0, 100, 0),
+          bestInd: clampNum(v.bestInd, 0, 100, 0),
           bestSpeed: Math.max(0, Number(v.bestSpeed) || 0),
           bestChars: clampInt(v.bestChars, 0, 1000000),
           completedAt: Number(v.completedAt) || 0

@@ -1212,6 +1212,38 @@ console.log('\n【18】书架与课程进度纳入备份导入导出');
     '同 id 条目取最近动过的（进度不倒退）');
 }
 
+console.log('\n【18b】恶意备份：条目 id 注入不进来');
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  /* 书架条目 id 会被写进 DOM 属性（书架列表 data-id）。
+     曾验证过：id 不设白名单时，构造一份 id 带 `"><img onerror=...>` 的
+     备份能直接注入成可执行脚本 —— 导入别人做的备份 = 执行别人的代码，
+     还能读写本地练习数据。现在白名单之外的一律重新生成 id。 */
+  const malicious = {
+    app: 'shuangpin-practice',
+    shelf: [
+      { id: '"><img src=x onerror=window.__pwned=1>', title: '无害标题', text: '正常正文' },
+      { id: "javascript:alert(1)", title: 'XSS2', text: '正文2' },
+      { id: 'ok-id_9', title: '正常', text: '这条 id 合法，应当原样保留' }
+    ]
+  };
+  const res = S.importAll(JSON.parse(JSON.stringify(malicious)));
+  ok(res.ok === true, '备份本身能被导入（不是拒绝文件，是净化内容）');
+  const shelf = S.loadShelf();
+  ok(shelf.length === 3, `三条都在（数量不丢，${shelf.length} 条）`);
+  const re = /^[A-Za-z0-9_-]{1,40}$/;
+  ok(shelf.every(e => re.test(e.id)),
+    `所有 id 都在白名单内（实际：${shelf.map(e => e.id).join(' | ').slice(0, 80)}）`);
+  ok(shelf.every(e => !/[<>"' ]/.test(e.id)), 'id 不含任何可用于注水的字符');
+  ok(shelf.some(e => e.title === '无害标题' && e.text === '正常正文'),
+    '净化只动 id，标题与正文原样保留');
+  // 合法 id 必须原样保留（不能把正常数据也改名，否则跨设备合并对不上）
+  ok(shelf.some(e => e.id === 'ok-id_9'), '合法 id 不被改写（合并身份稳定）');
+}
+
 console.log('\n【19】课程进度：晋级判定不过就不前进（不会跳过关键基础）');
 {
   const ls = makeLocalStorage();
@@ -1264,6 +1296,28 @@ console.log('\n【19】课程进度：晋级判定不过就不前进（不会跳
   // 晋级条件的边界：恰好等于阈值算过（≥）
   const edge = evaluatePromotion(COURSE[0], { accuracy: 90, totalChars: 15, keystrokes: 30 });
   ok(edge.passed === true, '恰好达到阈值视为通过（≥ 语义）');
+
+  /* 毕业课的独立考核：表面正确率可以靠提示撑起来，独立正确率不能。
+     场景：默认开了完整提示，30 个字全是「看了答案才打对」——
+     表面正确率 100%、独立正确率 0%。这种成绩不该拿到毕业证。 */
+  const c6 = COURSE.find(l => l.id === 'c6-speed');
+  ok(!!c6 && c6.check.minIndependent != null, '毕业课配置了独立正确率门槛');
+  const hinted = evaluatePromotion(c6, {
+    accuracy: 100, independentAccuracy: 0, speed: 60, totalChars: 30, keystrokes: 90
+  });
+  ok(hinted.passed === false, '表面 100% 但独立 0%：不能毕业');
+  ok(hinted.failed.some(f => f.label === '独立正确率'),
+    `未达标项点名独立正确率（${hinted.failed.map(f => f.label).join('、')}）`);
+  const honest = evaluatePromotion(c6, {
+    accuracy: 95, independentAccuracy: 92, speed: 35, totalChars: 28, keystrokes: 85
+  });
+  ok(honest.passed === true, '独立正确率达标即可正常毕业（不开提示时两者相等）');
+  // recordLessonAttempt 记住独立正确率的最好值（课程卡展示用）
+  const att = recordLessonAttempt('c6-speed', {
+    accuracy: 96, independentAccuracy: 91, speed: 40, totalChars: 30, keystrokes: 95, durationSec: 30
+  });
+  ok(att.progress.lessons['c6-speed'].bestInd === 91,
+    `attempts 记录 bestInd（${att.progress.lessons['c6-speed'].bestInd}）`);
 }
 
 console.log('\n' + (fail === 0

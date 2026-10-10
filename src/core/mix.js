@@ -185,17 +185,20 @@ export function planMixedSession(opts = {}) {
   }
 
   /* ---- 逐段生成 ---- */
-  const parts = {};    // segment -> questions[]
-  const segReasons = {};
+  const parts = {};    // segment -> questions[]（原始产物，仅供去重）
+  // 理由的「描述部分」在生成时记录，题数留到去重后填 ——
+  // 理由里必须报**最终真的进了队列**的数量，而不是生成器吐出来多少
+  const segDesc = {};
 
   if (alloc.review > 0) {
-    const qs = generateReviewQuestions(weakList, alloc.review, seedOpts);
-    parts.review = qs;
-    const top = weakList.slice(0, 3)
-      .map(w => `「${w.word || w.char}」${w.count > 1 ? `错 ${w.count} 次` : '错过 1 次'}`)
-      .join('、');
-    segReasons.review = `易错复习（${qs.length} 题）：${top}` +
-      (weakList.length > 3 ? ` 等 ${weakList.length} 个易错项` : '');
+    parts.review = generateReviewQuestions(weakList, alloc.review, seedOpts);
+    segDesc.review = {
+      head: '易错复习',
+      detail: weakList.slice(0, 3)
+        .map(w => `「${w.word || w.char}」${w.count > 1 ? `错 ${w.count} 次` : '错过 1 次'}`)
+        .join('、')
+        + (weakList.length > 3 ? ` 等 ${weakList.length} 个易错项` : '')
+    };
   }
   if (alloc.slow > 0) {
     const used = usedSetExcluding(slowKeyNames);
@@ -207,8 +210,10 @@ export function planMixedSession(opts = {}) {
          键位题就会从全池里抽，跟其它段撞题（第一次实现时踩到）。 */
       context: { used, usedKeys: used }, ...seedOpts
     });
-    segReasons.slow = `慢键专项（${parts.slow.length} 题）：${slowKeyNames.join('、')} ` +
-      `是当前最慢的键（各至少 ${slowKeys.min} 次作答）`;
+    segDesc.slow = {
+      head: '慢键专项',
+      detail: `${slowKeyNames.join('、')} 是当前最慢的键（各至少 ${slowKeys.min} 次作答）`
+    };
   }
   if (alloc.coverage > 0) {
     const used = usedSetOnly(todoKeys);
@@ -217,19 +222,25 @@ export function planMixedSession(opts = {}) {
       context: { used, usedKeys: used }, ...seedOpts
     });
     const shown = todoKeys.slice(0, 6).join('、');
-    segReasons.coverage = `键位覆盖（${parts.coverage.length} 题）：还有 ` +
-      `${mastery.counts.untouched + mastery.counts.learning} 个键没练熟` +
-      (shown ? `（${shown}${todoKeys.length > 6 ? '…' : ''}）` : '');
+    segDesc.coverage = {
+      head: '键位覆盖',
+      detail: `还有 ${mastery.counts.untouched + mastery.counts.learning} 个键没练熟` +
+        (shown ? `（${shown}${todoKeys.length > 6 ? '…' : ''}）` : '')
+    };
   }
 
   /* ---- 去重 ----
      产能是按「成分数 / 易错项数」估的，但生成器可能因为去重集合、
      候选池等原因少给（比如易错表里 1 项却要 5 题）。缺口交给基础练习，
-     **绝不放宽去重** —— 同一个词反复出是这套组题最不能犯的错。 */
+     **绝不放宽去重** —— 同一个词反复出是这套组题最不能犯的错。
+     注意：去重后**按段保留**进 kept，最终队列只用 kept ——
+     早先的实现去重完又拿原始数组交错，重复题换个位置就混回来了
+     （慢键段和覆盖段的键重叠时必现，40 题里混着 2 道重复）。 */
   const seen = new Set();
-  const picked = [];
+  let picked = 0;       // 去重后的总题数
   let dupSkipped = 0;   // 因重复被跳过的题数（理由里要说明）
-  const takeUnique = (arr, want) => {
+  const kept = { review: [], slow: [], coverage: [], basic: [] };
+  const takeUnique = (arr, want, bucket) => {
     let taken = 0;
     for (const q of arr || []) {
       if (taken >= want) break;
@@ -237,54 +248,54 @@ export function planMixedSession(opts = {}) {
       if (!id) continue;
       if (seen.has(id)) { dupSkipped++; continue; }
       seen.add(id);
-      picked.push(q);
-      taken++;
+      kept[bucket].push(q);
+      taken++; picked++;
     }
     return taken;
   };
 
   const order = ['review', 'slow', 'coverage'];
   const produced = {};
-  for (const name of order) produced[name] = takeUnique(parts[name], alloc[name]);
+  for (const name of order) produced[name] = takeUnique(parts[name], alloc[name], name);
 
   /* ---- 缺口由基础练习补足 ----
      弱项样本不足以填满目标时长时（新手最常见的状态：还没错几个字），
      用高频单字把 5 分钟补满，而不是缩短练习或硬凑重复题。
      基础题不算「弱项」，所以不参与「单一弱项不得占满」的约束。 */
-  const basic = [];
-  const deficit = target - picked.length;
+  const deficit = target - picked;
   if (deficit > 0) {
-    basic.push(...generateQuestions({
+    const basicRaw = generateQuestions({
       mode: 'char', count: deficit, charTier: 1, ...seedOpts
-    }));
-    takeUnique(basic, deficit);
+    });
+    takeUnique(basicRaw, deficit, 'basic');
   }
 
   /* ---- 交错排列 ----
      三类题按轮转穿插，而不是一段打完再打下一段：同类题连着来会显得单调，
-     且把最难的易错词全排在开头，第一分钟就把人劝退。 */
-  const queues = ['review', 'slow', 'coverage', 'basic']
-    .map(n => (n === 'basic' ? basic : (parts[n] || [])).slice());
+     且把最难的易错词全排在开头，第一分钟就把人劝退。
+     队列只用去重后的 kept，不是原始的 parts。 */
+  const queues = ['review', 'slow', 'coverage', 'basic'].map(n => kept[n].slice());
   const questions = [];
   let idx = 0;
-  while (questions.length < picked.length && idx < 1000) {
+  while (questions.length < picked && idx < 1000) {
     const q = queues[idx % queues.length].shift();
     idx++;
     if (q) questions.push(q);
     if (queues.every(a => !a.length)) break;
   }
 
-  /* ---- 推荐理由 ---- */
+  /* ---- 推荐理由 ----
+     题数用 kept（最终真的进了队列的），不是生成器吐出来的原始数量。 */
   const reasons = [];
   for (const name of order) {
-    if (segReasons[name]) reasons.push(segReasons[name]);
+    if (segDesc[name]) reasons.push(`${segDesc[name].head}（${kept[name].length} 题）：${segDesc[name].detail}`);
     if (skipped[name]) reasons.push(skipped[name]);
   }
-  if (basic.length) {
+  if (kept.basic.length) {
     const allEmpty = order.every(n => skipped[n]);
     reasons.push(allEmpty
-      ? `基础练习（${basic.length} 题）：暂无易错字词、慢键与键位数据，先做一轮全面基础练习`
-      : `基础练习（${basic.length} 题）：弱项样本还不够填满这段时间，用高频单字补足 —— 练满比凑数重要`);
+      ? `基础练习（${kept.basic.length} 题）：暂无易错字词、慢键与键位数据，先做一轮全面基础练习`
+      : `基础练习（${kept.basic.length} 题）：弱项样本还不够填满这段时间，用高频单字补足 —— 练满比凑数重要`);
   }
   if (dupSkipped > 0) {
     reasons.push(`已去掉 ${dupSkipped} 道重复题，换成其它类型的练习`);
@@ -301,7 +312,12 @@ export function planMixedSession(opts = {}) {
     produced: produced[name] || 0,
     skipped: skipped[name] || null
   }));
-  if (basic.length) plan.push({ kind: 'basic', capacity: basic.length, allocated: basic.length, produced: basic.length, skipped: null });
+  if (kept.basic.length) {
+    plan.push({
+      kind: 'basic', capacity: kept.basic.length,
+      allocated: kept.basic.length, produced: kept.basic.length, skipped: null
+    });
+  }
 
   return { questions, reasons, plan, target };
 }

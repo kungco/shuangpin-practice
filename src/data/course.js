@@ -11,10 +11,16 @@
  *   params    传给 generateQuestions 的参数（题量 / 档位 / 词组筛选等）
  *   goal      这一课练什么（给学员看的一句话）
  *   check     晋级条件（全部满足才放行）：
- *               minAccuracy  本课正确率下限（%）
- *               minSpeed     速度下限（字/分；速度课才有）
- *               minChars     至少完成多少字（拦「随便按两下就过关」）
+ *               minAccuracy      本课正确率下限（%）
+ *               minIndependent   独立正确率下限（%，不含提示辅助的作答）
+ *               minSpeed         速度下限（字/分；速度课才有）
+ *               minChars         至少完成多少字（拦「随便按两下就过关」）
  *   reason    为什么设这个门槛（给「未过关」提示用，让人服气）
+ *
+ * 【minIndependent 为什么存在】基础课允许开提示 —— 那是教学。
+ * 但毕业课不行：全程靠提示把字「看」完，表面正确率 100%，
+ * 独立正确率却是 0% —— 那不叫掌握，叫跟着读。毕业线必须同时
+ * 卡独立正确率，否则「提示开着」就能把文凭混到手。
  *
  * 顺序就是课程顺序：先韵母（韵母是「看见→按键」，负担最小），
  * 再声母（引入 zh/ch/sh 各占一键的特例），然后拆分、单字、词组、提速。
@@ -71,8 +77,9 @@ export const COURSE = [
     mode: 'char',
     params: { count: 30, charTier: 'progressive' },
     goal: '在保持正确率的前提下把速度提到 30 字/分 —— 毕业线。',
-    check: { minSpeed: 30, minAccuracy: 90, minChars: 25 },
-    reason: '速度是最后才来的东西：先准后快。正确率不够时追求速度只会把错误练熟。'
+    check: { minSpeed: 30, minAccuracy: 90, minIndependent: 85, minChars: 25 },
+    reason: '速度是最后才来的东西：先准后快。正确率不够时追求速度只会把错误练熟。' +
+      '毕业线同时卡**独立正确率**——全程靠提示看完的不算数，那是跟着读，不是会了。'
   }
 ];
 
