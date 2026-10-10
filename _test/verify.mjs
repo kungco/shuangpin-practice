@@ -1140,6 +1140,51 @@ console.log('【新增】死代码清扫：两个导出确实没有调用方且�
     '正常音节的拆分不受影响（zhang → VH）');
 }
 
+console.log('【新增】随机出题可复现（seed / rng 注入）');
+{
+  /* 出题代码里有 4 处直接吃随机数（加权抽键、两条洗牌、兜底档位）。
+     测试一旦断言到「抽中了谁」，不固定随机源就只能在抽签结果上碰运气。
+     现在 generateQuestions / generateReviewQuestions 接受 opts.seed 或
+     opts.rng：同一个 seed 两次调用必须出**同一组题** —— 失败时能重放。
+     默认仍是 Math.random，浏览器里的行为不变。 */
+  const sig = (qs) => JSON.stringify(qs.map(q => {
+    // id 由自增计数器 + Date.now 生成，天然每次都不同，比对内容时不计入
+    const { id, ...rest } = q;
+    return rest;
+  }));
+
+  for (const mode of ['char', 'keymap', 'split', 'sheng', 'yun', 'exam', 'phrase', 'passage']) {
+    const count = defaultCountFor(mode);
+    const a = generateQuestions({ mode, count, seed: 20260314 });
+    const b = generateQuestions({ mode, count, seed: 20260314 });
+    ok(a.length > 0 && sig(a) === sig(b),
+      `${mode}：同 seed 两次生成结果一致（${a.length} 题）`);
+  }
+
+  // opts.rng（自带生成器）与 seed 等效：同一个生成器连续两次跑，流位置一致
+  {
+    const make = () => { let s = 7; return () => { s = (s * 1103515245 + 12345) >>> 0; return (s >>> 8) / 16777216; }; };
+    const a = generateQuestions({ mode: 'char', count: 20, rng: make() });
+    const b = generateQuestions({ mode: 'char', count: 20, rng: make() });
+    ok(sig(a) === sig(b), 'opts.rng：同一个生成器工厂两次生成结果一致');
+  }
+
+  // 不同 seed 应当（几乎必然）出不同的题 —— 别把「固定」做成「永远同一套」
+  {
+    const a = generateQuestions({ mode: 'char', count: 20, seed: 1 });
+    const b = generateQuestions({ mode: 'char', count: 20, seed: 2 });
+    ok(sig(a) !== sig(b), '不同 seed 生成不同的题（固定 ≠ 单调）');
+  }
+
+  // 兜底路径（易错复习一条都出不来时的高频字兜底）也要可复现
+  {
+    const a = generateReviewQuestions([], 10, { seed: 99 });
+    const b = generateReviewQuestions([], 10, { seed: 99 });
+    ok(a.length > 0 && sig(a) === sig(b),
+      `generateReviewQuestions 兜底路径同 seed 一致（${a.length} 题）`);
+  }
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 全部自检通过'
   : `❌ 共 ${fail} 项未通过`));

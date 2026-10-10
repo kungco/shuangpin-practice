@@ -138,7 +138,7 @@ LEVELS.forEach(l => { LEVEL_MAP[l.id] = l; });
    ============================================================ */
 
 /** 稳定伪随机（mulberry32），保证同一 seed 出同一套题 */
-function makeRng(seed) {
+export function makeRng(seed) {
   let a = seed >>> 0;
   if (a === 0) a = 0x9e3779b9;
   return function () {
@@ -148,6 +148,17 @@ function makeRng(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/* ---------- 可注入的随机源 ----------
+   为什么是模块级而不是把 rng 一路当参数传：随机源要穿透 6 个 make*Question
+   与 pickUnused 的 7 处调用点，逐层传参会给每个签名添一个大多数调用方
+   并不关心的参数；而出题全程是**同步**的（generateQuestions /
+   generateReviewQuestions 里没有任何 await），不存在重入，
+   「入口设定、出口还原」因此是安全的。
+   默认 Math.random —— 应用在浏览器里的行为与从前完全一致；
+   测试传 opts.seed（固定种子）或 opts.rng（自带生成器）即可复现同一组题。 */
+let _rng = Math.random;
+function rng() { return _rng(); }
 
 /** Fisher–Yates 洗牌（原地） */
 export function shuffle(arr, rng = Math.random) {
@@ -197,7 +208,7 @@ function makeKeymapQuestion(ctx, weights = {}) {
   let pick;
   if (weak.length) {
     const total = weak.reduce((sum, x) => sum + Math.min(20, Number(weights[x.key.toLowerCase()])), 0);
-    let ticket = Math.random() * total;
+    let ticket = rng() * total;
     pick = weak.find(x => (ticket -= Math.min(20, Number(weights[x.key.toLowerCase()]))) < 0) || weak[0];
     // 强化题是**插入**在覆盖轮次之间的额外题，不能算作「已覆盖」：
     // 若把它也标进 used，这个成分在下一轮的剩余名单里就会消失，
@@ -236,12 +247,12 @@ function pickUnused(pool, used, key = x => x, weights = null) {
     // After the first complete key cycle, weak keys get earlier positions,
     // while every component is still covered before another cycle starts.
     if (weights && used.cycles > 0) {
-      queue = queue.map(x => ({ x, rank: -Math.log(Math.max(1e-9, Math.random())) /
+      queue = queue.map(x => ({ x, rank: -Math.log(Math.max(1e-9, rng())) /
         (1 + Math.min(20, Number(weights[x.key?.toLowerCase()]) || 0)) }))
         .sort((a, b) => b.rank - a.rank).map(x => x.x);
     } else {
       for (let i = queue.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = Math.floor(rng() * (i + 1));
         [queue[i], queue[j]] = [queue[j], queue[i]];
       }
     }
@@ -671,6 +682,12 @@ export function generateQuestions(opts = {}) {
   // 测验模式的「去重集合」按题型分开，否则三类题会互相挤占候选
   const examCtx = { usedChar: used, usedPhrase: (ctx.usedPhrase ||= new Set(recent)), usedPinyin };
 
+  /* 随机源注入：传 rng（生成器）或 seed（固定种子）即可让失败可复现 ——
+     同一个 seed 两次调用出同一组题。默认 Math.random，浏览器行为不变。 */
+  const prevRng = _rng;
+  if (typeof opts.rng === 'function') _rng = opts.rng;
+  else if (opts.seed != null && Number.isFinite(Number(opts.seed))) _rng = makeRng(Number(opts.seed));
+
   try {
     for (let i = 0; i < target; i++) {
       let q = null;
@@ -715,6 +732,8 @@ export function generateQuestions(opts = {}) {
     }
   } catch (err) {
     console.error('[questions] 生成题目时出错，返回已生成部分', err);
+  } finally {
+    _rng = prevRng;   // 出口还原，别让一次注入泄漏到后续调用
   }
 
   // 极端兜底：保证至少有一题
@@ -736,8 +755,10 @@ export function defaultCountFor(mode) {
  * 由「易错字词」生成强化复习题
  * @param {Array<{char?:string, word?:string, pinyin:string[]|string, weight:number}>} items
  * @param {number} limit
+ * @param {object} [opts] { seed | rng } —— 兜底高频字那一步用到随机源，
+ *        测试传固定种子可复现；不传则用 Math.random（浏览器行为不变）。
  */
-export function generateReviewQuestions(items, limit = 20) {
+export function generateReviewQuestions(items, limit = 20, opts = {}) {
   const out = [];
   const used = new Set();
   const list = Array.isArray(items) ? items.slice() : [];
@@ -774,11 +795,18 @@ export function generateReviewQuestions(items, limit = 20) {
   // 不能「不足 10 就补」—— 那会把随机高频字掺进「只练到期项」的范围里，
   // 用户明确圈定的练习范围不该被悄悄稀释。
   if (out.length === 0) {
-    let guard = 0;
-    while (out.length < Math.min(limit, 10) && guard < 60) {
-      guard++;
-      const q = makeCharQuestion(1 + Math.floor(Math.random() * 2), used);
-      out.push(q);
+    const prevRng = _rng;
+    if (typeof opts.rng === 'function') _rng = opts.rng;
+    else if (opts.seed != null && Number.isFinite(Number(opts.seed))) _rng = makeRng(Number(opts.seed));
+    try {
+      let guard = 0;
+      while (out.length < Math.min(limit, 10) && guard < 60) {
+        guard++;
+        const q = makeCharQuestion(1 + Math.floor(rng() * 2), used);
+        out.push(q);
+      }
+    } finally {
+      _rng = prevRng;
     }
   }
   return out;
