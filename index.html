@@ -4,6 +4,31 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>双拼练习 · 小鹤双拼</title>
+<script>
+  /* 首屏防闪：在样式表加载前就把主题定下来。
+     否则深色用户会先看到一帧浅色（含顶栏那个明暗按钮先露出月亮再变太阳），
+     等 main.js 跑完才纠正 —— 夜里那一闪很扎眼。
+     这段必须是**同步内联**且放在 <link> 之前，异步或延后都来不及。
+     逻辑与 src/ui/a11y.js 的 applyTheme 保持一致（只处理 auto 的解析），
+     区别是这里不能 import（模块是异步的），只能内联一份最小实现。 */
+  (function () {
+    try {
+      var pref = 'auto';
+      try {
+        var raw = localStorage.getItem('shuangpin.v1.settings');
+        if (raw) {
+          var s = JSON.parse(raw);
+          if (s && (s.theme === 'light' || s.theme === 'dark')) pref = s.theme;
+        }
+      } catch (e) {}
+      var resolved = pref === 'light' || pref === 'dark'
+        ? pref
+        : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', resolved);
+      document.documentElement.style.colorScheme = resolved;
+    } catch (e) {}
+  })();
+</script>
 <link rel="stylesheet" href="assets/style.css" />
 </head>
 <body>
@@ -30,6 +55,21 @@
     </nav>
 
     <div class="topbar-right">
+      <!-- 明暗快速切换：与设置页的「主题」是同一个设置，改哪边两边都变。
+           这里只做浅色 ⇄ 深色二态；「跟随系统」仍在设置页里保留 ——
+           顶栏需要的是「现在这一下换个色」，不需要每次都想清楚「跟随」
+           和「固定」的区别，那是设置页该回答的问题。 -->
+      <button class="icon-btn" id="btnThemeToggle" type="button"
+              aria-label="切换深色 / 浅色主题" title="切换深色 / 浅色主题"
+              aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path class="ico-moon" d="M20.7 14.3A8.5 8.5 0 0 1 9.7 3.3a8.8 8.8 0 1 0 11 11Z"/>
+          <g class="ico-sun">
+            <circle cx="12" cy="12" r="4.2"/>
+            <path d="M12 1.8v2.6M12 19.6v2.6M4.8 4.8l1.9 1.9M17.3 17.3l1.9 1.9M1.8 12h2.6M19.6 12h2.6M4.8 19.2l1.9-1.9M17.3 6.7l1.9-1.9"/>
+          </g>
+        </svg>
+      </button>
       <span class="local-badge" id="storageBadge" title="所有数据仅保存在本机浏览器中">离线 · 本地存储</span>
     </div>
   </header>

@@ -341,7 +341,33 @@ body {
 .nav-btn:hover { background: var(--bg-soft); color: var(--text); }
 .nav-btn.is-active { background: var(--primary-soft); color: var(--primary-dark); font-weight: 600; }
 
-.topbar-right { flex-shrink: 0; }
+.topbar-right { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+
+/* 明暗快速切换按钮。
+   图标是「月亮 + 太阳」两个叠在一起，靠 data-theme 决定露出哪个 ——
+   这样切换时不需要用 JS 改 DOM，CSS 自己就跟着走，也不会出现
+   「JS 忘了更新图标」这类不一致。 */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.icon-btn:hover { background: var(--bg-soft); color: var(--text); border-color: var(--border-strong); }
+.icon-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.icon-btn svg { width: 15px; height: 15px; }
+
+/* 图标本身的画法：月亮用填充，太阳用描边 */
+.icon-btn .ico-moon { fill: currentColor; stroke: none; }
+.icon-btn .ico-sun  { fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
+
+/* 深色时显示太阳（提示「点一下变亮」），浅色时显示月亮 */
+html[data-theme="dark"] .icon-btn .ico-moon { display: none; }
+html:not([data-theme="dark"]) .icon-btn .ico-sun { display: none; }
 
 .local-badge {
   font-size: 11.5px; color: var(--text-3);

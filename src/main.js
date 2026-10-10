@@ -215,6 +215,7 @@ function boot() {
     // initTheme() 放在最前面，后面 initA11y 的回调也要能重绘图表。
     initTheme();
     renderStorageBadge();
+    initTopbar();
     if (!S.isStorageAvailable()) {
       toast('浏览器存储不可用，本次记录不会被保存', 'err', 5000);
     }
@@ -376,6 +377,67 @@ function initTheme() {
   watchColorScheme(() => {
     if ((app.settings.theme || 'auto') === 'auto') applyThemeNow('auto');
   });
+  syncThemeControls();
+}
+
+/**
+ * 设置主题偏好（落盘 + 生效 + 播报），并同步所有控件。
+ *
+ * 顶栏按钮与设置页下拉框都走这里 —— 两边改的是同一个设置，
+ * 逻辑只写一份，否则很容易演变成「顶栏切了但设置页还显示旧值」
+ * 这类不一致。设置页要靠 syncThemeControls() 把 select 的
+ * value 拉回新值，因为程序改 value 不会触发 change。
+ *
+ * @param {'auto'|'light'|'dark'} pref
+ */
+function setThemePreference(pref) {
+  const next = (pref === 'light' || pref === 'dark') ? pref : 'auto';
+  app.settings.theme = next;
+  saveSettingsDebounced();
+  applyThemeNow(next);
+  syncThemeControls();
+  announce(app.theme === 'dark' ? '已切换到深色主题' : '已切换到浅色主题', 'polite');
+}
+
+/**
+ * 把主题控件的显示状态拉回与设置一致。
+ *
+ * 设置页 select：直接读 app.settings.theme（三档，含「跟随系统」）。
+ * 顶栏按钮：它只表达「亮 / 暗」二态，所以用**实际生效的** app.theme，
+ *   而不是原始的 pref —— 跟随系统且系统是深色时，按钮该显示成太阳，
+ *   否则用户看到月亮却身处深色界面，会以为按钮坏了。
+ */
+function syncThemeControls() {
+  const sel = $('#setTheme');
+  if (sel) {
+    const want = app.settings.theme || 'auto';
+    // 逐个 option 比对并设置 selected，而不是写 sel.value：
+    // sel.value 的 setter 在部分 DOM 实现（含测试用的 linkedom）下
+    // 会抛 "Cannot set property value ... which has only a getter"，
+    // 而它是在 boot() 链路上被调用的 —— 一旦抛出会让整个应用起不来。
+    // 这里只做「把选中项对齐」，不依赖具体实现的 setter，更稳。
+    try {
+      const opts = sel.querySelectorAll ? sel.querySelectorAll('option') : [];
+      if (opts && opts.length) {
+        for (const opt of opts) {
+          if (opt.value === want) opt.setAttribute('selected', 'selected');
+          else opt.removeAttribute('selected');
+        }
+      } else {
+        sel.value = want;
+      }
+    } catch (_) {
+      try { sel.value = want; } catch (__) {}
+    }
+  }
+  const btn = $('#btnThemeToggle');
+  if (btn) {
+    const isDark = app.theme === 'dark';
+    btn.setAttribute('aria-pressed', isDark ? 'true' : 'false');
+    const label = isDark ? '切换到浅色主题（当前：深色）' : '切换到深色主题（当前：浅色）';
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('title', label);
+  }
 }
 
 /** 主题切换后重画三个键位图控制器（它们各自缓存了 fill 属性） */
@@ -387,6 +449,27 @@ function redrawKeymapTheme() {
   } catch (err) {
     console.error('[theme] 键位图重绘失败', err);
   }
+}
+
+/**
+ * 顶栏的常驻控件。
+ *
+ * 目前只有明暗快速切换。之前切主题必须进设置页，而「夜里觉得刺眼」
+ * 恰恰是练习进行到一半时才发生的 —— 让人中断当前这一轮跑去设置页、
+ * 选完再切回来，是一件很没必要的事。
+ *
+ * 切换取「当前**实际生效**主题的相反值」，而不是在 pref 上做文章：
+ * 处于「跟随系统」且系统是深色时，点一下应当变浅色（用户看得见的行为），
+ * 而不是把 pref 从 auto 改成 dark（那样屏幕上什么都没发生，像是坏了）。
+ * 代价是点过之后就从「跟随系统」变成固定值了 —— 这是有意的：
+ * 用户刚刚明确表达了「我此刻要另一个颜色」，这个意图优先级更高。
+ */
+function initTopbar() {
+  const btn = $('#btnThemeToggle');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    setThemePreference(app.theme === 'dark' ? 'light' : 'dark');
+  });
 }
 
 /**
@@ -3956,16 +4039,15 @@ function initSettingsView() {
   }
 
   /* ---- 外观：主题（明暗）----
-     改完立刻生效（重绘图表与键位图），并落盘。 */
+     改完立刻生效（重绘图表与键位图），并落盘。
+     设置页这里是三档（含「跟随系统」）；顶栏另有一个二态快速切换按钮，
+     两者共用 setThemePreference()，改哪边两边都同步。
+     注意：这里**不再**自己写 setThemeSel.value —— initTheme() 里的
+     syncThemeControls() 已经做过对齐，重复写在部分 DOM 实现下会抛异常。 */
   const setThemeSel = $('#setTheme');
   if (setThemeSel) {
-    setThemeSel.value = app.settings.theme || 'auto';
     setThemeSel.addEventListener('change', () => {
-      const v = setThemeSel.value;
-      app.settings.theme = (v === 'light' || v === 'dark') ? v : 'auto';
-      saveSettingsDebounced();
-      applyThemeNow(app.settings.theme);
-      announce(app.theme === 'dark' ? '已切换到深色主题' : '已切换到浅色主题', 'polite');
+      setThemePreference(setThemeSel.value);
     });
   }
 
