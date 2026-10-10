@@ -31,6 +31,10 @@ desktop.ini
 tmp/
 temp/
 
+# 分发包产物（网页版 zip 由 _test/tools/make_web_package.py 生成，
+# 桌面版 .exe 由 desktop/ 构建）。两者都通过 GitHub Release 分发，不进仓库。
+dist/
+
 # 本地凭据（防手滑）
 *.credentials
 .my-credentials
