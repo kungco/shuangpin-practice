@@ -21,6 +21,29 @@ Windows 都能直接跑起来。设置里也不需要你手动选，脚本会自
 > 如果你想让它在桌面上有个图标方便双击，运行一次 `_test/make_lnk.py` 自行生成
 > （见该文件头部说明）。快捷方式不是仓库的一部分，需要在本机生成。
 
+### Windows 免安装版（单个 .exe）
+
+不想开命令行、也不想要那个最小化的服务窗口的话，直接下载
+**`ShuangpinPractice-<版本号>-portable.exe`**（见本仓库的 **Releases** 页面），
+双击即用 —— 单文件、免安装、可随意挪位置，练习记录就存在这台机器上。
+
+它不是另一个版本，而是把上面这套网页**原样套了一层 Electron 壳**：
+界面、题库、存储、快捷键、统计口径全部同一份代码，所以两边看到的功能完全一致。
+打包工程放在 `desktop/`，想自己出包的话：
+
+```bash
+cd desktop
+npm install
+npm run build      # 产物在 desktop/dist/
+```
+
+> 壳里做了一件必要的事：把页面经由自定义协议 `app://` 提供，而不是 `file://`。
+> 原因和上面「为什么不能直接双击 `index.html`」是同一个（ES 模块的 CORS 限制），
+> 在桌面端同样适用。
+>
+> 另外它在检测到 Chromium 沙箱起不来时，会**自动降级为 `--no-sandbox` 重启一次**。
+> 少数 Windows 环境的沙箱初始化会失败并让渲染进程直接崩掉，降级后功能不受影响。
+
 ### macOS / Linux，或任何已装 Python / Node 的环境
 
 任选一种起服务，然后访问 `http://127.0.0.1:8781/`：
@@ -285,8 +308,7 @@ HUD 上的「正确率」是表面值（按对的键都算），结算页会额�
 ```
 index.html                入口
 启动双拼练习.bat           一键启动（挑 Python/Node/PowerShell + 起服务 + 开浏览器）
-assets/style.css          样式
-src/main.js               应用装配、视图渲染、键鼠事件
+assets/style.css          样式src/main.js               应用装配、视图渲染、键鼠事件
 src/core/scheme.js        小鹤方案引擎（拆分 / 逐键校验 / 键位数据）
 src/core/engine.js        练习引擎（状态机 / 计时 / 统计 / 停留提示 / 测验硬闸门）
 src/core/questions.js     九种出题（七级练习 + 自定义文本 + 能力测验混合卷）
@@ -301,6 +323,7 @@ src/ui/a11y.js            辅助功能（减少动态效果 / 明暗主题 / 快
 src/ui/sound.js           按键音效（WebAudio 实时合成，无音频文件）
 src/ui/speech.js          语音朗读（speechSynthesis 封装；主动探测中文语音，缺失时如实降级）
 package.json              仅供自检脚本使用：声明 "type": "module"（见「自检」一节）
+desktop/                  Electron 套壳打包工程（出免安装版 .exe，见「Windows 免安装版」）
 _test/                    开发期自检脚本（六套 + 一份性能基准）+ 三个静态服务器 + 启动探测
 _test/tools/              构建期维护工具（题库体检 / 扩充 / 去重 / 截图），不参与 npm test
 .github/workflows/        CI：Node 18/20/22 三版本各跑一遍全部自检
@@ -381,3 +404,7 @@ npm test    # verify → engine → storage → a11y → launcher → training �
 > 报 `Named export 'ALL_CHARS' not found` —— 根因就是上面那个 `package.json`。
 > 本地用 Node 24 开发时完全正常，只有真跑老版本才看得见。
 > 细节见 `_test/README.md`。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 kungco

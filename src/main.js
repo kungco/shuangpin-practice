@@ -62,6 +62,10 @@ const app = {
   // 必须独立于 settings.showMiniKeymap：后者是持久偏好，
   // 这里是一轮练习里的临时动作，两者语义不同。
   keymapHidden: null,   // true = 本轮收起；false = 本轮强制显示；null = 听设置
+  // 用户在练习中临时收起「声韵提示」（解码区那块露出当前音节键位的卡片）。
+  // 与 keymapHidden 同一套语义：null = 未表态（听 settings.showDecode），
+  // true/false = 本轮练习里的临时选择。
+  decodeHidden: null,
   stats: { mode: 'all', chartMetric: 'speed', chartRange: '20', dailyDays: 14, heatRange: 'all' },
   saveTimer: null,
   lastResumeSave: 0,
@@ -1949,6 +1953,17 @@ function initSessionPanel() {
       applyMiniKeymapVisibility();
     });
   }
+
+  /* 练习中随手收起 / 展开「声韵提示」。
+     与迷你键位图按钮同一套做法：只记意图，重绘交给 renderSession。 */
+  const btnToggleDecode = $('#btnToggleDecode');
+  if (btnToggleDecode) {
+    btnToggleDecode.addEventListener('click', () => {
+      if (btnToggleDecode.disabled) return;
+      app.decodeHidden = decodeVisible();   // 当前可见 → 收起；当前隐藏 → 展开
+      renderSession();                      // 立即重绘解码区并更新按钮文案
+    });
+  }
 }
 
 function updatePauseButton() {
@@ -1965,6 +1980,27 @@ function updatePauseButton() {
  *   'question' 换题/开局 —— 全量重绘
  *   省略或传入未知值时按 'question' 处理（旧调用点与第三方调用都不会漏画）。
  */
+/**
+ * 接下来要练的若干单字（单字练习用）。
+ *
+ * 单字模式每道题只装一个字，所以「后面练什么」只能从题目队列里取。
+ * 取当前题之后的题，逐题取它的首个汉字，最多 limit 个。
+ *
+ * @returns {string[]} 汉字数组（可能不足 limit，队列尾部自然结束）
+ */
+function upcomingChars(eng, limit = 10) {
+  const out = [];
+  if (!eng || !Array.isArray(eng.questions)) return out;
+  for (let i = eng.index + 1; i < eng.questions.length && out.length < limit; i++) {
+    const q = eng.questions[i];
+    // 只认单字题；队列里混进别的题型（如测验混合卷）时跳过，不误当单字
+    if (!q || q.kind !== 'word' || q.level !== 3) continue;
+    const ch = q.chars && q.chars[0] && q.chars[0].ch;
+    if (ch) out.push(ch);
+  }
+  return out;
+}
+
 function renderSession(arg) {
   const eng = app.engine;
   if (!eng) return;
@@ -1991,6 +2027,11 @@ function renderSession(arg) {
   const stageTip = cacheEl('#stageTip');
 
   if (!q || !prompt || !decode) return;
+
+  /* 声韵提示按钮的文案/禁用态。
+     放在这里（而非末尾）是因为下面有若干提前 return（暂停态等），
+     而那些路径同样需要按钮状态正确。 */
+  applyDecodeVisibility();
 
   /* 舞台标题与副标题只在**换题**时才可能变。
      它们每键都重写一次纯属浪费，而且对读屏是实打实的噪音
@@ -2051,7 +2092,7 @@ function renderSession(arg) {
       const states = eng.charStates();
       const isPassage = q.kind === 'passage';
       prompt.className = 'prompt' + (isPassage ? ' is-passage' : '');
-      prompt.innerHTML = states.map(st => {
+      let html = states.map(st => {
         const cls = ['ch'];
         if (st.punct) cls.push('ch-punct');
         else if (st.done) cls.push('is-done');
@@ -2067,6 +2108,18 @@ function renderSession(arg) {
         else if (!eng.examMode && eng.assistanceLevel() < 2) extra = ` title="${escapeHtml(st.ch)} ${escapeHtml(st.pinyin)}"`;
         return `<span class="${cls.join(' ')}"${extra}>${escapeHtml(st.ch)}</span>`;
       }).join('');
+
+      /* 单字练习：当前字之后把「接下来要练的字」并排提示出来。
+         单字模式每道题只含一个字（见 questions.js::makeCharQuestion），
+         所以后续字得从题目队列 eng.questions 里取，而不是本题的 chars。
+         只做展示、不参与判分；测验模式不显示（那会泄露考题）。 */
+      const upcoming = q.kind === 'word' && q.level === 3 ? upcomingChars(eng) : [];
+      if (upcoming.length) {
+        html += '<span class="prompt-upcoming" aria-label="接下来要练的字">' +
+          upcoming.map(ch => `<span class="ch ch-upcoming">${escapeHtml(ch)}</span>`).join('') +
+          '</span>';
+      }
+      prompt.innerHTML = html;
     }
   }
 
@@ -2121,6 +2174,15 @@ function renderDecode(eng, q, container) {
   if (eng.assistanceLevel() > 0) {
     const py = eng.assistanceLevel() === 1 ? (q.chars || []).filter(c => !c.punct).map(c => c.pinyin).join(' ') : '';
     container.innerHTML = `<div class="decode-empty">${py ? escapeHtml(py) : '凭记忆输入'} · 卡住可按 Tab 求助</div>`;
+    return;
+  }
+
+  /* 声韵提示是否露出：与迷你键位图同一套三层语义 ——
+     本轮临时选择（app.decodeHidden，可为 null）优先于持久设置。
+     关掉后不进入解码区，只留题干，让人凭记忆打。
+     注意这只影响这一层：卡住时的 Tab 求助 / 自动提示（hint）不受影响。 */
+  if (!decodeVisible()) {
+    container.innerHTML = '<div class="decode-empty">凭记忆输入双拼编码</div>';
     return;
   }
 
@@ -2525,6 +2587,34 @@ function applyMiniKeymapVisibility() {
     // 被阶段/状态强制收起时按钮不可点，否则用户点了会以为坏了
     btn.disabled = !stageAllows || !stateAllows;
   }
+}
+
+/**
+ * 解码区（声韵提示卡）该不该露出。
+ *
+ * 与迷你键位图同一套三层语义，但**没有「阶段」这一层**：
+ * 声韵提示是练习本身的一部分，只要不在测验/辅助模式、也没暂停/结束，
+ * 就按用户意愿显示或隐藏。
+ *   · 测验与辅助模式由 renderDecode 更早的 return 兜住，不会走到这里；
+ *   · decodeHidden 为 null = 本轮没表态，听持久设置 showDecode。
+ */
+function decodeVisible() {
+  const wants = app.decodeHidden === null
+    ? app.settings.showDecode !== false
+    : !app.decodeHidden;
+  return wants;
+}
+
+/** 把声韵提示的显隐意图落到按钮文案上（内容重绘由 renderSession 负责） */
+function applyDecodeVisibility() {
+  const btn = $('#btnToggleDecode');
+  if (!btn) return;
+  const visible = decodeVisible();
+  btn.textContent = visible ? '隐藏提示' : '显示提示';
+  // 测验/辅助模式本来就不显示，按钮点了没意义 → 禁用并说明原因
+  const forced = !!(app.engine && (app.engine.examMode || app.engine.assistanceLevel() > 0));
+  btn.disabled = forced;
+  btn.title = forced ? '当前模式不显示声韵提示' : '';
 }
 
 function highlightMiniKeymap() {
@@ -3754,6 +3844,7 @@ function initSettingsView() {
   const setStrict = $('#setStrict');
   const setSkipPunct = $('#setSkipPunct');
   const setHint = $('#setHint');
+  const setShowDecode = $('#setShowDecode');
   const setHintDelay = $('#setHintDelay');
   const setRevealDelay = $('#setRevealDelay');
 
@@ -3827,6 +3918,13 @@ function initSettingsView() {
 
   bindToggle(setStrict, 'strict');
   bindToggle(setSkipPunct, 'skipPunct');
+
+  /* ---- 练习时显示声韵提示 ----
+     关掉 = 解码区不再露出当前音节的拆分与键位，只留题干。
+     立刻重绘当前题目，让改动当场可见（不用等下一题）。 */
+  bindToggle(setShowDecode, 'showDecode', () => {
+    if (app.engine) renderSession();
+  });
 
   /* ---- 语音朗读 ----
      与音效是两件事：音效是按键反馈的合成音（WebAudio），

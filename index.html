@@ -225,6 +225,7 @@
             <span class="hud-value"><b id="hudGoal">0</b><i id="hudGoalUnit">/0 字</i></span>
           </div>
           <div class="hud-actions">
+            <button class="btn btn-ghost btn-sm" id="btnToggleDecode">隐藏提示</button>
             <button class="btn btn-ghost btn-sm" id="btnPause">暂停</button>
             <button class="btn btn-ghost btn-sm" id="btnQuit">结束</button>
           </div>
@@ -680,6 +681,7 @@
           <label class="checkbox"><input type="checkbox" id="setStrict" checked /><i></i>严格模式（输错必须修正当前键）</label>
           <label class="checkbox"><input type="checkbox" id="setSkipPunct" checked /><i></i>短文跟打时自动跳过标点</label>
           <label class="checkbox"><input type="checkbox" id="setHint" checked /><i></i>卡住时自动提示（在键位图上闪烁该键）</label>
+          <label class="checkbox"><input type="checkbox" id="setShowDecode" checked /><i></i>练习时显示声韵提示（露出当前音节的拆分与键位）</label>
         </div>
 
         <!-- 语音相关：语速 + 能力探测结果。

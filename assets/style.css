@@ -699,6 +699,25 @@ textarea:focus {
 
 .prompt .ch-punct { color: var(--text-3); opacity: .55; font-size: 30px; }
 
+/* 单字练习：当前字之后预告「接下来要练的字」。
+   视觉上明显弱于当前字，避免抢焦点 —— 只是路标，不是考题。
+   与当前字之间留一段距离，让人一眼看出「哪些是这一题、哪些是后面的」。 */
+.prompt .prompt-upcoming {
+  display: inline-block;
+  margin-left: 28px;
+  padding-left: 20px;
+  border-left: 2px solid var(--border, rgba(0,0,0,.1));
+  font-size: 22px;
+  letter-spacing: 3px;
+  opacity: .5;
+  vertical-align: middle;
+}
+.prompt .ch-upcoming {
+  color: var(--text-3);
+  font-weight: 500;
+  margin-right: 8px;
+}
+
 /* 短文跟打 */
 .prompt.is-passage {
   font-size: 25px; letter-spacing: 2px; line-height: 1.95;

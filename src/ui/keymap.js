@@ -464,7 +464,11 @@ function buildSvg(interactive, onKeyClick) {
 }
 
 function buildKey(key, x, y, info, interactive, onKeyClick) {
-  const g = document.createElementNS(SVG_NS, 'svg');
+  // 注意：这里必须是 'g'（分组），不能是 'svg'。
+  // 写成 'svg' 会创建**嵌套的 <svg> 视口**而不是透明分组：嵌套视口有自己的
+  // 坐标系与默认 100%×100% 尺寸，`transform` 语义也随之改变，26 个键会互相
+  // 塌缩覆盖，最终只剩一个键可见（键位图整片空白）。历史遗留的笔误。
+  const g = document.createElementNS(SVG_NS, 'g');
   g.setAttribute('class', 'kb-key' + (interactive ? ' is-clickable' : ''));
   g.setAttribute('data-key', key);
   g.setAttribute('transform', `translate(${x},${y})`);

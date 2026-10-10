@@ -288,6 +288,12 @@ export const DEFAULT_SETTINGS = {
   hint: true,          // 卡住自动提示总开关
   hintDelay: 3000,     // 停留多久开始闪键位（毫秒，0 = 不闪）
   revealDelay: 6000,   // 停留多久直接给答案（毫秒，0 = 不给）
+  /* 练习时是否显示「声韵提示卡」——解码区那块露出当前音节的拆分
+     （拼音 + 声母键 / 韵母键）。关掉后只留题干，需凭记忆打出编码，
+     适合已经记住键位、不想被答案干扰的用户。
+     与 hint（卡住自动提示）相互独立：hint 管「要不要闪键 / 给答案」，
+     这项管「一开始就不显示是什么键」。 */
+  showDecode: true,
   /* 动效偏好。'auto' 跟随系统 prefers-reduced-motion；
      'on'/'off' 是用户显式覆盖系统设置（有些用户系统开着但本应用想要动画）。 */
   reduceMotion: 'auto',

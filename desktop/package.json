@@ -1,0 +1,73 @@
+{
+  "name": "shuangpin-practice-desktop",
+  "version": "1.2.3",
+  "private": true,
+  "description": "双拼练习的 Windows 桌面封装（Electron 套壳）。应用本体仍是仓库根的零依赖静态站点，此目录只负责打包。",
+  "author": "kungco",
+  "license": "MIT",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable",
+    "build:dir": "electron-builder --win --dir",
+    "build:installer": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.kungco.shuangpinpractice",
+    "productName": "双拼练习",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../index.html",
+        "to": "app-root/index.html"
+      },
+      {
+        "from": "../assets",
+        "to": "app-root/assets"
+      },
+      {
+        "from": "../src",
+        "to": "app-root/src"
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ShuangpinPractice-${version}-win-${arch}-${target}.${ext}"
+    },
+    "portable": {
+      "artifactName": "ShuangpinPractice-${version}-portable.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "双拼练习"
+    }
+  }
+}
