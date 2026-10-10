@@ -20,6 +20,8 @@ export const KEYS = {
   resume: `${NS}.resume`,       // 未完成的练习现场
   device: `${NS}.device`,       // 错题计数的设备来源（不随备份覆盖）
   recent: `${NS}.recent`,       // 最近实际展示的练习内容
+  shelf: `${NS}.shelf`,         // 个人文本书架（多份自定义跟打材料）
+  course: `${NS}.course`,       // 新手引导课程的进度
   version: `${NS}.version`
 };
 
@@ -307,6 +309,10 @@ export const DEFAULT_SETTINGS = {
      上限 20000 字（见 clampText），足够一整章小说，
      再长会把 localStorage 撑爆。 */
   customText: '',
+  /* 旧数据迁移旗标：customText 已被搬进书架后置 true，
+     防止「用户删掉那条条目」又被迁移逻辑塞回来（删除是明确决定）。
+     见 migrateCustomTextToShelf()。 */
+  shelfMigrated: false,
   /* 语音朗读。默认关闭，理由与音效相同（打字练习本来就有环境音）。
      打开后，「只听声母 / 只听韵母」会真正朗读音节 ——
      没有中文语音包的机器上会自动降级并如实告知，不会变成哑巴按钮。 */
@@ -1463,6 +1469,215 @@ export function clearResume() {
    导入 / 导出
    ============================================================ */
 
+/* ============================================================
+   个人文本书架
+   ============================================================ */
+
+/**
+ * 一份书架条目。升级自「单个可覆盖的 customText」——用户粘的第二篇
+ * 不该把第一篇冲掉。
+ *
+ *   id          稳定标识（随机串），备份合并按它判重
+ *   title       显示名（默认「未命名材料」）
+ *   tags        自由标签（如 ['小说','工作']），最多 6 个
+ *   text        正文（与 settings.customText 同一个 20000 字上限）
+ *   createdAt   加入时间
+ *   lastAt      最近一次练习时间（0 = 还没练过）
+ *   progress    最近练到哪：{ segIndex, segCount }（切段口径与跟打一致）
+ *   stats       本材料自己的累计：按「速度按时长、正确率按字数」加权
+ */
+function normalizeShelfEntry(raw) {
+  const e = (raw && typeof raw === 'object') ? raw : {};
+  const st = (e.stats && typeof e.stats === 'object') ? e.stats : {};
+  const pr = (e.progress && typeof e.progress === 'object') ? e.progress : {};
+  const tags = Array.isArray(e.tags)
+    ? e.tags.map(t => String(t).trim().slice(0, 20)).filter(Boolean).slice(0, 6)
+    : [];
+  return {
+    id: String(e.id || '').slice(0, 40) || `m${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
+    title: String(e.title || '').trim().slice(0, 60) || '未命名材料',
+    tags,
+    text: clampText(e.text),
+    createdAt: Number(e.createdAt) || Date.now(),
+    lastAt: Number(e.lastAt) || 0,
+    progress: {
+      segIndex: clampInt(pr.segIndex, 0, 100000),
+      segCount: clampInt(pr.segCount, 0, 100000)
+    },
+    stats: {
+      sessions: clampInt(st.sessions, 0, 1000000),
+      chars: clampInt(st.chars, 0, 100000000),
+      durationSum: Math.max(0, Number(st.durationSum) || 0),
+      speedWSum: Math.max(0, Number(st.speedWSum) || 0),
+      accWSum: Math.max(0, Number(st.accWSum) || 0),
+      bestSpeed: Math.max(0, Number(st.bestSpeed) || 0)
+    }
+  };
+}
+
+/** 本材料的加权平均速度 / 正确率（给书架列表展示用） */
+export function shelfEntryAverages(entry) {
+  const s = (entry && entry.stats) || {};
+  const speed = s.durationSum > 0 ? s.speedWSum / s.durationSum : 0;
+  const acc = s.chars > 0 ? s.accWSum / s.chars : 0;
+  return {
+    avgSpeed: Math.round(speed * 10) / 10,
+    avgAccuracy: Math.round(acc * 10) / 10,
+    sessions: s.sessions || 0,
+    chars: s.chars || 0
+  };
+}
+
+export function loadShelf() {
+  const raw = readJSON(KEYS.shelf, []);
+  const list = Array.isArray(raw) ? raw : [];
+  return list.map(normalizeShelfEntry);
+}
+
+export function saveShelf(list) {
+  const safe = (Array.isArray(list) ? list : []).map(normalizeShelfEntry);
+  return writeJSON(KEYS.shelf, safe);
+}
+
+export function addShelfEntry({ title, tags, text } = {}) {
+  const entry = normalizeShelfEntry({ title, tags, text, createdAt: Date.now(), lastAt: 0 });
+  if (!entry.text.trim()) return null;   // 空文本不给建条目
+  const list = loadShelf();
+  list.push(entry);
+  saveShelf(list);
+  return entry;
+}
+
+export function updateShelfEntry(id, patch = {}) {
+  const list = loadShelf();
+  const i = list.findIndex(e => e.id === id);
+  if (i < 0) return null;
+  const next = normalizeShelfEntry(Object.assign({}, list[i], patch, { id: list[i].id }));
+  list[i] = next;
+  saveShelf(list);
+  return next;
+}
+
+export function removeShelfEntry(id) {
+  const list = loadShelf();
+  const next = list.filter(e => e.id !== id);
+  if (next.length === list.length) return false;
+  saveShelf(next);
+  return true;
+}
+
+/**
+ * 练完一份材料后回写进度与统计。
+ * @param {string} id
+ * @param {{segIndex?:number, segCount?:number}} progress
+ * @param {{totalChars?:number, durationSec?:number, speed?:number, accuracy?:number}} summary
+ */
+export function touchShelfEntry(id, progress, summary) {
+  const list = loadShelf();
+  const i = list.findIndex(e => e.id === id);
+  if (i < 0) return null;
+  const e = list[i];
+  const s = summary || {};
+  const chars = Math.max(0, Math.floor(Number(s.totalChars) || 0));
+  const dur = Math.max(0, Number(s.durationSec) || 0);
+  e.stats.sessions += 1;
+  e.stats.chars += chars;
+  e.stats.durationSum += dur;
+  e.stats.speedWSum += Math.max(0, Number(s.speed) || 0) * dur;
+  e.stats.accWSum += Math.max(0, Number(s.accuracy) || 0) * chars;
+  e.stats.bestSpeed = Math.max(e.stats.bestSpeed, Math.max(0, Number(s.speed) || 0));
+  e.lastAt = Date.now();
+  if (progress && typeof progress === 'object') {
+    e.progress = {
+      segIndex: clampInt(progress.segIndex, 0, 100000),
+      segCount: clampInt(progress.segCount, 0, 100000)
+    };
+  }
+  list[i] = normalizeShelfEntry(e);
+  saveShelf(list);
+  return list[i];
+}
+
+/** 最近练过的那份（没有则 null）——「继续上次材料」用 */
+export function lastShelfEntry() {
+  const list = loadShelf().filter(e => e.lastAt > 0);
+  if (!list.length) return null;
+  return list.reduce((a, b) => (b.lastAt > a.lastAt ? b : a));
+}
+
+/**
+ * 旧数据迁移：把「单个可覆盖的 customText」放进书架。
+ *
+ * 触发条件刻意收得很窄：书架为空 **且** 设置里有文本 **且** 没迁移过。
+ * settings.shelfMigrated 落盘后，用户就算把那条条目删了也不会再被塞回来 ——
+ * 「删除」是一个明确的决定，迁移逻辑无权推翻它。
+ *
+ * 迁移**不**清空 settings.customText：它仍然表示「当前正要练的那份」，
+ * textarea 与续练逻辑都认它。无损的含义是：文本原文进了书架，随时可删可改。
+ *
+ * @returns {{migrated:boolean, entry:object|null}}
+ */
+export function migrateCustomTextToShelf() {
+  const settings = loadSettings();
+  if (settings.shelfMigrated) return { migrated: false, entry: null };
+  const text = String(settings.customText || '');
+  if (!text.trim() || loadShelf().length > 0) {
+    // 没有可迁的文本，也要把旗子立起来 —— 否则每次启动都白查一遍
+    saveSettings(Object.assign({}, settings, { shelfMigrated: true }));
+    return { migrated: false, entry: null };
+  }
+  const entry = addShelfEntry({ title: '我的文本', tags: ['迁移'], text });
+  saveSettings(Object.assign({}, settings, { shelfMigrated: true }));
+  return { migrated: !!entry, entry };
+}
+
+/* ============================================================
+   新手引导课程进度
+   ============================================================ */
+
+/**
+ * 课程进度。课程**内容**在 src/data/course.js（纯数据）；
+ * 这里只存「学到哪了」：
+ *   currentId   当前正在上的课（第一门未达标的课，由 core/course.js 推导）
+ *   completed   已晋级的课 id 列表
+ *   lessons     每门课的累计：{ attempts, bestAcc, bestSpeed, bestChars, completedAt }
+ */
+export function loadCourseProgress() {
+  const raw = readJSON(KEYS.course, {});
+  const p = (raw && typeof raw === 'object') ? raw : {};
+  const lessons = {};
+  if (p.lessons && typeof p.lessons === 'object') {
+    for (const [id, v] of Object.entries(p.lessons)) {
+      if (!v || typeof v !== 'object') continue;
+      lessons[id] = {
+        attempts: clampInt(v.attempts, 0, 1000000),
+        bestAcc: clampNum(v.bestAcc, 0, 100, 0),
+        bestSpeed: Math.max(0, Number(v.bestSpeed) || 0),
+        bestChars: clampInt(v.bestChars, 0, 1000000),
+        completedAt: Number(v.completedAt) || 0
+      };
+    }
+  }
+  return {
+    currentId: String(p.currentId || ''),
+    completed: Array.isArray(p.completed) ? p.completed.map(String).slice(0, 100) : [],
+    lessons,
+    updatedAt: Number(p.updatedAt) || 0
+  };
+}
+
+export function saveCourseProgress(p) {
+  const cur = loadCourseProgress();
+  const next = Object.assign({}, cur, p || {});
+  next.completed = Array.isArray(next.completed) ? next.completed.slice(0, 100) : [];
+  next.updatedAt = Date.now();
+  return writeJSON(KEYS.course, next);
+}
+
+/* ============================================================
+   备份导入导出
+   ============================================================ */
+
 export function exportAll() {
   return {
     app: 'shuangpin-practice',
@@ -1473,9 +1688,15 @@ export function exportAll() {
     daily: loadDaily(),
     weak: loadWeak(),
     keyErrors: loadKeyErrors(),
-    keyTimings: loadKeyTimings()
+    keyTimings: loadKeyTimings(),
+    // 书架与课程进度跟着走：用户整理好的材料清单和「学到第几课」
+    // 与练习成绩同等重要，导出时丢掉任何一个都算数据丢失。
+    shelf: loadShelf(),
+    course: loadCourseProgress()
   };
 }
+
+
 
 /**
  * 导入数据（合并语义：设置被覆盖；历史追加并按 id+时间戳去重；
@@ -1716,6 +1937,64 @@ export function importAll(payload) {
         cur.recent = cur.recent.slice(cur.recent.length - KEY_TIMING_RECENT_MAX);
       }
       writeJSON(KEYS.keyTimings, cur);
+      n++;
+    }
+
+    /* 书架：按条目 id 判重。同 id 取「最近动过的」那份（lastAt / createdAt
+       较新者），不同 id 直接并入 —— 两台设备各自加的材料都应该活下来。
+       重复导入同一份备份时所有 id 都已见过、内容又一样，天然幂等。 */
+    if (Array.isArray(payload.shelf)) {
+      const cur = loadShelf();
+      const byId = new Map(cur.map(e => [e.id, e]));
+      let added = 0, updated = 0;
+      for (const raw of payload.shelf) {
+        if (!raw || typeof raw !== 'object') continue;
+        const inc = normalizeShelfEntry(raw);
+        const local = byId.get(inc.id);
+        if (!local) { byId.set(inc.id, inc); added++; continue; }
+        const newer = (inc.lastAt || inc.createdAt) > (local.lastAt || local.createdAt) ? inc : local;
+        if (newer !== local) { byId.set(inc.id, newer); updated++; }
+      }
+      if (added || updated) {
+        saveShelf([...byId.values()]);
+        n += added + updated;
+      }
+    }
+
+    /* 课程进度：取「更靠前」的学时 —— 已完成的课取并集（不会因为导入
+       而退步重学），每门课的最好成绩取较大值；当前课取 updatedAt 较新的
+       那份备份的记录。与练习成绩同理：导入是补全，不是倒退。 */
+    if (payload.course && typeof payload.course === 'object') {
+      const cur = loadCourseProgress();
+      const inc = payload.course;
+      const completed = new Set([...(cur.completed || []), ...((Array.isArray(inc.completed) ? inc.completed : []).map(String))]);
+      const lessons = Object.assign({}, cur.lessons);
+      for (const [id, v] of Object.entries(inc.lessons || {})) {
+        if (!v || typeof v !== 'object') continue;
+        const a = lessons[id];
+        lessons[id] = a ? {
+          attempts: Math.max(a.attempts || 0, clampInt(v.attempts, 0, 1000000)),
+          bestAcc: Math.max(a.bestAcc || 0, clampNum(v.bestAcc, 0, 100, 0)),
+          bestSpeed: Math.max(a.bestSpeed || 0, Math.max(0, Number(v.bestSpeed) || 0)),
+          bestChars: Math.max(a.bestChars || 0, clampInt(v.bestChars, 0, 1000000)),
+          completedAt: Math.max(a.completedAt || 0, Number(v.completedAt) || 0)
+        } : {
+          attempts: clampInt(v.attempts, 0, 1000000),
+          bestAcc: clampNum(v.bestAcc, 0, 100, 0),
+          bestSpeed: Math.max(0, Number(v.bestSpeed) || 0),
+          bestChars: clampInt(v.bestChars, 0, 1000000),
+          completedAt: Number(v.completedAt) || 0
+        };
+      }
+      const curTime = cur.updatedAt || 0;
+      const incTime = Number(inc.updatedAt) || 0;
+      const currentId = incTime > curTime ? String(inc.currentId || '') : cur.currentId;
+      saveCourseProgress({
+        completed: [...completed],
+        lessons,
+        currentId,
+        updatedAt: Math.max(curTime, incTime)
+      });
       n++;
     }
 

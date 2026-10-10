@@ -2621,6 +2621,66 @@ console.log('\n【12c】change 重绘粒度：key 不重写题干，char/questio
   }
 }
 
+/* ---------- 智能混合 / 文本书架 / 引导课程 的 UI 接线 ---------- */
+console.log('\n【12d】智能混合 · 书架 · 课程（接线层）');
+{
+  const cleanupAll = () => {
+    if (app.engine) { app.engine.destroy(); app.engine = null; }
+    app.sessionActive = false;
+    q('#sessionPanel').hidden = true;
+    q('#setupPanel').hidden = false;
+    q('#overlay').hidden = true;
+  };
+  cleanupAll();
+
+  /* 智能混合：按钮在、点击能开局、理由展示出来。
+     组题逻辑本身的边界在 mix.mjs（数据为空 / 重复 / 样本不足），
+     这里只验「按钮真的把局开起来了」。 */
+  ok(!!q('#btnSmartMix'), '「练 5 分钟」按钮存在');
+  fire(q('#btnSmartMix'), 'click');
+  await settle();
+  ok(!!app.engine, '点击后进入练习（智能混合开局）');
+  ok(app.engine.mode === 'mix', `会话模式为 mix（实际 ${app.engine.mode}）`);
+  ok(!q('#mixReasons').hidden && q('#mixReasons').textContent.length > 0,
+    '推荐理由已展示（为什么练这些）');
+  ok(/为什么练这些/.test(q('#mixReasons').textContent), '理由区有标题');
+  app.engine.destroy(); app.engine = null;
+  cleanupAll();
+
+  /* 课程：卡片渲染当前课，开始按钮用课程参数开局并标记 courseActiveId */
+  ok(q('#courseBox') && !q('#courseBox').hidden, '课程卡片可见（还有未完成的课）');
+  ok(/第 1 课/.test(q('#courseTitle').textContent), `当前课正确（${q('#courseTitle').textContent}）`);
+  ok(/过关条件/.test(q('#courseCheck').textContent), '过关条件展示（晋级判定透明）');
+  fire(q('#btnCourseStart'), 'click');
+  await settle();
+  ok(!!app.engine && app.engine.mode === 'yun', '「开始本课」用课程参数开局（yun）');
+  ok(app.courseActiveId === 'c1-yun', '会话标记了课程 id（练完做晋级判定）');
+  app.engine.destroy(); app.engine = null;
+  cleanupAll();
+
+  /* 书架：存入 → 列表渲染 → 打开回填 textarea */
+  ok(!!q('#btnShelfSave'), '「存入书架」按钮存在');
+  const ta = q('#customTextInput');
+  ta.value = '书架迁移验证专用文本。';
+  fire(q('#btnShelfSave'), 'click');
+  await settle();
+  const shelfItems = qa('#shelfList .shelf-item');
+  ok(shelfItems.length >= 1, `条目出现在列表里（${shelfItems.length} 项）`);
+  ok(/书架迁移验证专用文本/.test(ta.value), 'textarea 内容保持不变');
+
+  // 打开：文本回填（打开即「继续上次材料」的入口）
+  const openBtn = shelfItems.map(el => el.querySelector('[data-act="open"]')).find(Boolean);
+  fire(openBtn, 'click');
+  await settle();
+  ok(q('#customTextInput').value.includes('书架迁移验证专用文本'),
+    '打开条目后文本回填到输入框');
+  ok(typeof app.shelfActiveId === 'string', '记录了本次材料 id（练完回写进度用）');
+  // 清掉现场，别让书架状态泄漏到其它用例
+  app.shelfActiveId = null;
+  app.shelfSegOffset = 0;
+  cleanupAll();
+}
+
 /* ---------- 收尾 ---------- */
 console.log('\n【13】最终检查');
 ok(errors.length === 0, `全程无未捕获 error${errors.length ? '（' + errors.length + ' 条）：' + errors.slice(0, 3).join(' | ') : ''}`);

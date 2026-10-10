@@ -17,6 +17,8 @@ import {
   makeCustomPassageQuestion, splitPassageText,
   ALL_CHARS, PHRASES, PASSAGES, CHAR_TIERS, phrasePool
 } from './core/questions.js';
+import { planMixedSession } from './core/mix.js';
+import { COURSE, currentLesson, buildLessonQuestions, recordLessonAttempt } from './core/course.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
@@ -410,7 +412,8 @@ function initSetupPanel() {
     /* 用函数渲染而非一次性 innerHTML：语音能力探测是异步的，
        探测结果回来后需要重画模式名（「认声母键」↔「只听声母」）。 */
     const paint = () => {
-      grid.innerHTML = LEVELS.map(l => `
+      /* hidden 的模式（智能混合）不进卡片 —— 它由「练 5 分钟」按钮进入 */
+      grid.innerHTML = LEVELS.filter(l => !l.hidden).map(l => `
         <button class="mode-card" data-mode="${l.id}">
           <span class="mode-count" data-count="${l.id}"></span>
           <span class="mode-card-head">
@@ -481,7 +484,16 @@ function initSetupPanel() {
     });
   }
   updatePhrasePoolInfo();
+  // 旧数据迁移：单个 customText → 书架。只跑一次（见 migrateCustomTextToShelf），
+  // 迁了要告诉用户东西去哪了，不能悄悄搬。
+  try {
+    const mig = S.migrateCustomTextToShelf();
+    if (mig.migrated) toast('已把你之前粘贴的自定义文本放进书架（练习页选「自定义文本」可见）');
+  } catch (err) { console.warn('[shelf] 迁移失败', err); }
   initCustomText();
+  initSmartMix();
+  initShelf();
+  initCourse();
 
   const btnStart = $('#btnStart');
   // 注意：必须用箭头函数包装。若直接传 startSession，
@@ -570,6 +582,291 @@ function initCustomText() {
    （刷新、暂停退出）时续练的粒度太粗。按 80 字一段，
    大约是一屏能看完、一口气能打完的长度。 */
 const CUSTOM_SEG_CHARS = 80;
+
+/* 自定义文本切成多段时的每段上限（可打字数）。
+   为什么是分段而不是一次性跑完：一段 5000 字的文章，
+   进度条和「已完成 N 字」会变得毫无意义，而且中途被打断
+   （刷新、暂停退出）时续练的粒度太粗。按 80 字一段，
+   大约是一屏能看完、一口气能打完的长度。 */
+
+/* ============================================================
+   智能混合练习（练 5 分钟）
+   ============================================================ */
+
+/**
+ * 「练 5 分钟」入口：按当前易错字词、慢键、没练熟的键位组一套题。
+ *
+ * 三类数据各有出处：weakRanking（易错，到期优先）、slowestKeys（慢键）、
+ * keyMastery（键位掌握度）。推荐理由必须展示出来 —— 说不清「为什么练这些」，
+ * 它就只是又一个随机按钮。
+ */
+function initSmartMix() {
+  const btn = $('#btnSmartMix');
+  if (!btn || btn._bound) return;
+  btn._bound = true;
+  btn.addEventListener('click', () => {
+    try {
+      const plan = planMixedSession({
+        durationSec: 300,
+        weakList: weakRanking(30),
+        slowKeys: S.slowestKeys(S.loadKeyTimings(), { min: KEY_SLOW_MIN_SAMPLES, top: 5 }),
+        mastery: keyMastery({ range: 'all', mode: 'all' })
+      });
+      if (!plan.questions.length) {
+        toast('暂时组不出练习，请稍后再试', 'err');
+        return;
+      }
+      renderMixReasons(plan.reasons);
+      startSession(plan.questions, 'mix', { durationSec: 300 });
+    } catch (err) {
+      console.error('[smartmix] 组题失败', err);
+      toast('智能混合组题失败：' + (err && err.message ? err.message : '未知错误'), 'err');
+    }
+  });
+}
+
+/** 把推荐理由写进界面。列表形式，读屏逐条念得清。 */
+function renderMixReasons(list) {
+  const box = $('#mixReasons');
+  if (!box) return;
+  if (!Array.isArray(list) || !list.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  box.innerHTML = `<div class="mix-reasons-title">为什么练这些</div>` +
+    `<ul class="mix-reason-list">${list.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>`;
+}
+
+/* ============================================================
+   个人文本书架
+   ============================================================ */
+
+function initShelf() {
+  const btnSave = $('#btnShelfSave');
+  if (btnSave && !btnSave._bound) {
+    btnSave._bound = true;
+    btnSave.addEventListener('click', () => {
+      const ta = $('#customTextInput');
+      const text = ta ? ta.value : '';
+      if (!String(text).trim()) { toast('先粘贴文字，再存入书架', 'err'); return; }
+      const existed = S.loadShelf().find(e => e.text === text);
+      if (existed) {
+        app.shelfActiveId = existed.id;
+        toast(`书架里已有这份材料：「${existed.title}」`);
+        renderShelf();
+        return;
+      }
+      const n = S.loadShelf().length + 1;
+      const entry = S.addShelfEntry({ title: `材料 ${n}`, tags: [], text });
+      if (entry) {
+        app.shelfActiveId = entry.id;
+        toast('已存入书架，下次可直接从列表继续');
+        renderShelf();
+      }
+    });
+  }
+
+  const list = $('#shelfList');
+  if (list && !list._bound) {
+    list._bound = true;
+    // 列表内容每次重画，事件绑在容器上做委托（和弹窗的 data-act 同一思路）
+    list.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-act]');
+      if (!btn) return;
+      const id = btn.getAttribute('data-id');
+      const act = btn.getAttribute('data-act');
+      if (act === 'open') openShelfEntry(id);
+      else if (act === 'del') confirmRemoveShelfEntry(id);
+    });
+  }
+
+  renderShelf();
+}
+
+/** 重画书架列表（含每份材料自己的速度 / 正确率与上次进度） */
+function renderShelf() {
+  const box = $('#shelfBox');
+  const list = $('#shelfList');
+  const count = $('#shelfCount');
+  if (!box || !list) return;
+  const entries = S.loadShelf();
+  box.hidden = entries.length === 0;
+  if (count) count.textContent = entries.length ? `${entries.length} 份` : '';
+  list.innerHTML = entries.map(e => {
+    const avg = S.shelfEntryAverages(e);
+    const last = e.lastAt ? new Date(e.lastAt).toLocaleDateString() : '没练过';
+    const prog = e.progress.segCount > 0
+      ? (e.progress.segIndex >= e.progress.segCount
+        ? '上一轮已打完'
+        : `练到第 ${e.progress.segIndex + 1}/${e.progress.segCount} 段`)
+      : '';
+    const meta = [avg.sessions ? `${avg.sessions} 次` : '还没练过',
+      avg.sessions ? `均 ${avg.avgSpeed} 字/分 · 正确率 ${avg.avgAccuracy}%` : '',
+      last, prog].filter(Boolean).join(' · ');
+    const canResume = e.progress.segIndex > 0 && e.progress.segIndex < e.progress.segCount;
+    return `<li class="shelf-item" data-id="${e.id}">
+      <div class="shelf-item-main">
+        <span class="shelf-item-title">${escapeHtml(e.title)}</span>
+        <span class="shelf-item-meta">${escapeHtml(meta)}</span>
+      </div>
+      <div class="shelf-item-actions">
+        <button class="btn btn-ghost btn-sm" data-act="open" data-id="${e.id}">${canResume ? '继续' : '练习'}</button>
+        <button class="btn btn-ghost btn-sm" data-act="del" data-id="${e.id}"
+          aria-label="删除 ${escapeHtml(e.title)}">删除</button>
+      </div>
+    </li>`;
+  }).join('');
+}
+
+/** 打开一份材料：文本进 textarea，并从上次的段继续 */
+function openShelfEntry(id) {
+  const entry = S.loadShelf().find(e => e.id === id);
+  if (!entry) return;
+  const ta = $('#customTextInput');
+  if (ta) {
+    ta.value = entry.text;
+    app.settings.customText = entry.text;
+    saveSettingsDebounced();
+    ta.dispatchEvent(new Event('input'));
+  }
+  app.shelfActiveId = entry.id;
+
+  // 切到自定义文本模式，让用户看得见自己要练什么
+  const card = $$('#modeGrid .mode-card').find(c => c.getAttribute('data-mode') === 'custom');
+  if (card) card.click();
+
+  if (entry.progress.segIndex >= entry.progress.segCount) {
+    // 上一轮已打完 → 从头再来（进度会随本次练习覆盖）
+    toast(`「${entry.title}」上一轮已打完，从头开始`);
+    app.shelfSegOffset = 0;
+  } else if (entry.progress.segIndex > 0) {
+    app.shelfSegOffset = entry.progress.segIndex;
+    toast(`「${entry.title}」从第 ${entry.progress.segIndex + 1} 段继续`);
+  } else {
+    app.shelfSegOffset = 0;
+  }
+}
+
+/** 删除确认：书架条目一删，进度与统计一起没了，必须让用户明确知情 */
+function confirmRemoveShelfEntry(id) {
+  const entry = S.loadShelf().find(e => e.id === id);
+  if (!entry) return;
+  const avg = S.shelfEntryAverages(entry);
+  openModal(`
+    <h2>删除「${escapeHtml(entry.title)}」？</h2>
+    <p>${escapeHtml(entry.stats.sessions
+      ? `这份材料练过 ${avg.sessions} 次（均 ${avg.avgSpeed} 字/分），删除后这些进度与统计一起消失。`
+      : '这份材料还没有练习记录。')}正文无法恢复。</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-act="cancel">取消</button>
+      <button class="btn btn-danger" data-act="remove">删除</button>
+    </div>
+  `, (act, close) => {
+    if (act !== 'remove') { close(); return; }
+    if (app.shelfActiveId === id) app.shelfActiveId = null;
+    S.removeShelfEntry(id);
+    close();
+    toast('已删除');
+    renderShelf();
+  });
+}
+
+/** 练完一次自定义文本后回写书架（进度 + 该材料自己的统计） */
+function touchShelfAfterSession(s) {
+  const id = app.shelfActiveId;
+  app.shelfActiveId = null;
+  app.shelfSegOffset = 0;
+  if (!id || s.mode !== 'custom') return;
+  const entry = S.loadShelf().find(e => e.id === id);
+  if (!entry) return;
+  /* 正文必须和条目一致才记账：用户从书架打开 A 之后又把文本改成了 B，
+     这一局练的是 B，不能把成绩算到 A 头上。 */
+  const ta = $('#customTextInput');
+  const cur = ta ? ta.value : (app.settings.customText || '');
+  if (cur !== entry.text) return;
+  S.touchShelfEntry(id, {
+    segIndex: s.doneQuestions || 0,
+    segCount: s.questionCount || 0
+  }, s);
+  renderShelf();
+}
+
+/* ============================================================
+   新手引导课程
+   ============================================================ */
+
+function initCourse() {
+  const btn = $('#btnCourseStart');
+  if (btn && !btn._bound) {
+    btn._bound = true;
+    btn.addEventListener('click', () => {
+      const lesson = currentLesson(S.loadCourseProgress());
+      if (!lesson) { renderCourseBox(); return; }
+      const qs = buildLessonQuestions(lesson);
+      if (!qs.length) { toast('本课暂时组不出题目，请稍后再试', 'err'); return; }
+      startSession(qs, lesson.mode, { courseLessonId: lesson.id });
+    });
+  }
+  renderCourseBox();
+}
+
+/** 课程卡片：当前课、练过几次、过关条件。每次进练习页 / 练完一局都刷新。 */
+function renderCourseBox() {
+  const box = $('#courseBox');
+  if (!box) return;
+  const progress = S.loadCourseProgress();
+  const lesson = currentLesson(progress);
+  const title = $('#courseTitle');
+  const stat = $('#courseStat');
+  const goal = $('#courseGoal');
+  const check = $('#courseCheck');
+  const note = $('#courseNote');
+  const btn = $('#btnCourseStart');
+  if (!lesson) {
+    box.hidden = false;
+    if (title) title.textContent = '课程已全部完成 🎓';
+    if (goal) goal.textContent = '六门课都过了。接下来可以自由练习、做能力测验，或用「智能混合」保持手感。';
+    if (check) check.textContent = '';
+    if (note) note.textContent = '';
+    if (btn) btn.hidden = true;
+    return;
+  }
+  const rec = progress.lessons[lesson.id] ||
+    { attempts: 0, bestAcc: 0, bestSpeed: 0, bestChars: 0 };
+  box.hidden = false;
+  if (title) title.textContent = lesson.title;
+  if (stat) {
+    stat.textContent = rec.attempts
+      ? `已练 ${rec.attempts} 次 · 最好正确率 ${Math.round(rec.bestAcc)}%`
+      : '还没练过';
+  }
+  if (goal) goal.textContent = lesson.goal;
+  const parts = [];
+  if (lesson.check.minAccuracy != null) parts.push(`正确率 ≥${lesson.check.minAccuracy}%`);
+  if (lesson.check.minSpeed != null) parts.push(`速度 ≥${lesson.check.minSpeed} 字/分`);
+  if (lesson.check.minChars != null) parts.push(`完成 ≥${lesson.check.minChars} 字`);
+  if (check) check.textContent = `过关条件：${parts.join(' 且 ')}`;
+  if (btn) { btn.hidden = false; btn.textContent = rec.attempts ? '继续本课' : '开始本课'; }
+  if (note) note.textContent = lesson.reason || '';
+}
+
+/** 练完一局后做课程晋级判定，并把结果告诉用户 */
+function applyCourseAfterSession(s) {
+  const lessonId = app.courseActiveId;
+  app.courseActiveId = null;
+  if (!lessonId) return;
+  const res = recordLessonAttempt(lessonId, s);
+  renderCourseBox();
+  if (!res.attempted) return;
+  const p = res.promotion;
+  const title = (COURSE.find(l => l.id === lessonId) || {}).title || lessonId;
+  if (p && p.passed) {
+    toast(res.next
+      ? `通过「${title}」！下一课：${res.next.title}`
+      : `通过「${title}」！全部课程完成 🎓`, undefined, 4500);
+  } else if (p) {
+    const why = p.failed.map(f => `${f.label} ${f.got}（需 ${f.need}）`).join('、');
+    toast(`「${title}」未过关：${why}。再练一轮就能通过`, 'err', 5000);
+  }
+}
 
 /**
  * 从自定义文本生成题目序列。
@@ -780,7 +1077,16 @@ function saveProgress(force = false) {
    练习：开始 / 续练 / 结束
    ============================================================ */
 
-function startSession(questionsOverride, modeOverride) {
+/**
+ * 开始一次练习。
+ * @param {Array}  [questionsOverride] 预置题目（智能混合 / 课程 / 自定义文本用）
+ * @param {string} [modeOverride]      模式 id（须在 LEVEL_MAP 里）
+ * @param {object} [opts]
+ *   durationSec     覆盖「练习时长」设置（智能混合固定 5 分钟用它）
+ *   shelfId         本次练的是书架里的哪份材料（练完回写进度与统计）
+ *   courseLessonId  本次练的是哪门课（练完做晋级判定）
+ */
+function startSession(questionsOverride, modeOverride, opts = {}) {
   try {
     // 防御：若被当作事件回调直接调用，第一个参数会是 Event 对象。
     // 只接受「看起来像题目数组」的值，其余一律忽略并走正常生成流程。
@@ -799,8 +1105,11 @@ function startSession(questionsOverride, modeOverride) {
       ? modeOverride : null;
 
     const mode = safeModeOverride || app.sessionMode;
-    const durationSec = Number(app.settings.duration) || 0;
+    const durationSec = Number(opts.durationSec != null ? opts.durationSec : app.settings.duration) || 0;
     const count = Number(app.settings.count) || 0;
+    // 本次会话的归属：书架材料 / 课程。练完（persistRecord）按它回写。
+    app.shelfActiveId = (typeof opts.shelfId === 'string' && opts.shelfId) || null;
+    app.courseActiveId = (typeof opts.courseLessonId === 'string' && opts.courseLessonId) || null;
 
     const unlimited = !preset && count === 0 && mode !== 'exam';
     const generation = {
@@ -829,6 +1138,13 @@ function startSession(questionsOverride, modeOverride) {
         toast('这段文字里没有可练的汉字，试试其他内容', 'err');
         if (ta) ta.focus();
         return;
+      }
+      /* 从书架条目「继续」：跳过上次已经打完的段。
+         越界（上次已打完）时从头再来 —— 进度会随本次练习覆盖。 */
+      if (app.shelfSegOffset > 0) {
+        const off = Math.min(app.shelfSegOffset, customPreset.length);
+        const rest = customPreset.slice(off);
+        customPreset = rest.length ? rest : buildCustomQuestions(text);
       }
     }
 
@@ -1172,6 +1488,14 @@ function persistRecord(summary) {
     }
 
     S.clearResume();
+
+    /* 书架 / 课程的回写。放在弹窗之前：弹窗里要能读到最新进度
+       （「本次练的是书架里的哪份材料」「课程是否晋级」）。 */
+    if (meaningful) {
+      try { touchShelfAfterSession(s); } catch (err) { console.warn('[shelf] 回写失败', err); }
+      try { applyCourseAfterSession(s); } catch (err) { console.warn('[course] 判定失败', err); }
+    }
+
     /* 把本轮记录 id 带上：结算页的「本轮对照」要拿近几轮做基线，
        而自己刚刚已经落库了（就在上面 appendRecord）。不排除自己的话
        基线里混进了「本轮」，N=1 时还会变成「本轮 vs 本轮」= 永远持平。 */
@@ -3905,6 +4229,9 @@ function syncSettingsUI() {
     ctInput.value = app.settings.customText || '';
     ctInput.dispatchEvent(new Event('input'));
   }
+  // 书架与课程进度也会被导入 / 清空改变，跟着刷新
+  renderShelf();
+  renderCourseBox();
   renderGoalHud();
   selectMode(app.settings.mode, true);
   applyMiniKeymapVisibility();

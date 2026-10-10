@@ -127,6 +127,18 @@ export const LEVELS = [
     badge: 'TEST',
     desc: '全程无提示、无求助，独立完成。测完给 0–100 的综合分。',
     tip: '50 题 · 拆分 / 单字 / 词组混合'
+  },
+  {
+    id: 'mix',
+    level: 6,
+    name: '智能混合',
+    badge: 'AUTO',
+    desc: '按易错字词、慢键和没练熟的键位自动组一套题，并说明推荐理由。',
+    tip: '按弱项自动组题',
+    /* 不进模式卡片：它由「练 5 分钟」按钮进入，且组题由 core/mix.js 负责，
+       不是 generateQuestions 的一种模式。放在 LEVELS 里只是为了
+       复用 LEVEL_MAP 的显示名与统计页的模式筛选。 */
+    hidden: true
   }
 ];
 

@@ -14,6 +14,7 @@
 | `a11y.mjs` | **减少动态效果**、**快捷键规范化与冲突校验**、**物理键位映射（Dvorak / AZERTY）**、**屏幕阅读器播报**、**WebAudio 音效合成与连错降音** | 无 |
 | `launcher.mjs` | **启动脚本静态自检**：编码前提（BOM / CRLF / chcp 顺序）、引用的文件是否存在、标签配对、三级回退链、与服务端脚本的接口一致性、危险写法扫描、**模块类型声明**、**CI 工作流确实存在**、**每套自检都挂进了 `npm test` 且脚本里的文件都真实存在** | 无 |
 | `training.mjs` | 提示撤除、滑动窗口与决策节奏续练、自适应档位、键位覆盖与强化上限、人工注音长度告警、词组筛选、续练、加权统计与降级、曲线均值口径、日报回落、计时同源、**测验成绩曲线只取有效分数**、500 / 5,000 题性能 | 无 |
+| `mix.mjs` | **智能混合组题**（`core/mix.js` 的验收）：三类数据齐全时三类都出题并交错排列、推荐理由能说明「为什么练这些」、**任何单一弱项来源不得超过 50%**、每类为空时如实说明并让出份额、易错表只有 1 项时不硬凑重复题、传入重复数据不放大题量、全员已掌握时不再安排键位题、时长换算被夹在 6–40 题、同 seed 可复现 | 无 |
 | `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**、**辅助功能接线层**、**提示依赖度可见性**、**存储降级时的界面告知**、**词组易错归组**、**完成音效**、**测验成绩曲线**、**键位图开关**、**热力图跟随模式筛选**、**热力等级竖条根数 = 等级**、**change 重绘粒度契约**） | `linkedom` |
 | `browser.mjs` | **真浏览器冒烟**（headless Chrome/Edge + CDP，补模拟 DOM 的边界）：**真实键盘事件推进引擎**、**弹窗原生焦点**（初始落点 / Tab 循环不逃逸 / Esc 关闭后归还）、**Canvas 统计真的画出了像素** 且带 `role="img"` 与随数据更新的 `aria-label`、**窄屏 390×844 无横向滚动**。环境不具备时**跳过**（exit 0）：没有 Chrome/Edge，或 Node < 22（CDP 要用 Node 22 才内置的全局 `WebSocket`）—— CI 上 Node 18/20 会跳过、Node 22 真跑 | Chrome/Edge + Node 22 |
 | `bench.mjs` | **性能基准（护栏，非功能测试）**：统计「一次按键引发的 DOM 写入量」，钉死 `renderSession` 的分级重绘不被改回全量 —— 音节内推进不得重建题干。详见下方说明 | `linkedom` |
@@ -100,7 +101,8 @@ node _test/a11y.mjs
 node _test/launcher.mjs
 node _test/training.mjs
 node _test/integration.mjs
-node _test/browser.mjs   # 真浏览器冒烟：没有 Chrome/Edge 时自动跳过
+node _test/browser.mjs   # 真浏览器冒烟：环境不具备时自动跳过
+node _test/mix.mjs       # 智能混合组题：数据为空 / 重复 / 样本不足的边界
 node _test/bench.mjs     # 性能基准：每键 DOM 写入量
 ```
 
@@ -383,6 +385,21 @@ cd _test && npm ci
 `sleep(30~40ms)` 去把 1 秒磨出来 —— 慢且不稳。现在直接给引擎记账
 （`eng.elapsedSec = 2`）：用时是**被测代码要展示的数据**，靠真实等待去凑既费时
 又不可靠。这类的「静默不发生」比直接报错更难查。
+
+## 三个功能模块（智能混合 / 文本书架 / 引导课程）
+
+| 模块 | 代码 | 说明 |
+|---|---|---|
+| 智能混合 | `src/core/mix.js` | 「练 5 分钟」按钮：按易错字词（weakRanking）、慢键（slowestKeys）、没练熟的键位（keyMastery）自动组题，4:3:3 分配、单一弱项 ≤50%、缺口用高频单字补足（**绝不重复出题**），推荐理由逐条展示。纯函数，验收断言在 `mix.mjs`。 |
+| 文本书架 | `storage.js` 的 KEYS.shelf | 多份跟打材料：标题 / 标签 / 正文 / 最近进度 / 该材料自己的加权统计（速度按时长、正确率按字数）。旧的单份 customText 启动时自动迁入（`migrateCustomTextToShelf`，带旗标防「删了又被塞回」）；随 `exportAll / importAll` 备份（按 id 合并、同 id 取最近、重复导入幂等）。 |
+| 引导课程 | `src/data/course.js` + `src/core/course.js` | 六门课串起既有模式：韵母键 → 声母键（含 zh/ch/sh 特例）→ 拆分 → 单字 → 词组 → 提速。**课程内容是数据**，改顺序 / 加一课不碰界面代码。进度落盘（KEYS.course），晋级条件不达标就停在原课（关键基础不跳过）；出题复用 generateQuestions 与自适应档位。 |
+
+接线层（按钮 / 列表 / 卡片的选择器与事件）由 `integration.mjs` 的【12d】守着；
+存储与晋级判定由 `storage.mjs` 的【17】【18】【19】守着。
+
+`startSession(questions, mode, opts)` 的第三个参数是这批功能加的：
+`opts.durationSec`（混合固定 5 分钟）、`opts.shelfId` / `opts.courseLessonId`
+（练完回写进度与判定的归属）。
 
 ## 怎么打开应用（重要）
 

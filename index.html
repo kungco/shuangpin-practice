@@ -47,6 +47,22 @@
 
         <div class="mode-grid" id="modeGrid"></div>
 
+        <!-- 新手引导课程：当前课 / 晋级条件 / 续课。
+             课程内容在 src/data/course.js（数据），这里只负责展示。 -->
+        <div class="course" id="courseBox" hidden>
+          <div class="course-head">
+            <span class="course-badge">课程</span>
+            <strong class="course-title" id="courseTitle"></strong>
+            <span class="course-stat" id="courseStat"></span>
+          </div>
+          <p class="course-goal" id="courseGoal"></p>
+          <p class="course-check" id="courseCheck"></p>
+          <div class="course-actions">
+            <button class="btn btn-ghost btn-sm" id="btnCourseStart" type="button">开始本课</button>
+            <span class="course-note" id="courseNote"></span>
+          </div>
+        </div>
+
         <!-- 选中「能力测验」时才显示 -->
         <div class="exam-note" id="examNote" hidden>
           <div class="exam-note-head">
@@ -132,7 +148,9 @@
         </div>
 
         <!-- 自定义文本：仅在选择「自定义文本」模式时显示。
-             未收录的字（生僻字/英文/数字）会被自动跳过，不影响练习。 -->
+             未收录的字（生僻字/英文/数字）会被自动跳过，不影响练习。
+             书架：同一份正文可以存多个条目（标题/标签/进度/各自的统计），
+             旧的单份 customText 会在启动时自动迁进来。 -->
         <div class="custom-text-field" id="customTextField" hidden>
           <label class="field">
             <span>粘贴要练的文字</span>
@@ -141,12 +159,30 @@
           </label>
           <div class="custom-text-meta">
             <span id="customTextStat" aria-live="polite"></span>
+            <button class="btn btn-ghost btn-sm" id="btnShelfSave" type="button">存入书架</button>
             <button class="btn btn-ghost btn-sm" id="btnClearCustomText" type="button">清空</button>
+          </div>
+          <div class="shelf" id="shelfBox" hidden>
+            <div class="shelf-head">
+              <span class="shelf-title">我的书架</span>
+              <span class="shelf-sub" id="shelfCount"></span>
+            </div>
+            <ul class="shelf-list" id="shelfList"></ul>
           </div>
           <p class="footnote" style="margin-top:2px">
             多音字按常用读音处理（如「行」读 xíng）。要练的字不在字库里时会自动跳过，
             并在下方统计里如实说明跳过了多少。
           </p>
+        </div>
+
+        <!-- 智能混合：按易错字词 / 慢键 / 没练熟的键位自动组题。
+             推荐理由必须展示出来 —— 「为什么练这些」说不清楚，
+             用户就只能把它当成又一个随机按钮。 -->
+        <div class="smart-mix" id="smartMixBox">
+          <button class="btn btn-primary" id="btnSmartMix" type="button">
+            智能混合 · 练 5 分钟
+          </button>
+          <div class="mix-reasons" id="mixReasons" aria-live="polite" hidden></div>
         </div>
 
         <div class="setup-foot">

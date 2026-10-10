@@ -1102,6 +1102,170 @@ console.log('\n【新增】按键耗时：样本池、按模式、范围切换�
     'lead 桶同样参与排名');
 }
 
+console.log('\n【17】文本书架：迁移、增删改、按材料统计');
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  // 旧数据迁移：customText 非空 + 书架空 → 搬进书架，原文无损
+  S.saveSettings(Object.assign(S.loadSettings(), { customText: '床前明月光，疑是地上霜。' }));
+  const mig = S.migrateCustomTextToShelf();
+  ok(mig.migrated === true && !!mig.entry, '旧的单份文本自动迁入书架');
+  const shelf1 = S.loadShelf();
+  ok(shelf1.length === 1 && shelf1[0].text === '床前明月光，疑是地上霜。',
+    '迁移后正文逐字保留（无损）');
+  ok(S.loadSettings().customText === '床前明月光，疑是地上霜。',
+    '迁移不清空 settings.customText（它仍表示当前要练的那份）');
+  ok(S.loadSettings().shelfMigrated === true, '迁移旗标已落盘');
+
+  // 再跑一次：不重复迁移
+  const mig2 = S.migrateCustomTextToShelf();
+  ok(mig2.migrated === false && S.loadShelf().length === 1, '迁移只做一次');
+
+  // 用户删掉那条条目：不得再被塞回来（删除是明确决定）
+  S.removeShelfEntry(shelf1[0].id);
+  const mig3 = S.migrateCustomTextToShelf();
+  ok(mig3.migrated === false && S.loadShelf().length === 0, '删除后不会被迁移逻辑重新塞回');
+
+  // 增删改
+  const a = S.addShelfEntry({ title: '小说', tags: ['小说', '长文'], text: '第一篇正文' });
+  const b = S.addShelfEntry({ title: '工作', tags: [], text: '第二篇正文' });
+  ok(!!a && !!b && S.loadShelf().length === 2, '可以加多份材料');
+  ok(S.addShelfEntry({ title: '空', text: '   ' }) === null, '空文本不建条目');
+  S.updateShelfEntry(a.id, { title: '小说（改）', tags: ['小说'] });
+  const afterUpd = S.loadShelf().find(e => e.id === a.id);
+  ok(afterUpd.title === '小说（改）' && afterUpd.text === '第一篇正文',
+    '改名不动正文（增删改互不牵连）');
+  ok(S.removeShelfEntry(b.id) === true && S.loadShelf().length === 1, '可删除');
+  ok(S.removeShelfEntry('不存在') === false, '删除不存在的 id 如实返回 false');
+
+  // 按材料统计：速度按时长加权、正确率按字数加权（与总览同口径）
+  S.touchShelfEntry(a.id, { segIndex: 2, segCount: 5 },
+    { totalChars: 20, durationSec: 10, speed: 40, accuracy: 100 });
+  S.touchShelfEntry(a.id, { segIndex: 4, segCount: 5 },
+    { totalChars: 10, durationSec: 20, speed: 70, accuracy: 80 });
+  const entry = S.loadShelf().find(e => e.id === a.id);
+  const avg = S.shelfEntryAverages(entry);
+  ok(entry.stats.sessions === 2, `回写两次 → sessions 2（实际 ${entry.stats.sessions}）`);
+  ok(entry.stats.chars === 30, `字数累计 30（实际 ${entry.stats.chars}）`);
+  ok(Math.abs(avg.avgSpeed - 60) < 0.01,
+    `速度按时长加权 (40*10+70*20)/30=60（实际 ${avg.avgSpeed}）`);
+  ok(Math.abs(avg.avgAccuracy - (100 * 20 + 80 * 10) / 30 * 10) / 10 < 0.01 || Math.abs(avg.avgAccuracy - 93.3) < 0.1,
+    `正确率按字数加权 (100*20+80*10)/30≈93.3（实际 ${avg.avgAccuracy}）`);
+  ok(entry.progress.segIndex === 4 && entry.progress.segCount === 5,
+    '进度记录到第几段（续课 / 续材料用）');
+  ok(entry.lastAt > 0, 'lastAt 已更新（「继续上次材料」靠它）');
+  ok(S.lastShelfEntry().id === a.id, 'lastShelfEntry 返回最近练过的那份');
+}
+
+console.log('\n【18】书架与课程进度纳入备份导入导出');
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  const e1 = S.addShelfEntry({ title: 'A', tags: [], text: '甲材料' });
+  const e2 = S.addShelfEntry({ title: 'B', tags: [], text: '乙材料' });
+  S.touchShelfEntry(e1.id, { segIndex: 1, segCount: 3 }, { totalChars: 10, durationSec: 10, speed: 50, accuracy: 95 });
+  S.saveCourseProgress({ currentId: 'c2-sheng', completed: ['c1-yun'], lessons: { 'c1-yun': { attempts: 2, bestAcc: 88, bestSpeed: 0, bestChars: 20, completedAt: 100 } }, updatedAt: 500 });
+
+  const backup = S.exportAll();
+  ok(Array.isArray(backup.shelf) && backup.shelf.length === 2, '导出包含书架');
+  ok(backup.course && backup.course.currentId === 'c2-sheng', '导出包含课程进度');
+
+  // 模拟另一台设备：本地换新，从备份恢复
+  const ls2 = makeLocalStorage();
+  installWindow(ls2);
+  const S2 = await freshStorage();
+  const res = S2.importAll(JSON.parse(JSON.stringify(backup)));
+  ok(res.ok === true, '备份可导入');
+  const restored = S2.loadShelf();
+  ok(restored.length === 2 &&
+     restored.some(e => e.text === '甲材料') && restored.some(e => e.text === '乙材料'),
+    '两份材料都恢复（无损）');
+  const r1 = restored.find(e => e.id === e1.id);
+  ok(r1 && r1.stats.sessions === 1 && r1.progress.segIndex === 1,
+    '每份材料的进度与统计一起恢复');
+  ok(S2.loadCourseProgress().currentId === 'c2-sheng' &&
+     S2.loadCourseProgress().completed.includes('c1-yun'),
+    '课程进度恢复（续课不重头）');
+
+  // 重复导入同一份备份：幂等（不翻倍、不重复）
+  const before = S2.loadShelf().length;
+  S2.importAll(JSON.parse(JSON.stringify(backup)));
+  ok(S2.loadShelf().length === before, '重复导入不膨胀（幂等）');
+  ok(S2.loadShelf().find(e => e.id === e1.id).stats.sessions === 1,
+    '重复导入后统计不翻倍');
+
+  // 双设备合并：另一台加了一份新材料，同 id 的取「最近动过的」
+  const ls3 = makeLocalStorage();
+  installWindow(ls3);
+  const S3 = await freshStorage();
+  S3.importAll(JSON.parse(JSON.stringify(backup)));
+  S3.addShelfEntry({ title: 'C', tags: [], text: '丙材料' });
+  S3.touchShelfEntry(e1.id, { segIndex: 2, segCount: 3 }, { totalChars: 5, durationSec: 5, speed: 60, accuracy: 100 });
+  const res2 = S2.importAll(S3.exportAll());
+  ok(res2.ok && S2.loadShelf().length === 3, '另一台设备加的材料并入（不丢失）');
+  const merged = S2.loadShelf().find(e => e.id === e1.id);
+  ok(merged.stats.sessions === 2 && merged.progress.segIndex === 2,
+    '同 id 条目取最近动过的（进度不倒退）');
+}
+
+console.log('\n【19】课程进度：晋级判定不过就不前进（不会跳过关键基础）');
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+  const { COURSE, currentLesson, recordLessonAttempt, evaluatePromotion } = await import('../src/core/course.js?ct=1');
+
+  const p0 = S.loadCourseProgress();
+  const first = currentLesson(p0);
+  ok(first && first.id === COURSE[0].id, `课程从第 1 课开始（${first && first.title}）`);
+
+  // 成绩不达标 → 不晋级，下一课仍是同一课
+  const bad = { accuracy: 70, speed: 10, totalChars: 16, keystrokes: 40, durationSec: 10 };
+  const r1 = recordLessonAttempt(COURSE[0].id, bad);
+  ok(r1.attempted === true && r1.promotion.passed === false, '正确率 70% 不达标（需 ≥90%）');
+  ok(r1.next && r1.next.id === COURSE[0].id, '未达标不会跳到下一课（关键基础不跳过）');
+  ok(S.loadCourseProgress().completed.length === 0, 'completed 为空');
+  ok(S.loadCourseProgress().lessons[COURSE[0].id].attempts === 1, 'attempts 记了一次');
+
+  // 达标 → 晋级
+  const good = { accuracy: 95, speed: 25, totalChars: 20, keystrokes: 45, durationSec: 12 };
+  const r2 = recordLessonAttempt(COURSE[0].id, good);
+  ok(r2.promotion.passed === true, '正确率 95% 达标');
+  ok(r2.next && r2.next.id === COURSE[1].id, `晋级到第 2 课（${r2.next && r2.next.title}）`);
+  ok(S.loadCourseProgress().completed.includes(COURSE[0].id), 'completed 已记录');
+
+  // 刷新后（重新 load）currentId 仍是第 2 课 —— 续课
+  ok(S.loadCourseProgress().currentId === COURSE[1].id, '刷新后能续课（currentId 落盘）');
+
+  // 空练习（按键 <5）：不记 attempts，不动进度
+  const before = S.loadCourseProgress().lessons[COURSE[1].id] || { attempts: 0 };
+  const r3 = recordLessonAttempt(COURSE[1].id, { accuracy: 100, speed: 50, totalChars: 2, keystrokes: 3, durationSec: 1 });
+  ok(r3.attempted === false, '空练习不计入进度');
+  ok((S.loadCourseProgress().lessons[COURSE[1].id] || { attempts: 0 }).attempts === (before.attempts || 0),
+    '空练习不改 attempts');
+
+  // 每课题目能用课程参数正常生成（course.params → generateQuestions）
+  const { buildLessonQuestions } = await import('../src/core/course.js?ct=1');
+  const qs = buildLessonQuestions(COURSE[0]);
+  ok(Array.isArray(qs) && qs.length === COURSE[0].params.count,
+    `第 1 课题目按 params.count 生成（${qs.length} 题）`);
+  ok(qs.every(q => q.kind === 'part'), '第 1 课是「认韵母键」题（kind=part，见 LEVELS 的 yun）');
+
+  // 全部完成后：currentLesson 返回 null（毕业）
+  for (const l of COURSE) {
+    S.saveCourseProgress({ completed: COURSE.map(c => c.id) });
+  }
+  const grad = currentLesson(S.loadCourseProgress());
+  ok(grad === null, '全部晋级后 currentLesson 为 null（毕业）');
+  // 晋级条件的边界：恰好等于阈值算过（≥）
+  const edge = evaluatePromotion(COURSE[0], { accuracy: 90, totalChars: 15, keystrokes: 30 });
+  ok(edge.passed === true, '恰好达到阈值视为通过（≥ 语义）');
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 存储层自检全部通过'
   : `❌ 存储层自检共 ${fail} 项未通过`));
