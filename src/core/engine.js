@@ -229,6 +229,14 @@ export class PracticeEngine {
       maxCombo: 0,
       perCharErrors: {},   // charKey -> 错误次数
       perWordErrors: {},   // 整条文本 -> 错误次数（词组/短文，供复习页分组）
+      // 键 -> 错误次数（热力图）。回答「哪个键错得多」
+      keyErrors: {},
+      /* 键位混淆组合：目标键 -> 误按键 -> 次数。
+         与 keyErrors 是**两个不同的问题**：keyErrors 只能告诉你
+         「K 错了 12 次」，据此能做的只有「多练 K」；而这里记录的是
+         「本想按 G，手上却按成了 K」这样的**有向对**，可以直接结成
+         G/K 辨析题。错因不同，处方不同，所以要分开记。 */
+      keyConfusions: {},
       // 键 -> { lead: [ms], follow: [ms] }，按键耗时样本（见 KEY_TIMING）
       keyTimings: {}
     };
@@ -1011,6 +1019,20 @@ export class PracticeEngine {
       this.stats.keyErrors[ek] = (this.stats.keyErrors[ek] || 0) + 1;
     }
 
+    /* 键位混淆组合：记下「目标键 → 实际误按键」这一**有向对**。
+       用大写做键，与存储层 normalizeConfusionMap 的键名规则对齐。
+       引擎侧只负责如实记录，是否值得练、怎么组题交给统计层判断
+       —— 一次手滑不该立刻生成一道辨析题。 */
+    if (expected && key && key !== expected) {
+      const T = String(expected).toUpperCase();
+      const A = String(key).toUpperCase();
+      if (/^[A-Z]$/.test(T) && /^[A-Z]$/.test(A)) {
+        this.stats.keyConfusions = this.stats.keyConfusions || {};
+        const bucket = this.stats.keyConfusions[T] || (this.stats.keyConfusions[T] = {});
+        bucket[A] = (Number(bucket[A]) || 0) + 1;
+      }
+    }
+
     this.emit('error', feedback);
     /* 非严格模式：按错即跳过。推进放在 emit('error') 之后 ——
        UI 的 error 处理器要靠 snapshot() 定位「刚才那个字」，
@@ -1410,6 +1432,7 @@ export class PracticeEngine {
       perCharErrors: Object.assign({}, this.stats.perCharErrors),
       perWordErrors: Object.assign({}, this.stats.perWordErrors || {}),
       keyErrors: Object.assign({}, this.stats.keyErrors || {}),
+      keyConfusions: deepCopyConfusions(this.stats.keyConfusions),
       keyTimings: this.keyTimings(),
       completed: !this.unlimited && this.index >= this.questions.length,
       unlimited: this.unlimited,
@@ -1482,6 +1505,7 @@ export class PracticeEngine {
         perCharErrors: this.stats.perCharErrors,
         perWordErrors: this.stats.perWordErrors || {},
         keyErrors: this.stats.keyErrors || {},
+        keyConfusions: deepCopyConfusions(this.stats.keyConfusions),
         keyTimings: this.keyTimings()
       },
       settings: {
@@ -1545,6 +1569,11 @@ export class PracticeEngine {
         }
         if (st.keyErrors && typeof st.keyErrors === 'object') {
           eng.stats.keyErrors = Object.assign({}, st.keyErrors);
+        }
+        // 混淆组合也要跟着续练现场走，否则中断一次，这一轮前半程
+        // 攒下的混淆样本就丢了 —— 而它正是辨析题的出题依据。
+        if (st.keyConfusions && typeof st.keyConfusions === 'object') {
+          eng.stats.keyConfusions = deepCopyConfusions(st.keyConfusions);
         }
         // 按键耗时样本同样要跟着现场走，否则中断续练会丢掉前半程的数据，
         // 结算面板的「反应最慢的键」只反映续练之后那一段 —— 看起来像
@@ -1620,6 +1649,25 @@ function clampInt(v, min, max) {
   const n = Math.floor(Number(v));
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, n));
+}
+
+/** 深拷贝一份「目标键 → 误按键 → 次数」，剔除非法键名与非正数计数 */
+export function deepCopyConfusions(src) {
+  const out = {};
+  if (!src || typeof src !== 'object' || Array.isArray(src)) return out;
+  for (const [t, inner] of Object.entries(src)) {
+    const T = String(t || '').toUpperCase();
+    if (!/^[A-Z]$/.test(T) || !inner || typeof inner !== 'object') continue;
+    const bucket = {};
+    for (const [a, v] of Object.entries(inner)) {
+      const A = String(a || '').toUpperCase();
+      if (!/^[A-Z]$/.test(A) || A === T) continue;
+      const n = Math.floor(Number(v)) || 0;
+      if (n > 0) bucket[A] = n;
+    }
+    if (Object.keys(bucket).length) out[T] = bucket;
+  }
+  return out;
 }
 
 /**

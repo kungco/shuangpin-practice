@@ -25,7 +25,9 @@ import * as S from './core/storage.js';
 import { summarize, historySeries, dailySeries, scoreSeries, weakRanking, groupWeakItems,
          reviewAdvice, formatDuration, formatClock, keyHeatmap, keySlowness,
          KEY_SLOW_MIN_SAMPLES, recentBaseline, dailyGoalProgress, keyMastery,
-         MASTERY_MIN_SAMPLES, buildWeakPassage } from './core/stats.js';
+         MASTERY_MIN_SAMPLES, buildWeakPassage,
+         keyConfusionRanking, confusionPairs, discriminationDrills, confusionTrend,
+         CONFUSION_MIN_COUNT } from './core/stats.js';
 import { scoreExam, gradeTier, SCORE_CONFIG } from './core/score.js';
 import {
   getKeymapData, splitSyllable, primarySplit, highlightForSplit,
@@ -67,6 +69,10 @@ const app = {
   // true/false = 本轮练习里的临时选择。
   decodeHidden: null,
   stats: { mode: 'all', chartMetric: 'speed', chartRange: '20', dailyDays: 14, heatRange: 'all' },
+  // 本次会话的逐字用时（卡顿分析）。只对书架材料收集 ——
+  // 内置短文练一遍就散了，没有「重练同一篇对比」的对象，
+  // 收集它只是白占 localStorage。
+  slowChars: null,
   saveTimer: null,
   lastResumeSave: 0,
   hint: null,          // 当前提示状态（由引擎 hint / reveal 事件驱动）
@@ -772,6 +778,7 @@ function initShelf() {
       if (act === 'open') openShelfEntry(id);
       else if (act === 'edit') editShelfEntry(id);
       else if (act === 'del') confirmRemoveShelfEntry(id);
+      else if (act === 'slow') showShelfSlow(id);
     });
   }
 
@@ -847,7 +854,20 @@ function renderShelf() {
     delBtn.dataset.id = e.id;
     delBtn.setAttribute('aria-label', `删除 ${e.title}`);
     delBtn.textContent = '删除';
-    actions.append(openBtn, editBtn, delBtn);
+    actions.append(openBtn);
+    /* 卡顿分析：只有练过、且留下逐字用时的材料才有这个入口。
+       没有数据的材料不给按钮 —— 点开只有一句「暂无数据」比不给更糟。 */
+    if (Array.isArray(e.slow) && e.slow.length) {
+      const slowBtn = document.createElement('button');
+      slowBtn.className = 'btn btn-ghost btn-sm';
+      slowBtn.type = 'button';
+      slowBtn.dataset.act = 'slow';
+      slowBtn.dataset.id = e.id;
+      slowBtn.setAttribute('aria-label', `查看 ${e.title} 的卡顿分析`);
+      slowBtn.textContent = '卡顿分析';
+      actions.append(slowBtn);
+    }
+    actions.append(editBtn, delBtn);
 
     li.append(main, actions);
     frag.append(li);
@@ -895,9 +915,95 @@ function editShelfEntry(id) {
   });
 }
 
-/** 打开一份材料：文本进 textarea，并从上次的段继续 */
-function openShelfEntry(id) {
+/**
+ * 卡顿分析弹窗：这份材料里「停顿最长的 5 个位置」，以及和上次的对比。
+ *
+ * 【对着谁说话】用这份材料自己的数据，不掺全局统计 ——
+ * 用户点的是「这篇练得怎么样」，给他全站平均速度是答非所问。
+ *
+ * 【为什么要把「不可比」说得那么清楚】重练时段的起点可能不同、
+ * 上次可能中途退出。数据对不齐的时候给一个「快了 0.3 秒」，
+ * 用户会以为自己在进步，实际上根本没测到。宁可说「还没法对比」。
+ */
+function showShelfSlow(id) {
   const entry = S.loadShelf().find(e => e.id === id);
+  if (!entry) { toast('材料已被删除', 'err'); return; }
+  const a = S.shelfSlowAnalysis(entry, { top: 5, minMs: 900 });
+
+  if (!a.hasData) {
+    openModal(`
+      <h2>卡顿分析</h2>
+      <p class="panel-sub">「${escapeHtml(entry.title)}」还没有逐字用时数据。完整练完一次后，这里会标出停顿最长的位置。</p>
+      <div class="modal-actions"><button class="btn btn-primary" data-act="cancel">知道了</button></div>
+    `, () => {});
+    return;
+  }
+
+  const fmt = (ms) => (ms / 1000).toFixed(2) + 's';
+  const rows = a.slowest.map(s => `
+    <li class="slow-row">
+      <span class="slow-rank">${s.rank}</span>
+      <span class="slow-char">${escapeHtml(s.ch)}</span>
+      <span class="slow-ms">${fmt(s.ms)}</span>
+      <span class="slow-ratio">${s.ratio > 1 ? `比本篇中位数慢 ${s.ratio}×` : '本篇较慢'}</span>
+    </li>`).join('');
+
+  let cmp = '';
+  const c = a.compare;
+  if (!c) {
+    cmp = `<div class="slow-legend-note">这是第一次练习这份材料，下次再练就能对比卡顿位置了。</div>`;
+  } else if (c.segMismatch) {
+    cmp = `<div class="slow-legend-note">上次练的是别的段落，位置对不上，暂不做对比。
+      同一段再练一次就能看出进步。</div>`;
+  } else if (!c.comparable) {
+    cmp = `<div class="slow-legend-note">上次的数据不足以对比（可能中途退出）。再完整练一次即可。</div>`;
+  } else {
+    const d = c.deltaMs;
+    const better = d < 0;
+    const tone = Math.abs(d) < 120 ? '基本持平' : (better ? '比上次快' : '比上次慢');
+    cmp = `
+      <div class="slow-compare ${better ? 'is-better' : (Math.abs(d) < 120 ? '' : 'is-worse')}">
+        <span class="slow-compare-main">整篇平均 ${fmt(c.recentMs)}，${tone}
+          ${Math.abs(d) >= 120 ? ` ${fmt(Math.abs(d))}` : ''}</span>
+        <span class="slow-compare-sub">上次 ${fmt(c.prevMs)}（${new Date(c.prevAt).toLocaleString()}）</span>
+      </div>
+      ${c.sameSpots.length ? `
+        <div class="slow-legend-note" style="margin-top:8px">
+          同一位置比上次更慢的字：
+          ${c.sameSpots.map(s => `<b>${escapeHtml(s.ch)}</b>（${fmt(s.prevMs)} → ${fmt(s.ms)}）`).join('、')}
+        </div>` : `
+        <div class="slow-legend-note" style="margin-top:8px">没有哪个位置比上次明显更慢 —— 稳定性保持得不错。</div>`}
+    `;
+  }
+
+  openModal(`
+    <h2>卡顿分析 · ${escapeHtml(entry.title)}</h2>
+    <p class="panel-sub">
+      逐字用时取「从上一个字打完到这一个字打完」的秒数；
+      参考线是本篇的<b>中位数</b>（对偶尔走神免疫）。已排除每篇第一个字 —— 它含「进入状态」的启动成本。
+    </p>
+    <h3 class="sub-title">最慢的 ${a.slowest.length || 0} 个位置</h3>
+    ${a.slowest.length
+      ? `<ul class="slow-list">${rows}</ul>`
+      : `<div class="slow-legend-note">这一篇没有超过 ${fmt(900)} 的停顿 —— 每个字都很顺。</div>`}
+    <h3 class="sub-title" style="margin-top:18px">与上次对比</h3>
+    ${cmp}
+    <div class="slow-legend-note" style="margin-top:12px">
+      本篇中位数 ${fmt(a.medianMs)} · 平均 ${fmt(a.avgMs)} ·
+      共 ${a.totalChars} 字 · 保存了最近 ${a.sessions} 次（上限 ${S.SHELF_SLOW_SNAPSHOTS} 次）
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-act="cancel">关闭</button>
+      <button class="btn btn-primary" data-act="replay">再练这一篇</button>
+    </div>
+  `, (act, close) => {
+    close();
+    if (act === 'replay') openShelfEntry(entry.id);
+  });
+}
+
+/** 打开一份材料：文本进 textarea，并从上次的段继续 */
+function openShelfEntry(id) {  const entry = S.loadShelf().find(e => e.id === id);
   if (!entry) return;
   const ta = $('#customTextInput');
   if (ta) {
@@ -952,9 +1058,11 @@ function confirmRemoveShelfEntry(id) {
 function touchShelfAfterSession(s) {
   const id = app.shelfActiveId;
   const segBase = app.shelfSegBase || 0;
+  const slowChars = app.slowChars;
   app.shelfActiveId = null;
   app.shelfSegBase = 0;
   app.shelfSegOffset = 0;
+  app.slowChars = null;
   if (!id || s.mode !== 'custom') return;
   const entry = S.loadShelf().find(e => e.id === id);
   if (!entry) return;
@@ -965,10 +1073,25 @@ function touchShelfAfterSession(s) {
   if (cur !== entry.text) return;
   /* 段号要加上**本次开局的基数**：从第 3 段续打又完成了 5 段，
      进度是 8 而不是 5 —— doneQuestions 只数得了本次会话内的。 */
+  const segIndex = segBase + (s.doneQuestions || 0);
   S.touchShelfEntry(id, {
-    segIndex: segBase + (s.doneQuestions || 0),
+    segIndex,
     segCount: segBase + (s.questionCount || 0)
   }, s);
+
+  /* 逐字用时快照（卡顿分析）。与上面的聚合值分开写：
+     聚合值永久累加，明细只留最近 5 次（见 storage 的 SHELF_SLOW_SNAPSHOTS）。
+     段号一起记 —— 对比卡顿位置时必须同一段之间比，否则位置对不上。 */
+  if (Array.isArray(slowChars) && slowChars.length) {
+    try {
+      S.recordShelfSlow(id, slowChars, {
+        segIndex,
+        durationSec: s.durationSec,
+        totalChars: s.totalChars
+      });
+    } catch (err) { console.warn('[shelf] 逐字用时回写失败', err); }
+  }
+
   renderShelf();
 }
 
@@ -1259,6 +1382,8 @@ function saveProgress(force = false) {
   if (app.shelfActiveId) state.shelfId = app.shelfActiveId;
   if (app.courseActiveId) state.courseLessonId = app.courseActiveId;
   if (app.shelfSegBase) state.shelfSegBase = app.shelfSegBase;
+  // 逐字用时跟存档走，否则刷新一次前半程的卡顿数据就没了（见 resumeSession）
+  if (Array.isArray(app.slowChars) && app.slowChars.length) state.slowChars = app.slowChars;
   S.saveResume(state);
   app.lastResumeSave = now;
 }
@@ -1316,6 +1441,9 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
     const shelfSegBase = (mode === 'custom' && app.shelfActiveId) ? (app.shelfSegOffset || 0) : 0;
     app.shelfSegOffset = 0;
     app.shelfSegBase = shelfSegBase;
+    /* 逐字用时收集器：只在「练书架材料」时开（见 app.slowChars 的注释）。
+       每局重新开一个空数组 —— 沿用上一局的会让卡顿位置整体错位。 */
+    app.slowChars = (mode === 'custom' && app.shelfActiveId) ? [] : null;
 
     const unlimited = !preset && count === 0 && mode !== 'exam';
     const generation = {
@@ -1438,6 +1566,13 @@ function resumeSession() {
     }
     app.shelfSegBase = Number.isFinite(Number(saved.shelfSegBase)) ? Math.max(0, Math.floor(Number(saved.shelfSegBase))) : 0;
     app.shelfSegOffset = 0;
+    /* 续练时把存档里的逐字用时接回来。不接的话，中断一次就会丢掉
+       前半程的卡顿数据 —— 而「卡顿位置」正是靠下标对齐做对比的，
+       丢掉前半程会让整篇的位置整体前移，对比结果全错。
+       （引擎的 keyTimings 也踩过同一个坑，见 engine.js 里的注释。） */
+    app.slowChars = (eng.mode === 'custom' && app.shelfActiveId)
+      ? (Array.isArray(saved.slowChars) ? saved.slowChars.slice() : [])
+      : null;
     bindEngineEvents();
     showSessionUI(true);
     ensureMiniKeymap();
@@ -1502,11 +1637,27 @@ function bindEngineEvents() {
     } else announce('按错，请重试。', 'assertive');
   });
 
-  eng.on('unit', ({ target, independent }) => {
+  eng.on('unit', ({ target, independent, seconds }) => {
     // 每个音节/题目完成：记录易错的「正确一次」
     try {
       if (independent && target && target.char) {
         S.recordWeakCorrect({ char: target.char });
+      }
+    } catch (e) { /* 忽略 */ }
+
+    /* 逐字用时（卡顿分析的数据来源）。只收书架材料（见 app.slowChars 的注释）。
+       口径：引擎给的 unitSeconds 是「这个字从上一个字打完到现在」的秒数，
+       与「平均速度」是两回事 —— 前者定位到字，后者只有整篇一个数。
+       单键/拆分题的 target.char 是提示文本而不是正文里的字，跳过它们，
+       否则序列会与正文错位（对比卡顿位置靠下标对齐，错一位全错）。 */
+    try {
+      const collecting = app.slowChars && eng.mode === 'custom' &&
+        (target && (target.kind === 'syllable' || target.kind === 'passage'));
+      if (collecting && target.char) {
+        const ms = Math.round(Math.max(0, Number(seconds) || 0) * 1000);
+        // 只在真正打了字的时候记：0 秒（瞬间完成）没有诊断价值，
+        // 混进去会拉低中位数、让别的字看起来都「卡」
+        if (ms > 0 && ms <= 60000) app.slowChars.push({ ch: target.char, ms });
       }
     } catch (e) { /* 忽略 */ }
   });
@@ -1686,6 +1837,14 @@ function persistRecord(summary) {
       if (s.keyErrors && Object.keys(s.keyErrors).length) {
         // 带上模式：统计页的模式筛选要覆盖热力图，就必须能按模式取数
         S.recordKeyErrors(s.keyErrors, s.mode);
+      }
+
+      /* 键位混淆组合（目标键 → 误按键）。与热力图分开存：
+         热力图说「K 错了 12 次」，这里说「想按 G 却按成 K 8 次」。
+         前者只能推出「多练 K」，后者能直接结成一整套 G/K 辨析题 ——
+         这正是「知道该练什么」和「知道错在哪」的差别。 */
+      if (s.keyConfusions && Object.keys(s.keyConfusions).length) {
+        S.recordKeyConfusions(s.keyConfusions, s.mode);
       }
 
       /* 键维度按键耗时（慢键诊断）。与键错误分开存：一个是「按错」，
@@ -3455,16 +3614,19 @@ function renderHeatmap() {
       }
       /* 慢键层与热力层**独立**：没有错误数据不代表没有耗时数据，
          一并 return 会把「按得慢但一直按对」的用户也显示成「什么都没有」。
-         掌握度层同理 —— 它靠 timings 也能算出「已掌握」。 */
+         掌握度层同理 —— 它靠 timings 也能算出「已掌握」。
+         辨析层同样独立 —— 它自己那张表，与前两层互不影响。 */
       app.heatKeymap.clearSlow();
       renderSlowLayer();
       renderMasteryLayer();
+      renderConfusionLayer();
       return;
     }
 
     app.heatKeymap.setHeat(heat.items);
     renderSlowLayer();
     renderMasteryLayer();
+    renderConfusionLayer();
 
     /* 概览文字 */
     const summary = $('#heatSummary');
@@ -3591,6 +3753,129 @@ function renderMasteryLayer() {
     console.error('[mastery] 渲染失败', err);
     box.innerHTML = '';
     try { app.heatKeymap.clearMastery(); } catch (_) {}
+  }
+}
+
+/**
+ * 错键辨析层：把「想按 G 却按成 K」这种**有向混淆**聚成键对，并给出一键开练。
+ *
+ * 与前三层的关系：
+ *   keyHeatmap  → 「K 错了 12 次」（处方：多练 K）
+ *   keySlowness → 「K 按得慢」（处方：放慢、练手感）
+ *   keyMastery  → 「K 掌握了没有」（进度感）
+ *   **本层**    → 「G 按成了 K 8 次」（处方：把 G/K 拎出来二选一辨析）
+ * 只有这一层能直接变成一组题 —— 前三层都只能告诉你「哪里弱」，
+ * 说不出「怎么练」。这正是用户提这条需求的原话：「能进一步告诉用户具体该怎么练」。
+ */
+function renderConfusionLayer() {
+  const box = $('#confusionBox');
+  if (!box) return;
+  try {
+    const rank = keyConfusionRanking({ range: app.stats.heatRange, mode: app.stats.mode, limit: 0 });
+    const pairs = confusionPairs({ range: app.stats.heatRange, mode: app.stats.mode });
+
+    if (!rank.total) {
+      box.innerHTML = `
+        <div class="slow-legend">
+          <span class="slow-legend-title">错键辨析</span>
+        </div>
+        <div class="slow-legend-note">
+          还没有可分析的错键数据。练习中按错时，应用会记下<b>你本想按哪个键、实际按成了哪个键</b>，
+          攒够几组后这里会指出「这两个键容易混」，并生成只考这两个键的辨析小练习。
+        </div>`;
+      return;
+    }
+
+    // 够格的键对才给「开练」按钮 —— 偶发一次手滑不值得专门练
+    const eligiblePairs = pairs.filter(p => p.eligible);
+    const topPairs = pairs.slice(0, 6);
+
+    box.innerHTML = `
+      <div class="slow-legend">
+        <span class="slow-legend-title">错键辨析（本想按 A，按成了 B）</span>
+        <span class="heat-fallback-note">共 ${rank.total} 次混淆 · 涉及 ${rank.sessions} 次练习</span>
+        ${rank.byMode || app.stats.mode === 'all' ? '' :
+          '<span class="heat-fallback-note">该模式暂无专属数据，此处为全部模式累计</span>'}
+      </div>
+      <div class="confuse-grid">
+        ${topPairs.map(p => {
+          // 方向：哪个键被「按错成」另一个。用箭头表达有向性，
+          // 但标注这个键对整体出现了几次 —— 两个方向合起来才是这一对的问题量。
+          const arrow = p.forward && p.backward
+            ? `${p.a} ⇄ ${p.b}`
+            : (p.forward ? `${p.a} → ${p.b}` : `${p.b} → ${p.a}`);
+          return `
+            <button class="confuse-card${p.eligible ? '' : ' is-thin'}"
+                    data-pair="${escapeHtml(p.pairKey)}"
+                    ${p.eligible ? '' : 'disabled aria-disabled="true"'}
+                    title="${p.eligible ? '只练这两个键的辨析' : `仅 ${p.count} 次，攒到 ${CONFUSION_MIN_COUNT} 次即可开练`}">
+              <span class="confuse-card-pair">${escapeHtml(arrow)}</span>
+              <span class="confuse-card-num">${p.count} 次</span>
+              <span class="confuse-card-go">${p.eligible ? '开练 →' : `攒到 ${CONFUSION_MIN_COUNT} 次`}</span>
+            </button>`;
+        }).join('')}
+      </div>
+      ${eligiblePairs.length ? `
+        <div class="confuse-actions">
+          <button class="btn btn-primary btn-sm" id="btnConfuseDrill">
+            练这 ${eligiblePairs.length} 组混淆（${Math.min(eligiblePairs.length, 3) * 6} 题）
+          </button>
+        </div>` : `
+        <div class="confuse-actions">
+          <span class="heat-fallback-note">
+            还没有攒够 ${CONFUSION_MIN_COUNT} 次的键对。偶发的手滑不用专门练，再多打几轮就能识别出真正的习惯性混淆。
+          </span>
+        </div>`}
+      <div class="slow-legend-note">
+        口径：只记录「<b>本该按的键 → 实际按错的键</b>」这一有向组合；同一对键的两个方向会合并成一组来练
+        （「G 按成 K」和「K 按成 G」练的都是 G/K 的区别）。够 ${CONFUSION_MIN_COUNT} 次才建议专项开练 ——
+        一次手滑是偶然，反复出现才是习惯。
+      </div>`;
+
+    // 单组开练
+    box.querySelectorAll('.confuse-card:not(.is-thin)').forEach(card => {
+      card.addEventListener('click', () => {
+        startConfusionDrill([card.getAttribute('data-pair')]);
+      });
+    });
+    const allBtn = $('#btnConfuseDrill');
+    if (allBtn) {
+      allBtn.addEventListener('click', () => {
+        startConfusionDrill(eligiblePairs.map(p => p.pairKey));
+      });
+    }
+  } catch (err) {
+    console.error('[confusion] 渲染失败', err);
+    box.innerHTML = '';
+  }
+}
+
+/**
+ * 用指定的键对开一局「错键辨析」。
+ *
+ * 复用现有引擎与 startSession —— 不另造一套出题/判分系统。
+ * 题目由 stats.discriminationDrills() 生成，是标准的 key 类题，
+ * 引擎照常跑，只是每道题的答案被限制在这一对键里。
+ *
+ * @param {string[]} pairKeys 形如 ['G|K','D|T'] 的键对标识（空数组 = 用全部够格的）
+ */
+function startConfusionDrill(pairKeys) {
+  try {
+    const all = confusionPairs({ range: app.stats.heatRange, mode: app.stats.mode });
+    const wanted = Array.isArray(pairKeys) && pairKeys.length
+      ? new Set(pairKeys) : new Set(all.filter(p => p.eligible).map(p => p.pairKey));
+    const chosen = all.filter(p => wanted.has(p.pairKey));
+    if (!chosen.length) {
+      toast(`还没有攒够 ${CONFUSION_MIN_COUNT} 次的混淆键对，再多打几轮`, 'err');
+      return;
+    }
+    // 最多取 3 对（3 × 6 = 18 题）—— 一次练太多对反而每对都练不透
+    const { questions } = discriminationDrills(chosen, { perPair: 6, maxPairs: 3, onlyEligible: false });
+    if (!questions.length) { toast('暂时生成不出辨析题', 'err'); return; }
+    startSession(questions, 'confuse', { durationSec: 0 });
+  } catch (err) {
+    console.error('[confusion] 开练失败', err);
+    toast('无法开始辨析练习：' + (err && err.message ? err.message : '未知错误'), 'err');
   }
 }
 

@@ -1256,6 +1256,51 @@ textarea:focus {
 }
 .slow-legend-note b { color: var(--text-2); }
 
+/* ---------------- 错键辨析（本想按 A，按成了 B）----------------
+   第四层诊断，也是唯一能给出「处方」的一层：热力图说「K 错了 12 次」，
+   这里说「G 按成了 K」，后者能直接变成一组题。
+   视觉上用「卡片 + 箭头」把有向对说清楚，再给一个开练按钮。 */
+
+.confuse-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 8px;
+}
+
+.confuse-card {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 13px;
+  border: 1.5px solid var(--border);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  transition: border-color .14s, background .14s, transform .1s;
+}
+.confuse-card:hover:not([disabled]) {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.confuse-card:active:not([disabled]) { transform: translateY(1px); }
+.confuse-card[disabled] { cursor: default; opacity: .6; }
+
+.confuse-card-pair {
+  font-family: var(--mono); font-size: 15px; font-weight: 700;
+  color: var(--primary); white-space: nowrap;
+}
+.confuse-card-num {
+  font-size: 12px; color: var(--text-3); margin-left: auto; white-space: nowrap;
+}
+.confuse-card-go {
+  font-size: 11.5px; color: var(--text-2); white-space: nowrap;
+}
+.confuse-card:hover:not([disabled]) .confuse-card-go { color: var(--primary); }
+
+.confuse-actions { margin-top: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
 /* ---------------- 结算面板：反应最慢的键 ---------------- */
 
 .slow-block { margin-top: 20px; }
@@ -1289,6 +1334,38 @@ textarea:focus {
   font-size: 11.5px; line-height: 1.65; color: var(--text-3);
 }
 .slow-block-note strong, .slow-block-note b { color: var(--text-2); }
+
+/* ---------------- 卡顿分析（书架材料的逐字用时）----------------
+   与「反应最慢的键」共用 .slow-row 的外壳，但列的是**字**而不是键，
+   所以左右两块内容不同：序号 + 字 + 用时 + 相对本篇中位数的倍率。 */
+
+.slow-rank {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  color: var(--text-3); min-width: 16px; text-align: right;
+}
+.slow-char {
+  font-size: 18px; font-weight: 700;
+  color: var(--slow);
+  background: var(--slow-soft);
+  border-radius: 5px; padding: 1px 10px;
+  min-width: 34px; text-align: center;
+}
+.slow-ratio { font-size: 11.5px; color: var(--text-3); margin-left: auto; }
+
+/* 与上次对比：变好/变差用颜色区分，但**同时**给出数值 ——
+   只靠颜色表达结论在色觉障碍下会失效（与热力图同一原则）。 */
+.slow-compare {
+  padding: 10px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.slow-compare.is-better { border-color: var(--ok); background: var(--ok-soft); }
+.slow-compare.is-worse { border-color: var(--err); background: var(--err-soft); }
+.slow-compare-main { display: block; font-size: 13px; font-weight: 700; color: var(--text); }
+.slow-compare.is-better .slow-compare-main { color: var(--ok); }
+.slow-compare.is-worse .slow-compare-main { color: var(--err); }
+.slow-compare-sub { display: block; margin-top: 4px; font-size: 11.5px; color: var(--text-3); }
 
 /* ---- 本轮对照（与最近 N 轮同模式练习比）----
    放在指标卡正下方，因为它解释的正是上面那些数字「算好还是算差」。

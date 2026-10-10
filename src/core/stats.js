@@ -10,7 +10,8 @@
  */
 
 import { loadHistory, loadDaily, getWeakList, dateStr, getKeyErrorTotals,
-         getKeyTimings, median } from './storage.js';
+         getKeyTimings, getKeyConfusions, loadKeyConfusions, keyConfusionGrandTotal,
+         median } from './storage.js';
 import { LEVEL_MAP } from './questions.js';
 
 /* ============================================================
@@ -837,6 +838,260 @@ export function buildWeakPassage(items, opts = {}) {
   const chars = picked.reduce((n, w) => n + Array.from(w).length, 0);
 
   return { text, count: picked.length, chars };
+}
+
+/* ============================================================
+   错键辨析（「本想按 G，却按成了 K」）
+   ------------------------------------------------------------
+   与 keyHeatmap 的分工（两者共用键盘图，但回答不同问题）：
+     keyHeatmap     —— 哪些键**错得多**（给处方：多练这个键）
+     keyConfusions  —— 错成了**哪个键**（给处方：把这两个键拎出来辨析）
+   前者只能推出「多练 K」，后者能推出「G/K 分不清，得成对练」。
+
+   这一层的核心产出是 `discriminationDrills()`：把统计结果直接变成
+   一选题组 —— 引擎照常跑，只是题目内容是「这两个键怎么区分」。
+   ============================================================ */
+
+/** 一组混淆至少出现过几次，才值得单独出题 */
+export const CONFUSION_MIN_COUNT = 3;
+
+/**
+ * 混淆组合排行。
+ *
+ * 每个组合给一个 `share`（占全部混淆的比例）和一个 `pairKey`
+ * （`G|K`，两个键按字母序，供 UI 去重 —— 「G→K」和「K→G」是同一对键
+ * 的两个方向，出题时是一回事，但统计上要分开看方向）。
+ *
+ * @param {object} opts
+ *   - range: 'all' | '30' | '10'
+ *   - mode:  'all' 或具体模式
+ *   - limit: 最多返回多少组
+ *   - minCount: 至少出现几次（默认 CONFUSION_MIN_COUNT）
+ * @returns {{items:Array, total:number, sessions:number, byMode:boolean,
+ *           grandTotal:number, minCount:number}}
+ */
+export function keyConfusionRanking(opts = {}) {
+  const range = ['all', '30', '10'].includes(String(opts.range)) ? String(opts.range) : 'all';
+  const minCount = Math.max(1, Math.floor(Number(opts.minCount)) || CONFUSION_MIN_COUNT);
+  const limit = Math.max(0, Math.floor(Number(opts.limit)) || 0);
+
+  const res = getKeyConfusions(range, opts.mode || 'all', 0);
+  const total = Math.max(0, num(res.total));
+
+  const items = (res.pairs || []).map(p => {
+    const target = String(p.target || '').toUpperCase();
+    const actual = String(p.actual || '').toUpperCase();
+    const count = Math.max(0, Math.floor(num(p.count)));
+    return {
+      target,
+      actual,
+      count,
+      // 两个键按字母序拼，作为「这一对键」的稳定标识（方向无关）
+      pairKey: [target, actual].sort().join('|'),
+      share: total > 0 ? Math.round((count / total) * 1000) / 10 : 0,
+      // 够不够格单独出题。UI 用它区分「主要问题」和「偶发手滑」
+      eligible: count >= minCount
+    };
+  }).filter(it => /^[A-Z]$/.test(it.target) && /^[A-Z]$/.test(it.actual) && it.count > 0)
+    .sort((a, b) => b.count - a.count || a.target.localeCompare(b.target) || a.actual.localeCompare(b.actual));
+
+  return {
+    items: limit > 0 ? items.slice(0, limit) : items,
+    total,
+    sessions: Math.max(0, num(res.sessions)),
+    byMode: res.byMode === true,
+    // 全量总次数（不受当前 range/mode 影响），UI 用来判断「有没有数据可看」
+    grandTotal: keyConfusionGrandTotal(),
+    minCount
+  };
+}
+
+/**
+ * 把混淆组合聚成「键对」—— 同一对键的两个方向合并。
+ *
+ * 为什么必须合并才能出题：
+ *   统计上「想按 G 按成 K」和「想按 K 按成 G」是两个不同的信号
+ *   （前者说明 G 的位置记成了 K，后者反过来），所以明细分开记、分开排。
+ *   但**练习**的时候，这两个是同一件事 —— 都练「G 和 K 的区别」。
+ *   给用户看「G/K 混淆 11 次」比拆成 8 + 3 更好懂，出的题也一样。
+ *
+ * @returns {Array<{a:string, b:string, pairKey:string, count:number,
+ *                  forward:number, backward:number}>} 按总次数降序
+ */
+export function confusionPairs(opts = {}) {
+  const rank = keyConfusionRanking(Object.assign({}, opts, { limit: 0 }));
+  const byPair = new Map();
+  for (const it of rank.items) {
+    let rec = byPair.get(it.pairKey);
+    if (!rec) {
+      const [a, b] = it.pairKey.split('|');
+      rec = { a, b, pairKey: it.pairKey, count: 0, forward: 0, backward: 0 };
+      byPair.set(it.pairKey, rec);
+    }
+    rec.count += it.count;
+    // 方向：a 是小字母序的那个，forward 表示 a→b
+    if (it.target === rec.a) rec.forward += it.count;
+    else rec.backward += it.count;
+  }
+  const minCount = Math.max(1, Math.floor(Number(opts.minCount)) || CONFUSION_MIN_COUNT);
+  return Array.from(byPair.values())
+    .map(r => Object.assign(r, { eligible: r.count >= minCount }))
+    .sort((x, y) => y.count - x.count || x.pairKey.localeCompare(y.pairKey));
+}
+
+/** 输入是否像「同一声母/韵母类」的键 —— 用于给辨析题拟更贴切的提示语 */
+function confusionHint(a, b) {
+  return `这两个键容易混：${a} 和 ${b}。它们位置相近或形状相像，按错多半是手感问题，慢一点、看清楚再按。`;
+}
+
+/**
+ * 生成「两键辨析」小练习。
+ *
+ * 产出的是标准的 Question 数组（与 questions.js 同构），可以直接喂给
+ * PracticeEngine 跑 —— 不另造一套出题系统。每道题形如：
+ *   { kind: 'key', answerKeys: ['G'], promptText: 'G', role: 'confuse', meta: {...} }
+ *
+ * 【为什么是「只考这两个键」】用户选择的口径就是只在这对键里辨析。
+ * 加进第三个键会让「是不是混淆」变成「是不是不熟」，测不出真正的进步；
+ * 而两个键二选一，正确率就直接反映这对键分不分得清。
+ *
+ * 【怎么保证两个键都被练到】只出「a→b 方向错得多」的那一侧会漏掉另一半。
+ * 所以按键对里两个键**各出一半**的题，且顺序交替 —— 否则用户会发现
+ * 「前一半全是 G」，靠位置猜。
+ *
+ * @param {Array} pairs confusionPairs() 的结果（或 keyConfusionRanking().items）
+ * @param {object} [opts]
+ *   - perPair: 每对键出多少题（默认 6）
+ *   - maxPairs: 最多取几对（默认 3）
+ *   - onlyEligible: 是否只取够格的（默认 true）
+ * @returns {{questions:Array, pairs:Array, count:number}}
+ */
+export function discriminationDrills(pairs, opts = {}) {
+  const list = Array.isArray(pairs) ? pairs : [];
+  const perPair = Math.max(2, Math.floor(Number(opts.perPair)) || 6);
+  const maxPairs = Math.max(1, Math.floor(Number(opts.maxPairs)) || 3);
+  const onlyEligible = opts.onlyEligible !== false;
+
+  // 统一成键对形态：既接受 confusionPairs() 的 {a,b}，也接受 ranking 的 {target,actual}
+  const normalized = list.map(p => {
+    if (!p) return null;
+    if (p.a && p.b) return { a: p.a, b: p.b, count: p.count || 0 };
+    const t = String(p.target || '').toUpperCase();
+    const c = String(p.actual || '').toUpperCase();
+    if (!/^[A-Z]$/.test(t) || !/^[A-Z]$/.test(c) || t === c) return null;
+    const [a, b] = [t, c].sort();
+    return { a, b, count: p.count || 0 };
+  }).filter(Boolean);
+
+  const picked = (onlyEligible ? normalized.filter(p => p.count >= CONFUSION_MIN_COUNT) : normalized)
+    .slice(0, maxPairs);
+
+  const questions = [];
+  const usedPairs = [];
+  for (const p of picked) {
+    usedPairs.push({ a: p.a, b: p.b, count: p.count, hint: confusionHint(p.a, p.b) });
+    // 交替出题，保证两个键各练到、且不按位置成组
+    for (let i = 0; i < perPair; i++) {
+      const key = i % 2 === 0 ? p.a : p.b;
+      questions.push({
+        /* id 必须有：startSession() 用它判断「传进来的是不是题目数组」，
+           缺失时预设会被静默丢弃、回落到通用出题器 —— 用户点了「练 G/K 辨析」，
+           拿到的却是一套 50 题的单字练习，且看不出哪里不对。 */
+        id: `confuse:${p.a}${p.b}:${i}`,
+        kind: 'key',
+        answerKeys: [key],
+        promptText: key,
+        role: 'confuse',
+        meta: {
+          confuse: true,
+          pair: `${p.a}${p.b}`,
+          peer: key === p.a ? p.b : p.a,
+          hint: confusionHint(p.a, p.b)
+        }
+      });
+    }
+  }
+  // 打散：上面是按对成块的，直接跑会让用户连续 3 题都在同一对键上
+  shuffle(questions);
+
+  return { questions, pairs: usedPairs, count: questions.length };
+}
+
+/** Fisher–Yates；用 Math.random 即可 —— 这里不追求可复现 */
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/**
+ * 对比「这组混淆有没有减少」：拿最近 N 次里涉及该键对的次数，
+ * 与更早一段做对照。给结算面板和统计页用。
+ *
+ * 【为什么用「每场平均」而不是总次数】练习总量在变（某天练了 5 场、
+ * 某天只练 1 场），直接比次数会把「练得多」读成「错得多」。
+ * 除以场次得到「每场平均错几次」，才是可比的强度指标。
+ *
+ * @param {string} pairKey '|' 连接的键对（confusionPairs 的 pairKey）
+ * @param {object} opts
+ *   - window: 每侧取多少次会话（默认 10）
+ * @returns {{recent:number, previous:number, recentPerSession:number,
+ *           previousPerSession:number, delta:number, sessions:number}}
+ */
+export function confusionTrend(pairKey, opts = {}) {
+  const key = String(pairKey || '');
+  const window = Math.max(1, Math.floor(Number(opts.window)) || 10);
+  const sessions = loadKeyConfusions().recent || [];
+
+  const countIn = (list) => {
+    let n = 0;
+    for (const s of list) {
+      const pairs = (s && s.pairs) || {};
+      for (const [T, inner] of Object.entries(pairs)) {
+        for (const [A, c] of Object.entries(inner || {})) {
+          if ([T, A].sort().join('|') === key) n += Math.max(0, num(c));
+        }
+      }
+    }
+    return n;
+  };
+
+  const total = sessions.length;
+  const cut = Math.max(0, total - window);
+  const recentList = sessions.slice(cut);
+  const prevList = sessions.slice(Math.max(0, cut - window), cut);
+
+  const recent = countIn(recentList);
+  const previous = countIn(prevList);
+  const rPer = recentList.length ? recent / recentList.length : 0;
+  const pPer = prevList.length ? previous / prevList.length : 0;
+
+  return {
+    recent,
+    previous,
+    // 与 delta 同为 -1 / 0 / +1 的语义：-1 变好、+1 变差、0 持平。
+    // UI 直接用它决定文案，不必自己判断符号。
+    direction: rPer < pPer ? -1 : rPer > pPer ? 1 : 0,
+    recentSessions: recentList.length,
+    previousSessions: prevList.length,
+    recentPerSession: Math.round(rPer * 100) / 100,
+    previousPerSession: Math.round(pPer * 100) / 100,
+    /* 负数 = 变少了（好事）。
+       两侧都要有**这一对键的**数据才叫「可比」。只判断「两侧都有会话」
+       是不够的：上一段压根没出现过这一对键时（previous=0），
+       谈「减少到 0」没有意义 —— 那只能说明这对键是最近才冒出来的，
+       更该说的是「新出现的混淆」，而不是「你进步了」。
+       会话数仍一并给出，UI 可据此区分「还没练够」和「确实消除了」。 */
+    delta: Math.round((rPer - pPer) * 100) / 100,
+    comparable: prevList.length > 0 && recentList.length > 0 && previous > 0 && recent > 0,
+    // 上一段没出现过、这一段出现了 —— 新冒出来的混淆，值得点名
+    isNew: previous === 0 && recent > 0,
+    // 上一段出现过、这一段没有了 —— 消除掉了
+    isGone: previous > 0 && recent === 0,
+    sessions: recentList.length
+  };
 }
 
 /* ============================================================

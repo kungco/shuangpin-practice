@@ -240,6 +240,38 @@ ok(!!app, '应用实例已暴露');
     '编辑资料保留原文与既有统计');
   ok(qa('#shelfList .shelf-item-meta').some(el => /复习、短文、每日/.test(el.textContent)),
     '标签显示在书架列表');
+
+  /* ---- 卡顿分析入口 ----
+     没有逐字用时的材料不给「卡顿分析」按钮（点开只有「暂无数据」比不给更糟），
+     记过一次之后按钮出现，且弹窗内容真的来自这份材料的数据。 */
+  ok(!q(`#shelfList [data-id="${entry.id}"][data-act="slow"]`),
+    '没练过的材料不给「卡顿分析」按钮');
+
+  sMod.recordShelfSlow(entry.id, [
+    { ch: '书', ms: 1200 }, { ch: '架', ms: 300 }, { ch: '编', ms: 1600 }, { ch: '辑', ms: 280 }
+  ], { segIndex: 0, durationSec: 4, totalChars: 4 });
+  H.rerenderShelf ? H.rerenderShelf() : fire(q('#btnShelfSave'), 'click');
+  await settle();
+
+  const slowBtn = q(`#shelfList [data-id="${entry.id}"][data-act="slow"]`);
+  ok(!!slowBtn, '★ 有逐字用时后出现「卡顿分析」入口');
+
+  if (slowBtn) {
+    fire(slowBtn, 'click');
+    await settle();
+    ok(!q('#overlay').hidden, '点击后打开卡顿分析弹窗');
+    const modalText = q('#modal').textContent;
+    ok(/最慢的/.test(modalText), '弹窗列出「最慢的位置」');
+    // '书' 是这一篇的第一个字（含启动成本），必须被排除；'编' 才是真卡顿
+    ok(/编/.test(modalText), '弹窗列出实际停顿的字（编）');
+    ok(!/书/.test(modalText.split('最慢的')[1] || ''),
+      '★ 首字（书）不出现在最慢列表里 —— 它是启动成本而不是卡顿');
+    ok(/第一次练习这份材料/.test(modalText),
+      '只有一次记录时如实说「下次才能对比」，而不是编一个 0 变化');
+    fire(q('#modal [data-act="cancel"]'), 'click');
+    await settle();
+  }
+
   sMod.removeShelfEntry(entry.id);
   app.shelfActiveId = null;
 }
@@ -1466,6 +1498,62 @@ console.log('\n【10g】键位掌握度：三层标记共存');
   // 竖条也挂在覆盖层里，同样不能留残影（否则会「有竖条但没等级」）
   ok(q('#heatWrap').querySelectorAll('.kb-heat-pips').length === 0,
     '清空数据后等级竖条一并撤掉（无残影）');
+
+  /* ============================================================
+     错键辨析层（统计页第四层诊断）：从数据 → 卡片 → 一键开练
+     ============================================================
+     这一层最容易出的问题是「数据算对了但界面接不上」——
+     上一轮 renderSession 的 emit 吞参数就是这个教训：代码齐全、
+     单元测试全绿、功能一点没生效。所以这里走真实入口驱动到底。 */
+  console.log('\n【新增】错键辨析层：卡片渲染与一键开练');
+
+  sMod.clearKeyConfusions();
+  sMod.recordKeyConfusions({ G: { K: 8 } }, 'char');
+  sMod.recordKeyConfusions({ K: { G: 2 } }, 'char');   // 反向
+  sMod.recordKeyConfusions({ D: { T: 1 } }, 'char');   // 不够格
+  fire(q('[data-view="stats"]'), 'click');
+  await settle();
+
+  ok(!!q('#confusionBox'), '统计页有错键辨析块 #confusionBox');
+  const confBox = q('#confusionBox');
+  ok(/错键辨析/.test(confBox.textContent), '辨析块有标题');
+
+  const cards = Array.from(confBox.querySelectorAll('.confuse-card'));
+  ok(cards.length === 2, `两组键对都渲染成卡片（实际 ${cards.length}）`);
+
+  // 两个方向必须合并成一对：G|K 而不是 G→K、K→G 两张卡
+  const gkCard = cards.find(c => c.getAttribute('data-pair') === 'G|K');
+  ok(!!gkCard, '★ 两个方向合并成一张 G|K 卡片（不是两张）');
+  ok(/10 次/.test(gkCard.textContent), `合并后次数 = 8 + 2（卡片文本「${gkCard.textContent.trim().slice(0, 30)}」）`);
+
+  // 不够格的卡片禁用且不给「开练」
+  const dtCard = cards.find(c => c.getAttribute('data-pair') === 'D|T');
+  ok(dtCard && dtCard.hasAttribute('disabled'), '★ 只有 1 次的键对卡片被禁用（不该引导用户练偶发手滑）');
+
+  // 一键开练：走真实按钮，引擎必须真的起来且答案是这两个键
+  const drillBtn = q('#btnConfuseDrill');
+  ok(!!drillBtn, '有「练这几组混淆」按钮');
+  fire(drillBtn, 'click');
+  await settle();
+
+  const eng = app.engine;
+  ok(!!eng && eng.state === 'running', '★ 点击后练习真的开始了（引擎 state=running）');
+  ok(eng.mode === 'confuse', `会话模式是 confuse（实际 ${eng.mode}）`);
+  const qs = eng.questions;
+  ok(qs.length === 6, `1 组够格键对 × 6 题（实际 ${qs.length}）`);
+  const answers = qs.map(x => x.answerKeys[0]);
+  ok(answers.every(k => k === 'G' || k === 'K'),
+    `★ 题目答案只在 G/K 这一对里（实际 ${[...new Set(answers)].join('/')}）`);
+  ok(answers.filter(k => k === 'G').length === 3 && answers.filter(k => k === 'K').length === 3,
+    '两个键各出 3 题（不会一边倒）');
+
+  // 结算页要能如实报出「这是辨析练习」
+  ok(qMod.LEVEL_MAP[eng.mode] && qMod.LEVEL_MAP[eng.mode].name === '错键辨析',
+    'mode 在 LEVEL_MAP 里有正经显示名');
+
+  eng.destroy();
+  app.engine = null;
+  sMod.clearKeyConfusions();
 
   // 恢复现场
   app.stats.heatRange = 'all';

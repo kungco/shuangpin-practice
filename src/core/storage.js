@@ -16,6 +16,7 @@ export const KEYS = {
   daily: `${NS}.daily`,         // 按日期聚合
   weak: `${NS}.weak`,           // 易错字词
   keyErrors: `${NS}.keyErrors`, // 键维度错误次数（错误热力图用）
+  keyConfusions: `${NS}.keyConfusions`, // 键位混淆组合：目标键 → 误按键（辨析练习用）
   keyTimings: `${NS}.keyTimings`, // 键维度按键耗时样本（慢键诊断用）
   resume: `${NS}.resume`,       // 未完成的练习现场
   device: `${NS}.device`,       // 错题计数的设备来源（不随备份覆盖）
@@ -1144,6 +1145,226 @@ export function clearKeyErrors() {
 }
 
 /* ============================================================
+   键位混淆组合（「本想按哪个，实际按成了哪个」）
+   ------------------------------------------------------------
+   为什么 keyErrors 不够：
+     keyErrors 回答的是「K 键按错了 12 次」—— 这告诉不了用户**该怎么办**。
+     看到「K 错得多」，能做的只有「多练 K」；但错因可能是 G 和 K 分不清，
+     也可能纯粹是手滑。前者需要**成对辨析**，后者需要放慢速度，策略完全不同。
+
+   所以这张表记录的是**有向对**：目标键 → 误按键。
+     { G: { K: 8, D: 3 },  H: { J: 5 } }
+     读作「想按 G 时按成了 K，8 次」。这是可以直接变成练习题的形态 ——
+     G/K 这一对拎出来单练，就是一组辨析题。
+
+   结构与 keyErrors 同构（all / byMode / recent），好处是统计页的
+   模式筛选、「近 N 次」范围切换能直接复用同一套写法与文案，
+   不必为它单独设计一套交互。
+   ============================================================ */
+
+/** 明细最多保留多少次会话（与 keyErrors 对齐） */
+const KEY_CONFUSION_RECENT_MAX = 60;
+/** 按模式的累计表上限 */
+const KEY_CONFUSION_MODES_MAX = 12;
+/** 单个目标键最多记住多少个「误按对象」——防止脏数据或极端手滑把它撑爆 */
+const KEY_CONFUSION_TARGETS_MAX = 12;
+
+/** 合法键名：单个大写字母 */
+const CONFUSION_KEY_RE = /^[A-Z]$/;
+
+/**
+ * 规范化一张「目标键 → 误按键计数」表。
+ * 丢弃非法键名与非法计数，并给每个目标键的误按对象数量设上限。
+ * @returns {object} 干净的 { G: { K: 8 }, ... }
+ */
+function normalizeConfusionMap(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [tgt, inner] of Object.entries(raw)) {
+    const T = String(tgt || '').toUpperCase();
+    if (!CONFUSION_KEY_RE.test(T)) continue;
+    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) continue;
+    const bucket = {};
+    // 先收集再排序截断：脏数据里可能有许多零碎对象，
+    // 保留次数最多的那几个才是用户真正需要看的
+    const items = [];
+    for (const [act, v] of Object.entries(inner)) {
+      const A = String(act || '').toUpperCase();
+      if (!CONFUSION_KEY_RE.test(A)) continue;
+      if (A === T) continue;                 // 按错成自己不算混淆（引擎不该产生，防脏数据）
+      const n = Math.floor(Number(v));
+      if (!Number.isFinite(n) || n <= 0) continue;
+      items.push([A, n]);
+    }
+    if (!items.length) continue;
+    items.sort((a, b) => b[1] - a[1]);
+    for (const [A, n] of items.slice(0, KEY_CONFUSION_TARGETS_MAX)) {
+      bucket[A] = n;
+    }
+    out[T] = bucket;
+  }
+  return out;
+}
+
+export function loadKeyConfusions() {
+  const obj = readJSON(KEYS.keyConfusions, null);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { all: {}, byMode: {}, recent: [] };
+  }
+  const all = normalizeConfusionMap(obj.all);
+  const byMode = {};
+  if (obj.byMode && typeof obj.byMode === 'object' && !Array.isArray(obj.byMode)) {
+    for (const [mode, m] of Object.entries(obj.byMode)) {
+      const clean = normalizeConfusionMap(m);
+      if (Object.keys(clean).length) byMode[String(mode)] = clean;
+    }
+  }
+  const recent = Array.isArray(obj.recent)
+    ? obj.recent.filter(s => s && typeof s === 'object').map(s => ({
+        ts: Number(s.ts) || 0,
+        mode: typeof s.mode === 'string' ? s.mode : '',
+        pairs: normalizeConfusionMap(s.pairs),
+      })).filter(s => Object.keys(s.pairs).length)
+    : [];
+  return { all, byMode, recent };
+}
+
+/**
+ * 累积一次会话的键位混淆。
+ *
+ * @param {object} confusions { G: { K: 2 }, ... } —— 目标键 → 误按键计数
+ * @param {string} [mode] 本次模式，供统计页按模式筛选
+ * @returns {boolean} 是否写入成功
+ */
+export function recordKeyConfusions(confusions, mode = '') {
+  const clean = normalizeConfusionMap(confusions);
+  if (!Object.keys(clean).length) return false;
+
+  let total = 0;
+  for (const inner of Object.values(clean)) {
+    for (const n of Object.values(inner)) total += n;
+  }
+  if (!total) return false;
+
+  try {
+    const data = loadKeyConfusions();
+    const addInto = (dst, src) => {
+      for (const [T, inner] of Object.entries(src)) {
+        const bucket = (dst[T] && typeof dst[T] === 'object') ? dst[T] : {};
+        for (const [A, n] of Object.entries(inner)) {
+          bucket[A] = (Number(bucket[A]) || 0) + n;
+        }
+        dst[T] = bucket;
+      }
+    };
+
+    addInto(data.all, clean);
+
+    const modeKey = String(mode || '').trim();
+    if (modeKey) {
+      const bucketMap = (data.byMode[modeKey] && typeof data.byMode[modeKey] === 'object')
+        ? data.byMode[modeKey] : {};
+      addInto(bucketMap, clean);
+      data.byMode[modeKey] = bucketMap;
+      const names = Object.keys(data.byMode);
+      if (names.length > KEY_CONFUSION_MODES_MAX) {
+        names.filter(nm => nm !== modeKey).slice(0, names.length - KEY_CONFUSION_MODES_MAX)
+          .forEach(nm => delete data.byMode[nm]);
+      }
+    }
+
+    data.recent.push({ ts: Date.now(), pairs: clean, total, mode: modeKey });
+    if (data.recent.length > KEY_CONFUSION_RECENT_MAX) {
+      data.recent = data.recent.slice(data.recent.length - KEY_CONFUSION_RECENT_MAX);
+    }
+
+    // 每个目标键的误按对象数也要收敛 —— 累计久了会越攒越多
+    for (const T of Object.keys(data.all)) {
+      const entries = Object.entries(data.all[T] || {});
+      if (entries.length > KEY_CONFUSION_TARGETS_MAX) {
+        entries.sort((a, b) => b[1] - a[1]);
+        data.all[T] = Object.fromEntries(entries.slice(0, KEY_CONFUSION_TARGETS_MAX));
+      }
+    }
+
+    return writeJSON(KEYS.keyConfusions, data);
+  } catch (err) {
+    console.warn('[storage] 键位混淆记录失败', err && err.message);
+    return false;
+  }
+}
+
+/**
+ * 取某个范围的混淆组合，按次数降序排好。
+ *
+ * @param {string} range 'all' | '30' | '10'
+ * @param {string} [mode] 按模式过滤
+ * @param {number} [limit] 最多返回多少组
+ * @returns {{pairs:Array<{target:string,actual:string,count:number}>, sessions:number, total:number, byMode:boolean}}
+ */
+export function getKeyConfusions(range = 'all', mode = 'all', limit = 0) {
+  const data = loadKeyConfusions();
+  const acc = {};   // `${T}>${A}` -> count
+  let sessions = 0;
+  let byMode = false;
+  const wantMode = mode && mode !== 'all' ? String(mode) : '';
+
+  const merge = (map) => {
+    for (const [T, inner] of Object.entries(map || {})) {
+      for (const [A, n] of Object.entries(inner || {})) {
+        const k = `${T}>${A}`;
+        acc[k] = (acc[k] || 0) + (Number(n) || 0);
+      }
+    }
+  };
+
+  if (range === 'all') {
+    if (wantMode) {
+      const bucket = data.byMode[wantMode];
+      if (bucket && Object.keys(bucket).length) {
+        byMode = true;
+        merge(bucket);
+      }
+    }
+    if (!Object.keys(acc).length) merge(data.all);   // 无该模式专属数据 → 退回全量
+    sessions = data.recent.length;
+  } else {
+    const n = Math.max(1, parseInt(range, 10) || 10);
+    let slice = data.recent.slice(Math.max(0, data.recent.length - n));
+    if (wantMode) {
+      const filtered = slice.filter(s => s && s.mode === wantMode);
+      if (filtered.length) { byMode = true; slice = filtered; }
+    }
+    for (const s of slice) merge(s && s.pairs);
+    sessions = slice.length;
+  }
+
+  let pairs = Object.entries(acc).map(([k, count]) => {
+    const [target, actual] = k.split('>');
+    return { target, actual, count };
+  }).filter(p => p.count > 0)
+    .sort((a, b) => b.count - a.count || a.target.localeCompare(b.target) || a.actual.localeCompare(b.actual));
+
+  const total = pairs.reduce((a, p) => a + p.count, 0);
+  if (limit > 0) pairs = pairs.slice(0, limit);
+  return { pairs, sessions, total, byMode };
+}
+
+/** 全部记录里的混淆总次数 */
+export function keyConfusionGrandTotal() {
+  const data = loadKeyConfusions();
+  let n = 0;
+  for (const inner of Object.values(data.all)) {
+    for (const v of Object.values(inner || {})) n += Number(v) || 0;
+  }
+  return n;
+}
+
+export function clearKeyConfusions() {
+  writeJSON(KEYS.keyConfusions, { all: {}, byMode: {}, recent: [] });
+}
+
+/* ============================================================
    键维度按键耗时（反应时间）
    ------------------------------------------------------------
    与 keyErrors 同构但**分开存**，因为两者回答的是不同问题：
@@ -1446,7 +1667,19 @@ export function saveResume(state) {
        字段是可选的：旧存档没有就当无归属，行为与从前一致。 */
     shelfId: (typeof state.shelfId === 'string' && state.shelfId) || undefined,
     courseLessonId: (typeof state.courseLessonId === 'string' && state.courseLessonId) || undefined,
-    shelfSegBase: Number.isFinite(Number(state.shelfSegBase)) ? Math.max(0, Math.floor(Number(state.shelfSegBase))) : undefined
+    shelfSegBase: Number.isFinite(Number(state.shelfSegBase)) ? Math.max(0, Math.floor(Number(state.shelfSegBase))) : undefined,
+    /* 逐字用时（卡顿分析）。跟着现场走 —— 卡顿位置靠下标对齐做对比，
+       中断一次丢掉前半程会让整篇的位置整体前移，对比结果全错。
+       逐条清洗：脏数据（空字符 / 非正数耗时）在这里就挡掉。 */
+    slowChars: Array.isArray(state.slowChars)
+      ? state.slowChars.slice(0, SHELF_SLOW_MAX_CHARS).map(c => {
+          if (!c || typeof c !== 'object') return null;
+          const ch = String(c.ch == null ? '' : c.ch);
+          const ms = Math.round(Number(c.ms));
+          if (!ch || !Number.isFinite(ms) || ms <= 0) return null;
+          return { ch, ms: Math.min(ms, 60000) };
+        }).filter(Boolean)
+      : undefined
   };
   try {
     writeJSON(KEYS.resume, slim);
@@ -1511,6 +1744,54 @@ function genShelfId() {
   return `m${Date.now().toString(36)}${Math.floor(Math.random() * 1e12).toString(36)}`;
 }
 
+/**
+ * 书架材料每次练习的「逐字用时」快照上限。
+ *
+ * 【为什么是 5】用户要的是「重练同一篇时对比上次的卡顿位置」——
+ * 对比只需要上一次；留 5 次是为了：
+ *   ① 某次走神（中途接了个电话）不至于把唯一的历史顶掉；
+ *   ② 能看出某个位置是不是**一直**卡（连着 3 次都在同一个字慢，那是真问题），
+ *      而只留 1 次时「这次卡」和「每次都卡」分辨不出来。
+ * 再往上就只是占地方了：逐字数据一份就是整篇的字数，长文尤其明显。
+ */
+export const SHELF_SLOW_SNAPSHOTS = 5;
+/** 单次快照最多记多少个字 —— 超长文本只留最慢的那些确实更省，但对比需要位置完整 */
+const SHELF_SLOW_MAX_CHARS = 3000;
+
+/**
+ * 规范化一份逐字用时快照。
+ * @param {object} raw { ts, durationSec, totalChars, chars: [{ch, ms}] }
+ */
+function normalizeSlowSnapshot(raw) {
+  const s = (raw && typeof raw === 'object') ? raw : {};
+  const chars = Array.isArray(s.chars)
+    ? s.chars.slice(0, SHELF_SLOW_MAX_CHARS).map(c => {
+        if (!c || typeof c !== 'object') return null;
+        const ch = String(c.ch == null ? '' : c.ch);
+        const ms = Math.round(Number(c.ms));
+        // 只留真正打过字的条目：空字符、非正数耗时都是脏数据
+        if (!ch || !Number.isFinite(ms) || ms <= 0) return null;
+        return { ch, ms: Math.min(ms, 60000) };
+      }).filter(Boolean)
+    : [];
+  return {
+    ts: Number(s.ts) || 0,
+    // 段号：对比要按「同一段」比，否则续打不同段落时位置对不上
+    segIndex: clampInt(s.segIndex, 0, 100000),
+    durationSec: Math.max(0, Number(s.durationSec) || 0),
+    totalChars: clampInt(s.totalChars, 0, 100000000),
+    chars
+  };
+}
+
+/** 把一份逐字快照数组规范化 + 只留最近 N 份 */
+function normalizeSlowSnapshots(raw) {
+  if (!Array.isArray(raw)) return [];
+  const list = raw.map(normalizeSlowSnapshot).filter(s => s.chars.length || s.totalChars > 0);
+  list.sort((a, b) => a.ts - b.ts);
+  return list.slice(Math.max(0, list.length - SHELF_SLOW_SNAPSHOTS));
+}
+
 function normalizeShelfEntry(raw) {
   const e = (raw && typeof raw === 'object') ? raw : {};
   const st = (e.stats && typeof e.stats === 'object') ? e.stats : {};
@@ -1537,7 +1818,9 @@ function normalizeShelfEntry(raw) {
       speedWSum: Math.max(0, Number(st.speedWSum) || 0),
       accWSum: Math.max(0, Number(st.accWSum) || 0),
       bestSpeed: Math.max(0, Number(st.bestSpeed) || 0)
-    }
+    },
+    // 逐字用时快照（卡顿分析）。每次练完这份材料追加一份，只留最近 5 次。
+    slow: normalizeSlowSnapshots(e.slow)
   };
 }
 
@@ -1638,6 +1921,170 @@ export function lastShelfEntry() {
 }
 
 /**
+ * 追加一份「逐字用时」快照到某份书架材料。
+ *
+ * 【为什么独立于 touchShelfEntry】那份只累计聚合值（总字数、总时长），
+ * 用来算平均速度就够了；而卡顿分析要的是**每个字花了多久**这种明细，
+ * 它不能求和、只能按时间留档，且必须与聚合值分开裁（聚合值永久保留，
+ * 明细只留最近 5 次）。塞进同一个函数会让两种生命周期纠缠在一起。
+ *
+ * @param {string} id 书架条目 id
+ * @param {Array<{ch:string, ms:number}>} chars 逐字用时
+ * @param {object} [meta] { durSec, totalChars, segIndex }
+ * @returns {object|null} 更新后的条目
+ */
+export function recordShelfSlow(id, chars, meta = {}) {
+  const list = loadShelf();
+  const i = list.findIndex(e => e.id === id);
+  if (i < 0) return null;
+  const snap = normalizeSlowSnapshot({
+    ts: Date.now(),
+    segIndex: meta.segIndex,
+    durationSec: meta.durationSec,
+    totalChars: meta.totalChars,
+    chars
+  });
+  // 一个有效样本都没有就不留档 —— 空快照会把上一次的好数据挤掉
+  if (!snap.chars.length && !(snap.totalChars > 0)) return null;
+  const e = list[i];
+  const next = Array.isArray(e.slow) ? e.slow.slice() : [];
+  next.push(snap);
+  e.slow = normalizeSlowSnapshots(next);
+  list[i] = normalizeShelfEntry(e);
+  saveShelf(list);
+  return list[i];
+}
+
+/**
+ * 卡顿分析：找出这份材料里「停顿最长」的位置，并与上一次对比。
+ *
+ * 【口径】用**逐字用时**（从上一个字打完到这个字打完的秒数），而不是
+ * 平均速度。平均速度是整篇一个数，看不出「第 3 段那个字卡住了」。
+ *
+ * 【为什么要中位数而不是平均值】一次走神（去倒了杯水回来接着打）
+ * 就能让某个字用时飙到 20 秒，把均值拽得完全失真。用中位数得先有足够
+ * 多"同一个字重复出现"的样本 —— 短文里同一个字往往只出现一次，
+ * 所以这里改为对**本次快照内所有字**排序取参考线，再挑出显著高于
+ * 参考线的位置。参考线本身用中位数（对那个走神的字免疫）。
+ *
+ * 【为什么排除首字】每次开练的第一个字都含「进入状态」的启动成本
+ * （和引擎的 _keyWaitMeasured 同一个理由），不排除的话它永远是第一名。
+ *
+ * @param {object|string} entryOrId 书架条目或它的 id
+ * @param {object} [opts]
+ *   - top: 返回前几名（默认 5）
+ *   - minMs: 低于这个耗时不值得叫「卡顿」（默认 900ms）
+ * @returns {{
+ *   hasData:boolean, sessions:number,
+ *   slowest:Array<{ch,ms,index,rank,ratio}>,
+ *   medianMs:number, avgMs:number, totalChars:number,
+ *   compare:null|{comparable:boolean, isNew:boolean, isGone:boolean,
+ *                 recentMs:number, prevMs:number, deltaMs:number,
+ *                 sameSpots:Array<{ch, ms, prevMs, worse:boolean}>},
+ *   lastAt:number
+ * }}
+ */
+export function shelfSlowAnalysis(entryOrId, opts = {}) {
+  const entry = (entryOrId && typeof entryOrId === 'object')
+    ? entryOrId
+    : loadShelf().find(e => e.id === entryOrId);
+  const empty = {
+    hasData: false, sessions: 0, slowest: [],
+    medianMs: 0, avgMs: 0, totalChars: 0, compare: null, lastAt: 0
+  };
+  if (!entry) return empty;
+
+  const snaps = normalizeSlowSnapshots(entry.slow);
+  if (!snaps.length) return empty;
+
+  const top = Math.max(1, Math.floor(Number(opts.top)) || 5);
+  const minMs = Math.max(0, Number(opts.minMs) || 900);
+
+  /* 找「最慢的 N 个位置」用最近一次快照 —— 用户要看的是「这次卡在哪」，
+     而不是把五次混在一起平均掉：那样反而看不出最近这次的问题。 */
+  const last = snaps[snaps.length - 1];
+  const rows = last.chars.map((c, i) => ({ ch: c.ch, ms: c.ms, index: i }));
+  const body = rows.slice(1);   // 排除首字（启动成本）
+
+  const times = body.map(r => r.ms).filter(n => n > 0).sort((a, b) => a - b);
+  const medianMs = times.length
+    ? (times.length % 2 === 1
+        ? times[(times.length - 1) >> 1]
+        : Math.round((times[times.length / 2 - 1] + times[times.length / 2]) / 2))
+    : 0;
+  const avgMs = times.length ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : 0;
+
+  const slowest = body
+    .filter(r => r.ms >= minMs)
+    .sort((a, b) => b.ms - a.ms)
+    .slice(0, top)
+    .map((r, i) => ({
+      ch: r.ch,
+      ms: r.ms,
+      index: r.index,
+      rank: i + 1,
+      // 比本篇中位数慢多少倍。中位数为 0（只有一个字）时给 0 而不是 Infinity。
+      ratio: medianMs > 0 ? Math.round((r.ms / medianMs) * 100) / 100 : 0
+    }));
+
+  /* ---- 与上一次对比 ----
+     只在「同一段」之间比：用户可能这次打第 1 段、下次打第 3 段，
+     位置完全对不上，硬比会得出一堆假差异。段号不同就如实说「不可比」。 */
+  let compare = null;
+  if (snaps.length >= 2) {
+    const prev = snaps[snaps.length - 2];
+    const sameSeg = prev.segIndex === last.segIndex;
+    const recentMs = avgMs;
+    const prevTimes = prev.chars.slice(1).map(c => c.ms).filter(n => n > 0);
+    const prevAvg = prevTimes.length
+      ? Math.round(prevTimes.reduce((a, b) => a + b, 0) / prevTimes.length) : 0;
+
+    /* 逐个位置比较：按字符同时按序号对齐（同一篇同一段文本完全相同，
+       所以下标即位置）。只在两侧都有数据的下标上比，避免错位。 */
+    const sameSpots = [];
+    if (sameSeg) {
+      const n = Math.min(last.chars.length, prev.chars.length);
+      for (let i = 1; i < n; i++) {
+        const cur = last.chars[i].ms;
+        const old = prev.chars[i].ms;
+        if (!(cur > 0) || !(old > 0)) continue;
+        // 只列「明显变慢」的：小幅波动是打字常态，不是卡顿
+        if (cur >= minMs && cur > old * 1.25) {
+          sameSpots.push({ ch: last.chars[i].ch, ms: cur, prevMs: old, worse: true });
+        }
+      }
+      sameSpots.sort((a, b) => (b.ms - b.prevMs) - (a.ms - a.prevMs));
+    }
+
+    compare = {
+      comparable: sameSeg && prevAvg > 0 && recentMs > 0,
+      // 段号不同——不能比，也不该被当成「没变化」
+      segMismatch: !sameSeg,
+      isNew: prevAvg === 0 && recentMs > 0,
+      isGone: prevAvg > 0 && recentMs === 0,
+      recentMs,
+      prevMs: prevAvg,
+      deltaMs: recentMs - prevAvg,
+      prevAt: prev.ts,
+      sameSpots: sameSpots.slice(0, 5)
+    };
+  }
+
+  return {
+    hasData: true,
+    sessions: snaps.length,
+    slowest,
+    medianMs,
+    avgMs,
+    totalChars: last.totalChars || last.chars.length,
+    durationSec: last.durationSec || 0,
+    segIndex: last.segIndex || 0,
+    compare,
+    lastAt: last.ts
+  };
+}
+
+/**
  * 旧数据迁移：把「单个可覆盖的 customText」放进书架。
  *
  * 触发条件刻意收得很窄：书架为空 **且** 设置里有文本 **且** 没迁移过。
@@ -1721,6 +2168,7 @@ export function exportAll() {
     daily: loadDaily(),
     weak: loadWeak(),
     keyErrors: loadKeyErrors(),
+    keyConfusions: loadKeyConfusions(),
     keyTimings: loadKeyTimings(),
     // 书架与课程进度跟着走：用户整理好的材料清单和「学到第几课」
     // 与练习成绩同等重要，导出时丢掉任何一个都算数据丢失。
@@ -1919,6 +2367,67 @@ export function importAll(payload) {
       } else if (Object.keys(cur.all).length) {
         // 没有新会话但可能有「老备份初始化」的写入
         writeJSON(KEYS.keyErrors, cur);
+      }
+    }
+
+    /* 键盘混淆组合：合并语义与 keyErrors 完全一致（同一套 seenTs 幂等策略），
+       区别只在数据类型 —— 它是「有向对」的二级映射，累加时要深入到第二层。
+       同样带上 byMode 三层同步，否则导入后按模式筛选会失效。 */
+    if (payload.keyConfusions && typeof payload.keyConfusions === 'object') {
+      const cur = loadKeyConfusions();
+      const incomingAll = (payload.keyConfusions.all && typeof payload.keyConfusions.all === 'object')
+        ? payload.keyConfusions.all : {};
+      const incomingRecent = Array.isArray(payload.keyConfusions.recent)
+        ? payload.keyConfusions.recent.filter(s => s && typeof s === 'object')
+        : [];
+
+      const seenTs = new Set(cur.recent.map(s => s && s.ts));
+      const fresh = incomingRecent.filter(s => s && Number(s.ts) > 0 && !seenTs.has(s.ts));
+
+      const addMapInto = (dst, src) => {
+        for (const [T, inner] of Object.entries(src || {})) {
+          if (!inner || typeof inner !== 'object') continue;
+          const bucket = (dst[T] && typeof dst[T] === 'object') ? dst[T] : (dst[T] = {});
+          for (const [A, v] of Object.entries(inner)) {
+            const n = Math.floor(Number(v)) || 0;
+            if (n > 0) bucket[A] = (Number(bucket[A]) || 0) + n;
+          }
+        }
+      };
+      const addToMode = (mode, pairs) => {
+        const modeKey = String(mode || '').trim();
+        if (!modeKey) return;
+        const bucket = (cur.byMode[modeKey] && typeof cur.byMode[modeKey] === 'object')
+          ? cur.byMode[modeKey] : (cur.byMode[modeKey] = {});
+        addMapInto(bucket, pairs);
+      };
+
+      if (fresh.length) {
+        for (const s of fresh) {
+          const pairs = normalizeConfusionMap(s.pairs);
+          if (Object.keys(pairs).length) {
+            addMapInto(cur.all, pairs);
+            addToMode(s.mode, pairs);
+          }
+          cur.recent.push({ ts: s.ts, mode: typeof s.mode === 'string' ? s.mode : '', pairs });
+          seenTs.add(s.ts);
+        }
+      } else if (!incomingRecent.length &&
+                 Object.keys(incomingAll).length &&
+                 !Object.keys(cur.all).length) {
+        // 老备份只有累计没有明细，且本地也为空：直接采用（替换，幂等）
+        cur.all = normalizeConfusionMap(incomingAll);
+      }
+
+      if (fresh.length) {
+        cur.recent.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+        if (cur.recent.length > KEY_CONFUSION_RECENT_MAX) {
+          cur.recent = cur.recent.slice(cur.recent.length - KEY_CONFUSION_RECENT_MAX);
+        }
+        writeJSON(KEYS.keyConfusions, cur);
+        n++;
+      } else if (Object.keys(cur.all).length) {
+        writeJSON(KEYS.keyConfusions, cur);
       }
     }
 

@@ -139,6 +139,19 @@ export const LEVELS = [
        不是 generateQuestions 的一种模式。放在 LEVELS 里只是为了
        复用 LEVEL_MAP 的显示名与统计页的模式筛选。 */
     hidden: true
+  },
+  {
+    id: 'confuse',
+    level: 6,
+    name: '错键辨析',
+    badge: 'FIX',
+    desc: '把「总是按错成另一个键」的那对键单独拎出来练：只在这两个键里二选一。',
+    tip: '针对混淆键对',
+    /* 同样不进模式卡片：题目内容由 stats.discriminationDrills() 按
+       用户自己的混淆数据现算，不是通用出题器能生成的 —— 没有混淆数据时
+       根本无题可出。放在 LEVELS 里是为了让它有正经的显示名，
+       并在统计页的模式筛选里能被选中（练完的辨析成绩要能单独回看）。 */
+    hidden: true
   }
 ];
 
