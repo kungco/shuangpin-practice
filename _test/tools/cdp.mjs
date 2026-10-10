@@ -58,6 +58,28 @@ export function findChrome() {
 }
 
 /**
+ * 本 Node 能不能跑 CDP。
+ *
+ * 除了要有浏览器，还要有**全局 WebSocket** —— 它是 Node 22 才内置的
+ * （Node 18/20 没有）。这条必须在连 CDP **之前**探明：CI 的 runner 上
+ * 恰恰既有 Chrome 又跑着 Node 18/20，浏览器探测会通过，然后
+ * `new WebSocket` 直接 ReferenceError 把整套 npm test 炸红
+ * （2026-10-10 第一次上 CI 就是这么红的）。调用方据此**跳过**而不是报错。
+ */
+export function cdpAvailable() {
+  return typeof WebSocket === 'function' && findChrome() !== null;
+}
+
+/** 返回「为什么跑不了 CDP」的一句话，能跑则返回 null（用于跳过时的说明） */
+export function cdpUnavailableReason() {
+  if (typeof WebSocket !== 'function') {
+    return `当前 Node（${process.version}）没有内置 WebSocket（需要 Node 22+）`;
+  }
+  if (!findChrome()) return '未找到 Chrome/Edge（可用 CHROME_PATH 指定）';
+  return null;
+}
+
+/**
  * 启动 headless 浏览器并建好 CDP 连接。
  *
  * @param {object} [opts]

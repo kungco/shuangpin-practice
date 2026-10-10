@@ -10,13 +10,21 @@
  */
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { launchChrome, evaluate } from './cdp.mjs';
+import { cdpUnavailableReason, launchChrome, evaluate } from './cdp.mjs';
 
 const [url, out, w = '1240', h = '900', scriptFile] = process.argv.slice(2);
 
 if (!url || !out) {
   console.error('用法：node _test/tools/shot.mjs <url> <out.png> [width] [height] [script-file]');
   process.exit(2);
+}
+
+/* 除浏览器外还要探测全局 WebSocket：它是 Node 22 才内置的，
+   Node 18/20 上会在 `new WebSocket` 处 ReferenceError。 */
+const why = cdpUnavailableReason();
+if (why) {
+  console.error('无法截图：' + why);
+  process.exit(3);
 }
 
 const chrome = await launchChrome({ port: 9333, width: Number(w), height: Number(h) });

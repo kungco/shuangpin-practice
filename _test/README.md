@@ -15,7 +15,7 @@
 | `launcher.mjs` | **启动脚本静态自检**：编码前提（BOM / CRLF / chcp 顺序）、引用的文件是否存在、标签配对、三级回退链、与服务端脚本的接口一致性、危险写法扫描、**模块类型声明**、**CI 工作流确实存在**、**每套自检都挂进了 `npm test` 且脚本里的文件都真实存在** | 无 |
 | `training.mjs` | 提示撤除、滑动窗口与决策节奏续练、自适应档位、键位覆盖与强化上限、人工注音长度告警、词组筛选、续练、加权统计与降级、曲线均值口径、日报回落、计时同源、**测验成绩曲线只取有效分数**、500 / 5,000 题性能 | 无 |
 | `integration.mjs` | 在模拟 DOM 中加载整个应用，驱动完整交互流程（含**能力测验端到端**、**辅助功能接线层**、**提示依赖度可见性**、**存储降级时的界面告知**、**词组易错归组**、**完成音效**、**测验成绩曲线**、**键位图开关**、**热力图跟随模式筛选**、**热力等级竖条根数 = 等级**、**change 重绘粒度契约**） | `linkedom` |
-| `browser.mjs` | **真浏览器冒烟**（headless Chrome/Edge + CDP，补模拟 DOM 的边界）：**真实键盘事件推进引擎**、**弹窗原生焦点**（初始落点 / Tab 循环不逃逸 / Esc 关闭后归还）、**Canvas 统计真的画出了像素** 且带 `role="img"` 与随数据更新的 `aria-label`、**窄屏 390×844 无横向滚动**。找不到浏览器时**跳过**（exit 0），CI 无浏览器不会红 | Chrome/Edge |
+| `browser.mjs` | **真浏览器冒烟**（headless Chrome/Edge + CDP，补模拟 DOM 的边界）：**真实键盘事件推进引擎**、**弹窗原生焦点**（初始落点 / Tab 循环不逃逸 / Esc 关闭后归还）、**Canvas 统计真的画出了像素** 且带 `role="img"` 与随数据更新的 `aria-label`、**窄屏 390×844 无横向滚动**。环境不具备时**跳过**（exit 0）：没有 Chrome/Edge，或 Node < 22（CDP 要用 Node 22 才内置的全局 `WebSocket`）—— CI 上 Node 18/20 会跳过、Node 22 真跑 | Chrome/Edge + Node 22 |
 | `bench.mjs` | **性能基准（护栏，非功能测试）**：统计「一次按键引发的 DOM 写入量」，钉死 `renderSession` 的分级重绘不被改回全量 —— 音节内推进不得重建题干。详见下方说明 | `linkedom` |
 
 > `bench.mjs` 为什么和其他套件长得不一样：它**测的不是对错，而是性能不回退**。
@@ -233,10 +233,13 @@ linkedom 集成测试再全，也有四类问题它**原理上就测不到**—�
 | 【3】Canvas 统计 | linkedom 里 canvas 是**空桩**，`drawLine` 画没画根本不知道 | 真 canvas 上 `getImageData` 数**非透明像素**：三张统计图都必须真的画出了内容；且带 `role="img"` 与随数据更新的 `aria-label`（读屏替代） |
 | 【4】窄屏布局 | linkedom 没有**布局**，`scrollWidth` 恒 0 | 390×844 下 `scrollWidth ≤ 390`（无横向滚动），导航与模式卡片仍渲染可用 |
 
-环境策略：`tools/cdp.mjs` 的 `findChrome()` 找不到 Chromium 系浏览器（含 Edge 兜底）
-时返回 null，本套件**跳过并 exit 0** —— CI 的 Linux runner 不保证有浏览器，
-冒烟是「有真浏览器就加测」，不该让没有浏览器的环境红掉。
-它会自己起一个临时本地服务（`serve.mjs` 子进程）并选空闲端口，跑完即关。
+环境策略：本套件**跳过并 exit 0**，绝不红在环境上 —— CI 的 Linux runner
+不保证有浏览器，而且 CDP 要用的全局 `WebSocket` 是 **Node 22 才内置的**
+（Node 18/20 没有；而 runner 上恰恰是「有 Chrome + 跑着 Node 18」，
+第一次上 CI 就在 `new WebSocket` 处把整套 npm test 炸红过）。
+`tools/cdp.mjs` 的 `cdpUnavailableReason()` 会先探明这两件事，
+调用方据此跳过。它会自己起一个临时本地服务（`serve.mjs` 子进程）
+并选空闲端口，跑完即关。
 
 > 顺带修了一个真实缺陷（本套件的价值当场兑现）：三张统计 Canvas 之前
 > **完全没有读屏替代** —— 没有 `role`、没有 `aria-label`，读屏软件只能念出

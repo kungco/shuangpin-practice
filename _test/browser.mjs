@@ -26,7 +26,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createServer } from 'node:net';
-import { launchChrome, evaluate } from './tools/cdp.mjs';
+import { cdpUnavailableReason, launchChrome, evaluate } from './tools/cdp.mjs';
 
 const HERE = new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 
@@ -117,11 +117,17 @@ async function until(chrome, expr, { timeoutMs = 3000, label = '条件' } = {}) 
 /* ============================================================ */
 console.log('\n【浏览器冒烟】');
 
-const chrome = await launchChrome({ port: 9344, width: 1240, height: 900 });
+const chrome = await (async () => {
+  const why = cdpUnavailableReason();
+  if (why) {
+    note(`跳过：${why} —— CI 无浏览器 / 低版本 Node 属预期，不是被测代码的问题`);
+    return null;
+  }
+  return launchChrome({ port: 9344, width: 1240, height: 900 });
+})();
 if (!chrome) {
-  note('未找到 Chrome/Edge（可用 CHROME_PATH 指定），本套件跳过 —— CI 无浏览器属预期');
   server.kill();
-  console.log('\n✅ 浏览器冒烟跳过（无可用浏览器）');
+  console.log('\n✅ 浏览器冒烟跳过（环境不具备）');
   process.exit(0);
 }
 
