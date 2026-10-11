@@ -3021,8 +3021,119 @@ console.log('\n【12d3】练习包导出导入（接线层）');
   cleanupAll();
 }
 
+/* ---------- 【12d4】书架搜索 ---------- */
+console.log('\n【12d4】书架搜索过滤（接线层）');
+{
+  const cleanupAll = () => {
+    if (app.engine) { app.engine.destroy(); app.engine = null; }
+    app.sessionActive = false;
+    q('#sessionPanel').hidden = true;
+    q('#setupPanel').hidden = false;
+    q('#overlay').hidden = true;
+  };
+  cleanupAll();
+
+  /* 造 5 份材料（≥ SHELF_SEARCH_MIN=4，搜索框才会出现）。
+     标题/标签/正文各埋一个可搜的关键词，覆盖三处搜索路径。 */
+  sMod.clearAll();
+  sMod.addShelfEntry({ title: '静夜思', tags: ['唐诗'], text: '床前明月光疑是地上霜' });
+  sMod.addShelfEntry({ title: '春晓', tags: ['唐诗'], text: '春眠不觉晓处处闻啼鸟' });
+  sMod.addShelfEntry({ title: '办公用语', tags: ['工作'], text: '请查收附件并回复确认' });
+  sMod.addShelfEntry({ title: '日常口语', tags: ['生活'], text: '今天天气不错出去走走' });
+  sMod.addShelfEntry({ title: '术语练习', tags: ['专业'], text: 'photosynthesis 光合作用' });
+
+  fire(q('[data-view="practice"]'), 'click');
+  await settle();
+
+  const searchBox = q('#shelfSearchBox');
+  const searchInput = q('#shelfSearch');
+  ok(!!searchBox && !!searchInput, '搜索框存在');
+
+  /* 上面是直接写存储造的数据，绕过了 UI，所以要驱动一次重绘。
+     走真实交互路径（搜索框的 input 事件 → renderShelf），不调私有函数。 */
+  fire(searchInput, 'input');
+  await settle();
+
+  ok(searchBox.hidden === false, '材料 ≥4 份时搜索框出现');
+  ok(qa('#shelfList .shelf-item').length === 5, `未搜索时列出全部 5 份（实际 ${qa('#shelfList .shelf-item').length}）`);
+  ok(/5 份/.test(q('#shelfCount').textContent), `计数显示「5 份」（${q('#shelfCount').textContent}）`);
+
+  // 按标题搜
+  searchInput.value = '静夜';
+  fire(searchInput, 'input');
+  await settle();
+  let items = qa('#shelfList .shelf-item');
+  ok(items.length === 1, `按标题命中 1 份（实际 ${items.length}）`);
+  ok(/静夜思/.test(items[0].textContent), '命中的是「静夜思」');
+  ok(/1 \/ 5/.test(q('#shelfCount').textContent),
+    `计数显示「命中 / 总数」而不是只显示命中数（${q('#shelfCount').textContent}）`);
+
+  // 按标签搜（「唐诗」命中 2 份）
+  searchInput.value = '唐诗';
+  fire(searchInput, 'input');
+  await settle();
+  ok(qa('#shelfList .shelf-item').length === 2, '按标签命中 2 份');
+
+  // 按正文搜：用户未必记得自己起的标题，正文也要能搜到
+  searchInput.value = '光合作用';
+  fire(searchInput, 'input');
+  await settle();
+  items = qa('#shelfList .shelf-item');
+  ok(items.length === 1, '按正文命中 1 份');
+  ok(/术语练习/.test(items[0].textContent), '正文命中时把所属材料列出来');
+
+  // 英文大小写不敏感
+  searchInput.value = 'PHOTOSYNTHESIS';
+  fire(searchInput, 'input');
+  await settle();
+  ok(qa('#shelfList .shelf-item').length === 1, '英文搜索不区分大小写');
+
+  // 无结果：给出明确空态，而不是空白一片
+  searchInput.value = '不存在的关键词xyz';
+  fire(searchInput, 'input');
+  await settle();
+  ok(qa('#shelfList .shelf-item').length === 0, '无匹配时不列出任何条目');
+  ok(!!q('#shelfList .shelf-empty'), '无匹配时给出空态提示元素');
+  ok(/没有匹配/.test(q('#shelfList .shelf-empty').textContent),
+    `空态文案说明没有匹配（${q('#shelfList .shelf-empty').textContent}）`);
+
+  // 清空恢复
+  searchInput.value = '';
+  fire(searchInput, 'input');
+  await settle();
+  ok(qa('#shelfList .shelf-item').length === 5, '清空搜索词后恢复列出全部');
+
+  // Esc 清空
+  searchInput.value = '静夜';
+  fire(searchInput, 'input');
+  await settle();
+  ok(qa('#shelfList .shelf-item').length === 1, '重新输入后过滤生效');
+  fire(searchInput, 'keydown', { key: 'Escape' });
+  await settle();
+  ok(searchInput.value === '', 'Esc 清空搜索框');
+  ok(qa('#shelfList .shelf-item').length === 5, 'Esc 后恢复列出全部');
+
+  /* 材料数降到阈值以下时搜索框隐藏，且残留的查询词被清掉 ——
+     否则等材料又多起来、搜索框重新出现时，会带着上次的关键词，
+     列表莫名其妙是空的。 */
+  searchInput.value = '静夜';
+  fire(searchInput, 'input');
+  await settle();
+  for (const e of sMod.loadShelf().slice(0, 3)) sMod.removeShelfEntry(e.id);
+  // 触发一次重绘（走真实交互路径：输入事件 → renderShelf）
+  fire(searchInput, 'input');
+  await settle();
+  ok(q('#shelfSearchBox').hidden === true, '材料降到 3 份时搜索框隐藏');
+  ok(searchInput.value === '', '隐藏时把残留的查询词一并清掉');
+  ok(qa('#shelfList .shelf-item').length === 2, `列表恢复显示全部剩余材料（${qa('#shelfList .shelf-item').length}）`);
+
+  app.settings = sMod.loadSettings();
+  cleanupAll();
+}
+
 /* ---------- 【12e】刷新 → 续练 → 达标 → 晋级 ---------- */
-console.log('\n【12e】课程续练：归属跟着存档走');{
+console.log('\n【12e】课程续练：归属跟着存档走');
+{
   const cleanupAll = () => {
     if (app.engine) { app.engine.destroy(); app.engine = null; }
     app.sessionActive = false;

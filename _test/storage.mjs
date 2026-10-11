@@ -1339,6 +1339,95 @@ console.log('\n【19】课程进度：晋级判定不过就不前进（不会跳
     `attempts 记录 bestInd（${att.progress.lessons['c6-speed'].bestInd}）`);
 }
 
+/* ============================================================
+   【20】累计统计不受「历史只留 2000 条」的截断影响
+   ------------------------------------------------------------
+   修的是一个会让数字**往小走**的 bug：累计卡片原先从被截断的历史现算，
+   练到 2000 局之后每练一局就丢一条最老的，累计值冻结不再增长。
+   数字倒退是最不能接受的一类统计错误 —— 用户会以为数据丢了。
+   现在累计值改从 daily（按日期聚合、不受条数上限影响）取。
+   ============================================================ */
+console.log('\n【20】累计统计不受历史上限截断（数字只增不减）');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+  const St = await import(new URL('../src/core/stats.js', import.meta.url).href + `?t=${++modSeq}`);
+
+  const mk = (i) => ({
+    id: `c${i}`, ts: Date.now() + i, date: S.dateStr(new Date()),
+    mode: 'char', durationSec: 60, totalChars: 100, correctChars: 100, wrongChars: 0,
+    keystrokes: 200, speed: 100, accuracy: 100
+  });
+
+  for (let i = 0; i < 2100; i++) S.appendRecord(mk(i));
+
+  // 前提：历史确实被截断了。否则这一节测不到东西，是假绿。
+  ok(S.loadHistory().length === 2000, `前提成立：历史被截断到 2000 条（实际 ${S.loadHistory().length}）`);
+
+  const s = St.summarize();
+  ok(s.sessions === 2100, `累计次数为真实值 2100（实际 ${s.sessions}）`);
+  ok(s.totalChars === 210000, `累计字数为真实值 210000（实际 ${s.totalChars}）`);
+  ok(s.totalSeconds === 126000, `累计时长为真实值 126000（实际 ${s.totalSeconds}）`);
+
+  /* 单调性：这是这类统计唯一的硬要求。继续练必须继续涨，绝不回落。 */
+  const before = s.totalChars;
+  const beforeSessions = s.sessions;
+  for (let i = 2100; i < 2130; i++) S.appendRecord(mk(i));
+  const s2 = St.summarize();
+  ok(s2.totalChars > before, `继续练习后累计字数继续增长（${before} → ${s2.totalChars}）`);
+  ok(s2.sessions === beforeSessions + 30, `累计次数同步增长（+30 → ${s2.sessions}）`);
+
+  /* 显式传数组时必须仍是纯函数：测试与「按模式筛选」都依赖这个语义。
+     若这里被 daily 兜底污染，按模式看的数字会把其它模式的量也算进来。 */
+  const pure = St.summarize([mk(0)]);
+  ok(pure.sessions === 1 && pure.totalChars === 100,
+    '显式传入记录数组时按纯函数处理（不被 daily 兜底污染）');
+
+  /* 历史被清空、日报还在时（例如手工清了历史键），累计值仍应读得出来 ——
+     这正是「累计不该依赖那份会被裁剪的历史」的直接体现。 */
+  ls.setItem(S.KEYS.history, '[]');
+  const after = St.summarize();
+  ok(after.sessions === 2130,
+    `历史清空后累计仍从日报读回（${after.sessions} 次）`);
+  ok(after.totalChars === 213000, `累计字数同样读回（${after.totalChars} 字）`);
+}
+
+/* ============================================================
+   【21】导入备份的版本号校验
+   ------------------------------------------------------------
+   来自**更新版本**的备份字段结构可能已变，按当前逻辑「尽力而为」地合并
+   会静默丢数据 —— 用户以为导入成功，实际少了一部分。
+   宁可明确拒绝并让他先升级。
+   ============================================================ */
+console.log('\n【21】导入备份的版本号校验');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+  const cur = S.DATA_VERSION;
+
+  ok(S.importAll({ app: 'shuangpin-practice', version: cur, history: [] }).ok === true,
+    `同版本（v${cur}）备份可导入`);
+  ok(S.importAll({ app: 'shuangpin-practice', version: cur - 1, history: [] }).ok === true,
+    '更旧版本的备份可导入（老数据只会更简单，现有逻辑能兼容）');
+  ok(S.importAll({ app: 'shuangpin-practice', history: [] }).ok === true,
+    '没有版本号的早期备份可导入（那时还没写这个字段）');
+
+  const newer = S.importAll({ app: 'shuangpin-practice', version: cur + 1, history: [] });
+  ok(newer.ok === false, '来自更新版本的备份被拒绝');
+  ok(/更新的版本/.test(newer.message), `提示里说明「来自更新的版本」（${newer.message}）`);
+  ok(newer.message.includes(`v${cur + 1}`) && newer.message.includes(`v${cur}`),
+    '提示里同时带上文件版本与本机版本，用户知道该做什么');
+
+  /* 拿错文件时指明该用哪个入口 —— 只说「格式不对」会让人以为文件坏了 */
+  const wrong = S.importAll({ app: S.PACK_APP, version: 1, entries: [] });
+  ok(wrong.ok === false, '练习包不能当完整备份导入');
+  ok(/导入练习包/.test(wrong.message), `提示改用「导入练习包」（${wrong.message}）`);
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 存储层自检全部通过'
   : `❌ 存储层自检共 ${fail} 项未通过`));

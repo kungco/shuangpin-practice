@@ -410,7 +410,14 @@ export async function createHarness(opts = {}) {
       el = found;
     }
     if (!el) return false;
-    const ev = new FakeEvent(type, { bubbles: true, ...o });
+    /* 键盘类事件必须用 FakeKeyboardEvent —— 它才会带上 key / code /
+       修饰键。早先一律用 FakeEvent，于是 fire(el, 'keydown', { key: 'Tab' })
+       拿到的事件里 key 是 undefined：依赖按键内容的断言全都「假通过」
+       （看着绿，实际根本没走到那个分支）。 */
+    const isKeyEvent = type === 'keydown' || type === 'keyup' || type === 'keypress';
+    const ev = isKeyEvent
+      ? new FakeKeyboardEvent(type, { bubbles: true, ...o })
+      : new FakeEvent(type, { bubbles: true, ...o });
     ev.target = el;
     ev.currentTarget = el;
     ev._path = [{ currentTarget: el, target: el }];

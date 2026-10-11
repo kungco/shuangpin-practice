@@ -2172,6 +2172,34 @@ html.reduce-motion *::after {
 .shelf-title { font-size: 13px; color: var(--text); font-weight: 600; }
 .shelf-sub { font-size: 12px; color: var(--text-3); }
 .shelf-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+/* 书架搜索：材料多到需要找的时候才出现（见 main.js::SHELF_SEARCH_MIN） */
+.shelf-search { margin-bottom: 8px; }
+.shelf-search input {
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.shelf-search input::placeholder { color: var(--text-3); }
+.shelf-search input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+  border-color: var(--primary);
+}
+/* 搜索无结果。用 text-align 居中而不是靠外层 flex —— 它是个 li，
+   要跟 .shelf-list 的 grid 布局共处。 */
+.shelf-empty {
+  padding: 14px 10px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+}
 .shelf-item {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 8px 10px; border: 1px solid var(--border);

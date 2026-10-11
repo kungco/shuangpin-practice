@@ -207,6 +207,12 @@
               <span class="shelf-title">我的书架</span>
               <span class="shelf-sub" id="shelfCount"></span>
             </div>
+            <!-- 搜索：材料多了以后靠滚是找不到东西的。
+                 条数少时整块隐藏（见 renderShelf），免得占地方。 -->
+            <div class="shelf-search" id="shelfSearchBox" hidden>
+              <input id="shelfSearch" type="search" autocomplete="off"
+                     placeholder="搜索标题、标签或正文…" aria-label="搜索书架材料" />
+            </div>
             <ul class="shelf-list" id="shelfList"></ul>
           </div>
           <p class="footnote" style="margin-top:2px">

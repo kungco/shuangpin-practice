@@ -19,7 +19,7 @@ import {
 } from './core/questions.js';
 import { planMixedSession } from './core/mix.js';
 import {
-  dailyPlanProgress, buildDailyPlan, planDoneToday, clampPlanMinutes
+  dailyPlanProgress, buildDailyPlan, clampPlanMinutes
 } from './core/daily.js';
 import { COURSE, currentLesson, buildLessonQuestions, recordLessonAttempt } from './core/course.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
@@ -885,7 +885,45 @@ function initShelf() {
     });
   }
 
+  /* 搜索输入：只重画列表，不动输入框本身 ——
+     输入框若被一起重建，焦点会丢、光标会跳到开头，打字立刻断掉。 */
+  const search = $('#shelfSearch');
+  if (search && !search._bound) {
+    search._bound = true;
+    search.addEventListener('input', renderShelf);
+    // Esc 清空（type=search 自带清除按钮，但键盘用户不一定有那个按钮）
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && search.value) {
+        e.stopPropagation();      // 别让 Esc 冒泡去关弹窗
+        search.value = '';
+        renderShelf();
+      }
+    });
+  }
+
   renderShelf();
+}
+
+/** 书架搜索框出现的最少材料数。低于这个数，滚动比搜索快，搜索框只是占地方。 */
+const SHELF_SEARCH_MIN = 4;
+
+/**
+ * 一份材料是否命中搜索词。
+ *
+ * 【搜什么】标题、标签、正文三处。正文也搜是必要的 ——
+ * 用户记得「那篇讲黄鹤楼的文章」，但未必记得自己给它起了什么标题。
+ *
+ * 【大小写】两边都转小写比较。中文不受影响，但材料里混英文
+ * （人名、术语）时不该因为大小写搜不到。
+ *
+ * @param {object} entry 书架条目
+ * @param {string} q 已转小写的查询词
+ */
+function shelfMatches(entry, q) {
+  if (!q) return true;
+  if (String(entry.title || '').toLowerCase().includes(q)) return true;
+  if (Array.isArray(entry.tags) && entry.tags.some(t => String(t).toLowerCase().includes(q))) return true;
+  return String(entry.text || '').toLowerCase().includes(q);
 }
 
 /** 重画书架列表（含每份材料自己的速度 / 正确率与上次进度） */
@@ -894,9 +932,28 @@ function renderShelf() {
   const list = $('#shelfList');
   const count = $('#shelfCount');
   if (!box || !list) return;
-  const entries = S.loadShelf();
-  box.hidden = entries.length === 0;
-  if (count) count.textContent = entries.length ? `${entries.length} 份` : '';
+  const all = S.loadShelf();
+  box.hidden = all.length === 0;
+
+  /* 搜索。条数少时整块隐藏 —— 两三条材料摆个搜索框纯属占地方。 */
+  const searchBox = $('#shelfSearchBox');
+  const searchInput = $('#shelfSearch');
+  const showSearch = all.length >= SHELF_SEARCH_MIN;
+  if (searchBox) searchBox.hidden = !showSearch;
+  /* 材料被删到不足阈值时把输入框一起清空 —— 否则等材料又多起来、
+     搜索框重新出现时，会带着一个上次残留的查询词，列表莫名其妙是空的。 */
+  if (!showSearch && searchInput && searchInput.value) searchInput.value = '';
+
+  const rawQuery = (showSearch && searchInput) ? searchInput.value.trim() : '';
+  const query = rawQuery.toLowerCase();
+  const entries = query ? all.filter(e => shelfMatches(e, query)) : all;
+
+  if (count) {
+    /* 搜索时显示「命中 / 总数」两个数：只显示命中数的话，
+       用户会以为材料被删掉了。 */
+    count.textContent = !all.length ? ''
+      : (query ? `${entries.length} / ${all.length} 份` : `${all.length} 份`);
+  }
 
   /* 用 DOM API 逐个节点搭，不用 innerHTML 拼字符串。
      理由是安全而非风格：条目数据（id / 标题 / 标签）最终来自**导入的备份**，
@@ -905,6 +962,15 @@ function renderShelf() {
      textContent / setAttribute 从机制上杜绝这一整类问题，
      就算将来有人在 normalize 阶段漏了校验也炸不了。 */
   list.innerHTML = '';
+
+  if (query && !entries.length) {
+    const empty = document.createElement('li');
+    empty.className = 'shelf-empty';
+    empty.textContent = `没有匹配「${rawQuery}」的材料`;
+    list.append(empty);
+    return;
+  }
+
   const frag = document.createDocumentFragment();
 
   for (const e of entries) {
@@ -1956,24 +2022,6 @@ function persistRecord(summary) {
       if (s.keyTimings && Object.keys(s.keyTimings).length) {
         S.recordKeyTimings(s.keyTimings, s.mode);
       }
-    }
-
-    /* 每日计划：本局落库后若今天已达标，把「完成日」写上。
-       存日期而不是布尔，跨零点自动失效（见 core/daily.js::planDoneToday 的注释）。
-       注意在 appendRecord **之后**算 —— summarize() 读的是历史，
-       要包含刚写完的这一局，否则永远差一局。 */
-    if (meaningful) {
-      try {
-        const p = dailyPlanProgress({
-          settings: app.settings,
-          todaySec: summarize().todaySeconds,
-          today: S.dateStr(new Date())
-        });
-        if (p.enabled && p.achieved && !planDoneToday(app.settings.dailyPlanDoneOn, S.dateStr(new Date()))) {
-          app.settings.dailyPlanDoneOn = S.dateStr(new Date());
-          saveSettingsDebounced();
-        }
-      } catch (err) { console.warn('[dailyplan] 完成标记失败', err); }
     }
 
     /* 收尾音。playFinish / playSoften 早就写好、index.html 也写着「完成提示音」，
@@ -3422,7 +3470,12 @@ function renderStatsView() {
     }
     if (modeSelect) modeSelect.value = app.stats.mode;
     const history = S.loadHistory().filter(r => app.stats.mode === 'all' || r.mode === app.stats.mode);
-    const sum = summarize(history);
+    /* 「全部模式」走不传参的 summarize()：它会用 daily 修正累计值，
+       不受「历史只留最近 2000 条」的截断影响（否则练到 2000 局后
+       累计字数/时长/次数会停止增长甚至倒退）。
+       按模式筛选时只能传数组 —— daily 是**按日期**聚合的，没有按模式拆分，
+       拿它去凑某个模式的累计会把别的模式的量也算进来。 */
+    const sum = app.stats.mode === 'all' ? summarize() : summarize(history);
 
     /* ---- 卡片 ---- */
     const cards = $('#statCards');

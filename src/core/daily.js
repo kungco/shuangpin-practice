@@ -40,21 +40,6 @@ export function clampPlanMinutes(v) {
 }
 
 /**
- * 今天是否已达成计划。
- *
- * 【为什么存日期而不是布尔】布尔需要有人去「每天重置一次」——
- * 那就要定时器、要处理休眠跨天、要处理用户在别的设备上过了零点。
- * 存日期字符串则天然自愈：昨天的 'DONE' 到了今天就对不上，
- * 不需要任何重置动作。
- *
- * @param {string} doneOn   settings.dailyPlanDoneOn
- * @param {string} today    dateStr(now)
- */
-export function planDoneToday(doneOn, today) {
-  return !!doneOn && String(doneOn) === String(today);
-}
-
-/**
  * 计算今日计划的进度。
  *
  * 【口径：按秒，不按题】为什么不用「计划 20 题，做了 8 题」：
@@ -62,12 +47,17 @@ export function planDoneToday(doneOn, today) {
  *   - 中途被打断时，按题算会出现「做了半题」无法表达的状态；
  *   - 用户设的是**分钟**，进度就该用同一单位回报，否则「练了 6 分半」
  *     要换算成题数才能显示，反而绕。
- *   时长从日报的 durationSum 取（daily 里已有该字段，无需新增统计）。
+ *
+ * 【进度完全由「今日已练时长」实时算出，不落任何完成标记】
+ *   曾有过一个 dailyPlanDoneOn 设置项（存当天日期），但它是**冗余状态**：
+ *   它只被用来「避免重复写入」，从不参与这里的判断 —— 删掉它、每次都写，
+ *   用户看到的行为完全一样。既然「今日已练时长」本身就是按日期统计的，
+ *   跨零点天然归零，就不需要再存一个日期去表示「今天完成过」。
+ *   少一份状态就少一处可能与真实数据不一致的地方。
  *
  * @param {object} opts
- *   - settings     当前设置（读 dailyPlanMinutes / dailyPlanDoneOn）
+ *   - settings     当前设置（读 dailyPlanMinutes）
  *   - todaySec     今日已练时长（秒）
- *   - today        今日日期字符串（dateStr）
  * @returns {{
  *   enabled:boolean, minutes:number, goalSec:number,
  *   doneSec:number, leftSec:number, ratio:number, percent:number,

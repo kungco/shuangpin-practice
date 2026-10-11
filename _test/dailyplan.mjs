@@ -2,7 +2,7 @@
  * 每日练习计划自检
  * ------------------------------------------------------------
  * 覆盖「设定每天练几分钟 → 按时长组题 → 算今日进度 → 跨天失效」这条链路：
- *   1. 纯逻辑  clampPlanMinutes / planDoneToday / dailyPlanProgress 的口径
+ *   1. 纯逻辑  clampPlanMinutes / dailyPlanProgress 的口径
  *   2. 组题    buildDailyPlan 按剩余时长定单局长度、复用 planMixedSession
  *   3. 边界    剩余为 0 / 超额完成 / 未启用计划 / 非法输入
  *   4. 存储    dailyPlanMinutes / dailyPlanDoneOn 的设置项读写
@@ -121,22 +121,33 @@ console.log('【2】dailyPlanProgress 的进度口径');
 }
 
 /* ============================================================
-   【3】planDoneToday：跨天失效
+   【3】跨天归零：不依赖任何「完成标记」
+   ------------------------------------------------------------
+   进度完全由「今日已练时长」实时算出。这里钉死的是：
+   跨天后进度自动回到 0，**不需要**任何存储的完成标记去重置 ——
+   曾经有个 dailyPlanDoneOn 字段，但它是冗余状态（只用于避免重复写入，
+   从不参与判断），已删除。删掉后行为必须完全不变，这一节就是守这条。
    ============================================================ */
-console.log('【3】planDoneToday 的跨天失效');
+console.log('【3】跨天归零：进度只由「今日已练时长」决定');
 
 {
-  ok(D.planDoneToday('2026-10-10', '2026-10-10') === true, '同一天 → 已完成');
-  ok(D.planDoneToday('2026-10-09', '2026-10-10') === false, '昨天完成，今天不算（自动失效）');
-  ok(D.planDoneToday('', '2026-10-10') === false, '空标记 → 未完成');
-  ok(D.planDoneToday(null, '2026-10-10') === false, 'null 标记 → 未完成');
-  ok(D.planDoneToday(undefined, '2026-10-10') === false, 'undefined 标记 → 未完成');
+  const s = { dailyPlanMinutes: 10 };
 
-  /* 这一条是「存日期而不是布尔」的核心价值：不需要任何重置动作，
-     跨零点自然失效。如果实现成布尔，就必须有定时器去清，
-     而休眠跨天、多设备改时间都会让那个定时器不可靠。 */
-  ok(D.planDoneToday('2026-10-10', '2026-10-11') === false,
-    '存的是具体日期，明天自动不匹配（无需重置逻辑）');
+  // 昨天练满 10 分钟 → 今天（todaySec 从 0 起算）必须显示未达标
+  const yesterdayDone = D.dailyPlanProgress({ settings: s, todaySec: 0 });
+  ok(yesterdayDone.achieved === false, '昨天练满不影响今天：新的一天从未达标开始');
+  ok(yesterdayDone.percent === 0, '新的一天进度为 0');
+  ok(yesterdayDone.leftSec === 600, '新的一天还差完整的 10 分钟');
+
+  // 同一个「已练时长」输入永远得到同一个结果（无隐藏状态）
+  const a = D.dailyPlanProgress({ settings: s, todaySec: 600 });
+  const b = D.dailyPlanProgress({ settings: s, todaySec: 600 });
+  ok(a.achieved === b.achieved && a.percent === b.percent,
+    '相同输入得到相同结果（进度是纯函数，不依赖历史调用）');
+
+  // 依赖的输入里不存在任何「完成标记」字段
+  const keys = Object.keys(D).sort().join(',');
+  ok(!keys.includes('planDoneToday'), 'daily.js 不再导出 planDoneToday（冗余状态已清理）');
 }
 
 /* ============================================================
@@ -216,27 +227,31 @@ console.log('【5】buildDailyPlan 复用 planMixedSession（不另造出题逻�
 /* ============================================================
    【6】设置项读写
    ============================================================ */
-console.log('【6】设置项 dailyPlanMinutes / dailyPlanDoneOn 的读写');
+console.log('【6】设置项 dailyPlanMinutes 的读写');
 
 {
   const st = S.loadSettings();
   ok(st.dailyPlanMinutes === 10, '默认每日计划时长为 10 分钟');
-  ok(st.dailyPlanDoneOn === '', '默认完成标记为空字符串');
   ok(typeof st.dailyPlanMinutes === 'number', 'dailyPlanMinutes 是数字类型（会走数值校验分支）');
-  ok(typeof st.dailyPlanDoneOn === 'string', 'dailyPlanDoneOn 是字符串类型');
+  ok(st.dailyPlanDoneOn === undefined, 'dailyPlanDoneOn 已从设置里彻底移除（不是留了个空值）');
 
   st.dailyPlanMinutes = 25;
-  st.dailyPlanDoneOn = '2026-10-10';
   S.saveSettings(st);
   const back = S.loadSettings();
   ok(back.dailyPlanMinutes === 25, '保存后读回 25 分钟');
-  ok(back.dailyPlanDoneOn === '2026-10-10', '保存后读回完成日期');
 
   // 类型校验：存了脏值要能回落而不是崩溃
-  ls.setItem(S.KEYS.settings, JSON.stringify({ dailyPlanMinutes: 'abc', dailyPlanDoneOn: 123 }));
+  ls.setItem(S.KEYS.settings, JSON.stringify({ dailyPlanMinutes: 'abc' }));
   const dirty = S.loadSettings();
   ok(dirty.dailyPlanMinutes === 10, '脏值 "abc" 回落到默认 10');
-  ok(typeof dirty.dailyPlanDoneOn === 'string', '脏值 123 被转成字符串（不保留数字）');
+
+  /* 旧版本存下来的 dailyPlanDoneOn 不能造成任何影响 ——
+     loadSettings 只遍历 DEFAULT_SETTINGS 的键，多余字段会被忽略。
+     这条守的是「升级后老设置项不会复活」。 */
+  ls.setItem(S.KEYS.settings, JSON.stringify({ dailyPlanMinutes: 8, dailyPlanDoneOn: '2026-10-10' }));
+  const legacy = S.loadSettings();
+  ok(legacy.dailyPlanMinutes === 8, '老设置里的其它项照常读回');
+  ok(legacy.dailyPlanDoneOn === undefined, '旧的 dailyPlanDoneOn 被忽略，不会复活');
 }
 
 /* ============================================================

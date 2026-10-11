@@ -19,17 +19,82 @@ import { LEVEL_MAP } from './questions.js';
    ============================================================ */
 
 /**
+ * 从「每日聚合」（daily）算出**终身累计**值。
+ *
+ * 【为什么必须单独算】`appendRecord` 把历史记录硬截断到最近 2000 条
+ * （防 localStorage 无限增长），而累计卡片原先是从这份**被截断的历史**
+ * 现算的 —— 于是练到 2000 局之后，每练一局就丢一条最老的，
+ * 「累计练习 / 累计字数 / 累计时长 / 累计练习天数」**冻结在 2000 不再增长**，
+ * 而且实际值与显示值的偏差只会越来越大（实测：练 2100 局显示 2000 局）。
+ * 数字往小走是最不能接受的一类统计错误 —— 用户会以为数据丢了。
+ *
+ * `daily` 是按日期聚合的，**不受条数上限影响**，正是为这种「终身量」准备的。
+ * 它由 `updateDaily` 在每次落库时增量维护，导入时又由合并后的历史重建，
+ * 所以始终是完整的。
+ *
+ * 【口径限制】这里只取**可加计数**（次数 / 字数 / 时长 / 天数 / 最佳速度）。
+ * 均值不从 daily 取：daily 里的 speedSum / accSum 是**未加权求和**
+ * （见 storage.js::dailyDelta，`num(v, 1)` 的第二个参数是小数位数而非权重），
+ * 而 summarize 的均值是「速度按时长加权、正确率按字数加权」。
+ * 两者口径不同，混用会让同一排卡片自相矛盾 —— 均值保持原口径，
+ * 它是「保留窗口内的平均」，不随截断而错误。
+ *
+ * @returns {{sessions:number, chars:number, seconds:number,
+ *            bestSpeed:number, days:number, daySet:Set<string>}}
+ */
+function cumulativeFromDaily() {
+  const daily = loadDaily();
+  let sessions = 0, chars = 0, seconds = 0, bestSpeed = 0;
+  const daySet = new Set();
+
+  for (const [k, v] of Object.entries(daily)) {
+    // 只认规范的日期键：脏键（手工改过存储、旧版本残留）不计入
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(k)) continue;
+    if (!v || typeof v !== 'object') continue;
+    daySet.add(k);
+    sessions += num(v.sessions);
+    chars += num(v.chars);
+    seconds += num(v.durationSec);
+    bestSpeed = Math.max(bestSpeed, num(v.bestSpeed, 1));
+  }
+
+  return { sessions, chars, seconds, bestSpeed, days: daySet.size, daySet };
+}
+
+/**
  * @param {Array} history 可选，默认从存储读取
+ *
+ * 【传入 history 时是纯函数】显式传数组一律只算这个数组（测试与
+ * 「按模式筛选」等场景需要），不做 daily 兜底。只有从存储读取时
+ * （不传参）才用 daily 修正累计值 —— 那时我们面对的是真实用户的全量数据，
+ * 而 history 可能已被截断。
  */
 export function summarize(history) {
-  const list = Array.isArray(history) ? history : loadHistory();
+  const fromStorage = !Array.isArray(history);
+  const list = fromStorage ? loadHistory() : history;
   const empty = {
     sessions: 0, totalChars: 0, totalSeconds: 0,
     bestSpeed: 0, avgSpeed: 0, avgAccuracy: 0,
     bestAccuracy: 0, streakDays: 0, totalDays: 0,
     lastTs: 0, todayChars: 0, todaySessions: 0, todaySeconds: 0
   };
-  if (!list.length) return empty;
+
+  /* 终身累计（只在从存储读取时算）。即便历史被清空/被截断，
+     daily 里仍有数据，所以这条兜底要在下面的 `!list.length` 之前。 */
+  const cum = fromStorage ? cumulativeFromDaily() : null;
+  const hasCum = !!(cum && cum.sessions > 0);
+
+  if (!list.length) {
+    if (!hasCum) return empty;
+    return Object.assign({}, empty, {
+      sessions: cum.sessions,
+      totalChars: cum.chars,
+      totalSeconds: cum.seconds,
+      bestSpeed: round1(cum.bestSpeed),
+      totalDays: cum.days,
+      streakDays: computeStreak(cum.daySet)
+    });
+  }
 
   let totalChars = 0;
   let totalSeconds = 0;
@@ -71,7 +136,7 @@ export function summarize(history) {
   const today = dateStr(new Date());
   const todayRecs = list.filter(r => r.date === today);
 
-  return {
+  const result = {
     sessions: list.length,
     totalChars,
     totalSeconds,
@@ -88,6 +153,22 @@ export function summarize(history) {
        用户设的是分钟，进度就该用同一单位回报（理由见 core/daily.js）。 */
     todaySeconds: todayRecs.reduce((s, r) => s + num(r.durationSec), 0)
   };
+
+  /* 用 daily 修正累计值。取**较大值**而不是直接替换：
+     - daily 正常时它 ≥ 历史（历史被截断），取大值即采用 daily；
+     - daily 缺失或形状老旧（早期版本的日报字段不全）时它可能偏小，
+       这时保留历史算出的值，绝不因为日报不全而让数字变小。
+     两者都保证结果**单调不减** —— 这是这类统计唯一的硬要求。 */
+  if (hasCum) {
+    result.sessions = Math.max(result.sessions, cum.sessions);
+    result.totalChars = Math.max(result.totalChars, cum.chars);
+    result.totalSeconds = Math.max(result.totalSeconds, cum.seconds);
+    result.totalDays = Math.max(result.totalDays, cum.days);
+    result.bestSpeed = round1(Math.max(result.bestSpeed, cum.bestSpeed));
+    result.streakDays = Math.max(result.streakDays, computeStreak(cum.daySet));
+  }
+
+  return result;
 }
 
 /** 计算连续练习天数（含今天或从昨天起算） */

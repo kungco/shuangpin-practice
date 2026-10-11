@@ -312,9 +312,51 @@ console.log('【8】边界：空内容');
 }
 
 /* ============================================================
-   【9】练习包与完整备份互不干扰
+   【10】版本号校验
+   ------------------------------------------------------------
+   与 importAll 同一原则：来自更新版本的包可能带当前读不懂的字段，
+   宁可明确拒绝也不要装作导入成功（那会静默丢材料）。
    ============================================================ */
-console.log('【9】练习包与完整备份的字段不重叠');
+console.log('【10】练习包的版本号校验');
+
+{
+  S.clearAll();
+  const cur = S.PACK_VERSION;
+
+  const same = S.importPack({
+    app: S.PACK_APP, version: cur,
+    entries: [{ title: '同版本包', text: '同版本内容' }]
+  });
+  ok(same.ok === true, `同版本（v${cur}）练习包可导入`);
+
+  const older = S.importPack({
+    app: S.PACK_APP, version: cur - 1,
+    entries: [{ title: '旧版本包', text: '旧版本内容' }]
+  });
+  ok(older.ok === true, '更旧版本的练习包可导入');
+
+  const noVer = S.importPack({
+    app: S.PACK_APP,
+    entries: [{ title: '无版本号包', text: '没有版本号的内容' }]
+  });
+  ok(noVer.ok === true, '没有版本号的练习包可导入（早期版本没写这个字段）');
+
+  const newer = S.importPack({
+    app: S.PACK_APP, version: cur + 1,
+    entries: [{ title: '未来版本包', text: '未来版本的内容' }]
+  });
+  ok(newer.ok === false, '来自更新版本的练习包被拒绝');
+  ok(/更新的版本/.test(newer.message), `提示说明「来自更新的版本」（${newer.message}）`);
+  ok(newer.message.includes(`v${cur + 1}`) && newer.message.includes(`v${cur}`),
+    '提示带上双方版本号');
+  ok(!S.loadShelf().some(e => e.text === '未来版本的内容'),
+    '被拒绝的包一份材料都没进库（不是「导了一半才报错」）');
+}
+
+/* ============================================================
+   【11】练习包与完整备份互不干扰
+   ============================================================ */
+console.log('【11】练习包与完整备份的字段不重叠');
 
 {
   S.clearAll();

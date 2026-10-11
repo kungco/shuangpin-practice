@@ -319,10 +319,6 @@ export const DEFAULT_SETTINGS = {
      为什么不合并成一个：字数目标无法回答「该练什么内容」，
      而「练 5 分钟」也无法体现「今天还差多少字」。 */
   dailyPlanMinutes: 10,
-  /* 今日计划完成的期号。存的是日期字符串（YYYY-MM-DD），
-     不是布尔 —— 跨零点后自动失效，不用定时器去重置。
-     达到当日计划时长即写入当天日期；进度显示按「今日已练时长」实时算。 */
-  dailyPlanDoneOn: '',
   /* 自定义文本内容。跟打自己的材料 —— 内置语料练到头之后，
      边际收益趋近于零。存进设置而不是单独的 key，是为了跟着
      「导出数据」一起备份：用户辛苦粘的长文不该导出时丢掉。
@@ -2203,7 +2199,27 @@ export function importAll(payload) {
       return { ok: false, message: '文件内容不是有效的 JSON 对象' };
     }
     if (payload.app !== 'shuangpin-practice') {
+      // 拿错文件是最常见的失误。若对方拿的是练习包，直接告诉他该用哪个入口 ——
+      // 只说「不是本应用的数据文件」会让他以为文件坏了。
+      if (payload.app === PACK_APP) {
+        return { ok: false, message: '这是「练习包」，不是完整数据备份。请改用「导入练习包」。' };
+      }
       return { ok: false, message: '这不是本应用导出的数据文件' };
+    }
+
+    /* 版本校验：只接受**当前或更旧**的备份。
+       来自更新版本的备份字段结构可能已变（增删、改名、语义调整），
+       按当前逻辑「尽力而为」地合并会**静默丢数据** —— 用户以为导入成功，
+       实际少了一部分。宁可明确拒绝并让他先升级，也不要假装成功。
+       缺失 version 的是早期版本（那时还没写这个字段），一律放行：
+       它们只会更简单，现有逻辑都能兼容。 */
+    const fileVer = Number(payload.version);
+    if (Number.isFinite(fileVer) && fileVer > DATA_VERSION) {
+      return {
+        ok: false,
+        message: `这份备份来自更新的版本（v${fileVer}），当前版本只认到 v${DATA_VERSION}。` +
+          `请先把应用更新到最新版再导入，以免数据丢失。`
+      };
     }
 
     let n = 0;
@@ -2705,6 +2721,17 @@ export function importPack(payload) {
     }
     if (!Array.isArray(payload.entries)) {
       return { ok: false, message: '练习包格式不正确：缺少材料列表' };
+    }
+
+    /* 版本校验（与 importAll 同一原则）：来自更新版本的包可能带当前
+       读不懂的字段，宁可明确拒绝也不要装作导入成功。 */
+    const packVer = Number(payload.version);
+    if (Number.isFinite(packVer) && packVer > PACK_VERSION) {
+      return {
+        ok: false,
+        message: `这个练习包来自更新的版本（v${packVer}），当前版本只认到 v${PACK_VERSION}。` +
+          `请先把应用更新到最新版再导入。`
+      };
     }
 
     const cur = loadShelf();
