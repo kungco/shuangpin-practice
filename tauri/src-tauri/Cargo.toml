@@ -1,0 +1,39 @@
+[package]
+name = "shuangpin-practice"
+version = "1.6.0"
+description = "小鹤双拼打字练习器"
+authors = ["kungco"]
+license = "MIT"
+edition = "2021"
+# Tauri 2 要求的最低 Rust 版本（保守取值，实际更低也能编）
+rust-version = "1.77"
+
+[lib]
+# main.rs 里调用的 `shuangpin_practice_lib::run()` 就是这个名字。
+# crate-type 保留三种是 Tauri 模板的约定（静态库/动态库给移动端用，
+# rlib 给桌面端用）—— 只做桌面的话留 rlib 也能编，但保持模板形状
+# 以后想加移动端时不用改。
+name = "shuangpin_practice_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 本应用是纯静态站点：所有逻辑都在 WebView 里的 JS 中，
+# 不调用任何 Rust 命令、不需要任何 Tauri 插件。
+# 因此 features 留空 —— 每加一个 feature 都会把体积推上去。
+tauri = { version = "2", features = [] }
+
+# 发布版的体积优化。这几项对最终 .exe 大小影响明显，
+# 正是换 Tauri 的目的所在，所以逐项说明：
+#   lto + codegen-units=1  跨模块内联并去掉重复代码，编译慢但产物小
+#   opt-level="s"          优化目标偏向体积（"z" 更极端，但可能拖慢启动）
+#   panic="abort"          去掉 panic 展开表
+#   strip                  丢掉符号表
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

@@ -61,8 +61,11 @@ Chromium 核心是静态链接进主程序的，这一块**删不掉**。其余�
 > 这个模式**默认关闭**，而且属于实验性裁剪：这些库缺失时 Chromium 通常会优雅降级
 > （软件渲染、不播媒体）而不是崩溃，但**没有在每台目标机器上逐一验证过**。
 > 要发布给别人用，建议先自己在目标环境上确认能正常启动与显示。
-> 想更进一步只能换壳（Tauri / Wails 之类用系统 WebView 的方案，
-> 可做到 5 MB 量级），代价是要引入 Rust / Go 工具链并放弃 Electron 生态。
+> 想更进一步只能换壳：**`tauri/` 目录里已经放了一个 Tauri 版外壳**
+> （复用系统 WebView2，自己不带浏览器内核），应用本体完全复用同一份静态站点。
+> 代价是构建需要 Rust + MSVC 生成工具，而且「几 MB」的前提是目标机器已有
+> WebView2 —— 要覆盖没有它、又不能联网的机器，安装包会涨到上百 MB。
+> 详见 [`tauri/README.md`](tauri/README.md)。
 
 ### Windows 网页版（`.zip`，最轻量）
 
@@ -460,6 +463,7 @@ src/ui/sound.js           按键音效（WebAudio 实时合成，无音频文件
 src/ui/speech.js          语音朗读（speechSynthesis 封装；主动探测中文语音，缺失时如实降级）
 package.json              仅供自检脚本使用：声明 "type": "module"（见「自检」一节）
 desktop/                  Electron 套壳打包工程（出免安装版 .exe，见「Windows 桌面版」）
+tauri/                    Tauri 套壳打包工程（复用系统 WebView2，体积更小；未构建验证，见其中 README）
 _test/                    开发期自检脚本（十三套 + 一份性能基准）+ 三个静态服务器 + 启动探测
 _test/tools/              构建期维护工具（题库体检 / 扩充 / 去重 / 截图 / 网页版打包），不参与 npm test
 .github/workflows/        CI：Node 18/20/22 三版本各跑一遍全部自检

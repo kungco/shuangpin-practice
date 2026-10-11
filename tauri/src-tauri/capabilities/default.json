@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "双拼练习不需要任何 Tauri 命令或插件权限 —— 它是纯静态站点，所有逻辑都在 WebView 的 JS 里跑，不调用 Rust 侧。这里只保留 core 的默认权限集，够窗口正常创建与运行。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

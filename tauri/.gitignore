@@ -1,0 +1,5 @@
+# 由 tools/prepare-frontend.mjs 从仓库根复制生成，不进版本库
+dist/
+# npm 依赖
+node_modules/
+package-lock.json
