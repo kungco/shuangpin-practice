@@ -2832,8 +2832,52 @@ export function storageUsage() {
   return bytes;
 }
 
-/** 题量输入、导入与旧设置共用边界，0 表示不限。 */
-export function normalizeCount(value) {
+/**
+ * 存储占用的「软上限」（字节）。
+ *
+ * 【为什么要一个软上限】原先只有**事后**提示：等写入失败、降级到内存了，
+ * 顶栏才变成「配额已满」。那时用户已经在丢数据了 —— 练习记录写不进去，
+ * 关掉页面就没了。这类提示要提前，才有机会做点什么（导出备份、删掉不用的材料）。
+ *
+ * 【为什么是 8 MB 字节】各家浏览器的 localStorage 配额并不统一，且无法查询。
+ * 常见口径是「每个源 5 MB」，而 Chrome 按 UTF-16 **码元**计数，
+ * 1 个字符 = 2 字节 —— 也就是约 500 万个字符 ≈ 10 MB 字节。
+ * storageUsage() 返回的正是字节数（`v.length * 2`）。
+ * 取 8 MB 字节 ≈ 400 万字符，约合常见配额的 80%，留出反应余地。
+ * 这个值只用于**提前提醒**，不参与任何逻辑判断 —— 估错了最多是提醒早一点或晚一点，
+ * 不会让数据出错。真实的「满了没有」永远以写入是否成功为准。
+ */
+export const STORAGE_SOFT_LIMIT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * 存储压力：当前占用相对软上限的比例与等级。
+ *
+ * @returns {{bytes:number, limit:number, ratio:number, level:'ok'|'medium'|'high'}}
+ *   level: ok <70% / medium 70–100% / high ≥100%
+ */
+export function storagePressure() {
+  const bytes = Math.max(0, Number(storageUsage()) || 0);
+  const ratio = bytes / STORAGE_SOFT_LIMIT_BYTES;
+  return {
+    bytes,
+    limit: STORAGE_SOFT_LIMIT_BYTES,
+    ratio,
+    level: ratio >= 1 ? 'high' : ratio >= 0.7 ? 'medium' : 'ok'
+  };
+}
+
+/**
+ * 某个 localStorage 键是否属于本应用。
+ *
+ * 给跨标签同步用：`storage` 事件是**同一浏览器里所有源**共用的通道，
+ * 别的网页写自己的键也会触发。不过滤的话，用户开着别的网站，
+ * 我们就会莫名其妙地重画一遍界面。
+ */
+export function isAppKey(key) {
+  return typeof key === 'string' && key.startsWith(`${NS}.`);
+}
+
+/** 题量输入、导入与旧设置共用边界，0 表示不限。 */export function normalizeCount(value) {
   const n = Number(value);
   return Number.isFinite(n) ? Math.max(0, Math.min(5000, Math.floor(n))) : 20;
 }

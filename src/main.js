@@ -286,21 +286,41 @@ function renderStorageBadge() {
   }
   const note = $('#storageNote');
   if (note) {
-    let bytes = 0;
-    try { bytes = S.storageUsage(); } catch (_) {}
-    const kb = (bytes / 1024).toFixed(1);
-    note.textContent = mode === 'persistent' || mode === 'unprobed'
-      ? `所有数据保存在浏览器 localStorage 中（当前约 ${kb} KB），不会上传到任何服务器。清除浏览器数据会导致记录丢失，建议定期导出备份。`
-      : `${info.tip}（当前约 ${kb} KB）` + (mode === 'quota-memory'
+    /* 占用与预警。原先只显示 KB 数，用户看不出「离满还有多远」——
+       等到写入失败降级才提示，那时已经开始丢数据了。
+       这里按软上限分三档提前说（阈值与口径见 storage.js::STORAGE_SOFT_LIMIT_BYTES）。 */
+    let p = { bytes: 0, ratio: 0, level: 'ok' };
+    try { p = S.storagePressure(); } catch (_) {}
+    const size = p.bytes >= 1048576
+      ? `${(p.bytes / 1048576).toFixed(2)} MB`
+      : `${(p.bytes / 1024).toFixed(1)} KB`;
+
+    const degraded = mode === 'memory' || mode === 'quota-memory';
+    let text;
+    if (degraded) {
+      text = `${info.tip}（当前约 ${size}）` + (mode === 'quota-memory'
         ? '历史记录可能仍完整（那是之前写入的），但新的练习记录不再落盘。'
         : '');
-    note.classList.toggle('is-warn', mode === 'memory' || mode === 'quota-memory');
+    } else if (p.level === 'high') {
+      text = `本地存储已用约 ${size}，已接近浏览器上限。建议先「导出数据」备份，` +
+        `再删掉书架里不再练的材料腾出空间 —— 写满后新的练习记录将不再保存。`;
+    } else if (p.level === 'medium') {
+      text = `所有数据保存在浏览器 localStorage 中（当前约 ${size}），不会上传到任何服务器。` +
+        `占用已偏高，建议定期导出备份。`;
+    } else {
+      text = `所有数据保存在浏览器 localStorage 中（当前约 ${size}），不会上传到任何服务器。` +
+        `清除浏览器数据会导致记录丢失，建议定期导出备份。`;
+    }
+    note.textContent = text;
+    note.classList.toggle('is-warn', degraded || p.level !== 'ok');
   }
   return mode;
 }
 
 /** 存储状态一旦转差就提醒一次，避免用户白练。 */
 let lastStorageWarn = '';
+/** 容量预警的「已提醒」标记，与降级提醒分开记（两者可以各自发生一次）。 */
+let lastPressureWarn = '';
 function watchStorageMode() {
   const mode = S.storageModeName();
   if (mode === 'memory' || mode === 'quota-memory') {
@@ -312,7 +332,109 @@ function watchStorageMode() {
   } else {
     lastStorageWarn = '';
   }
+
+  /* 事前预警：接近配额就说，而不是等写失败。
+     只在高档提醒一次，且腾出空间后重置标记（下次再满会再提醒）。 */
+  try {
+    const p = S.storagePressure();
+    if (p.level === 'high' && lastPressureWarn !== 'high') {
+      lastPressureWarn = 'high';
+      toast(`本地存储已用约 ${(p.bytes / 1048576).toFixed(1)} MB，接近浏览器上限。`
+        + `建议先导出备份，并清理书架里不再需要的材料。`, 'err', 7000);
+    } else if (p.level !== 'high' && lastPressureWarn === 'high') {
+      lastPressureWarn = '';
+    }
+  } catch (_) {}
+
   renderStorageBadge();
+}
+
+/* ============================================================
+   跨标签页同步
+   ------------------------------------------------------------
+   【为什么需要】网页版可以同时开多个标签页。每个标签页各自持有一份内存态
+   （app.settings、已渲染的列表…），而 localStorage 是共享的 —— 于是：
+     ① A 页改了设置，B 页界面还是旧的，用户以为没保存上；
+     ② 更糟的是 B 页随后保存自己的旧设置，把 A 的改动**覆盖**掉。
+   `storage` 事件是浏览器提供的唯一跨标签通知通道，用它把 B 页拉回同步。
+
+   【边界】这个事件**只在其它标签页**里触发（当前页自己写不会触发自己），
+   正好就是我们要的语义。事件里带 key / newValue，但我们不直接采信 newValue ——
+   重新从存储读一遍更简单也更可靠（一次改动可能连带写多个键）。
+   ============================================================ */
+
+/** 合并短时间内的多次改动：一次导入会连写十几个键，不必刷十几次界面。 */
+let crossTabTimer = null;
+let crossTabPendingKeys = new Set();
+
+/**
+ * 当前是否有正在进行的练习（含暂停）。
+ *
+ * 【为什么不能只看 app.view】用户在练习页不等于在练习 —— 点进来还没开始、
+ * 或者已经打完了，都停在同一个视图上。真正的判据是引擎状态。
+ * （曾经想当然地写了 app.sessionActive，而那个属性在 main.js 里
+ *   从来没被赋过值 —— 守卫永远不会触发，等于没写。）
+ */
+function isSessionInProgress() {
+  const eng = app.engine;
+  if (!eng) return false;
+  return eng.state === STATE.RUNNING || eng.state === STATE.PAUSED;
+}
+
+function initCrossTabSync() {
+  if (typeof window === 'undefined' || !window.addEventListener) return;
+  window.addEventListener('storage', (e) => {
+    // 别的网页写自己的键也会触发这个事件，先过滤掉
+    if (!S.isAppKey(e && e.key)) return;
+    crossTabPendingKeys.add(e.key);
+    if (crossTabTimer) clearTimeout(crossTabTimer);
+    crossTabTimer = setTimeout(applyExternalChange, 150);
+  });
+}
+
+function applyExternalChange() {
+  crossTabTimer = null;
+  const keys = crossTabPendingKeys;
+  crossTabPendingKeys = new Set();
+  if (!keys.size) return;
+
+  try {
+    /* 设置：重新读盘。练习进行中也读 —— 本轮已经用到的参数（时长、题量）
+       早就复制进引擎了，不会中途改变正在进行的这一局；而下一局该用新值。 */
+    app.settings = S.loadSettings();
+
+    const touched = (k) => keys.has(S.KEYS[k]);
+
+    /* 练习进行中不重画界面：正在答题时列表被换掉，光标和注意力都会断。
+       等这一局结束，原有的结算流程本来就会重画。 */
+    if (isSessionInProgress()) {
+      toast('另一个标签页更新了数据，将在本轮结束后同步', 'ok', 4000);
+      return;
+    }
+
+    if (touched('shelf')) renderShelf();
+    if (touched('course')) renderCourseBox();
+    if (touched('settings')) {
+      syncSettingsUI();
+      initShortcutSettings();
+      motionClass(currentReduceMotion());
+    }
+    // 当前正在看的那一页跟着刷新
+    if (app.view === 'stats' && (touched('history') || touched('daily') || touched('weak') ||
+        touched('keyErrors') || touched('keyConfusions') || touched('keyTimings'))) {
+      renderStatsView();
+    }
+    if (app.view === 'review' && (touched('weak') || touched('history'))) renderReviewView();
+    if (app.view === 'practice') {
+      renderDailyPlan();
+      showResumeHint();
+    }
+    watchStorageMode();
+
+    toast('已同步另一个标签页的数据更新', 'ok', 3000);
+  } catch (err) {
+    console.warn('[crosstab] 同步失败', err);
+  }
 }
 
 /* ============================================================
@@ -598,6 +720,7 @@ function initSetupPanel() {
   initDailyPlan();
   initShelf();
   initCourse();
+  initCrossTabSync();
 
   const btnStart = $('#btnStart');
   // 注意：必须用箭头函数包装。若直接传 startSession，
@@ -865,6 +988,9 @@ function initShelf() {
         app.shelfActiveId = entry.id;
         toast('已存入书架，下次可直接从列表继续');
         renderShelf();
+        /* 存材料是占地最大的一类写入（单篇上限 2 万字）。
+           顺手检查一次占用，接近上限就当场提醒 —— 别等下次练习写不进去。 */
+        watchStorageMode();
       }
     });
   }

@@ -1428,6 +1428,67 @@ console.log('\n【21】导入备份的版本号校验');
   ok(/导入练习包/.test(wrong.message), `提示改用「导入练习包」（${wrong.message}）`);
 }
 
+/* ============================================================
+   【22】存储容量压力与跨标签键名判定
+   ------------------------------------------------------------
+   容量预警要**事前**说，而不是等写入失败降级之后（那时已经在丢数据了）。
+   这里守的是「压力分档」的口径，以及跨标签同步用来过滤事件的键名判定。
+   ============================================================ */
+console.log('\n【22】存储容量压力与跨标签键名判定');
+
+{
+  const ls = makeLocalStorage();
+  installWindow(ls);
+  const S = await freshStorage();
+
+  /* ---- isAppKey：storage 事件是全源共用的通道，必须能过滤出本应用的键 ---- */
+  ok(S.isAppKey(S.KEYS.settings) === true, '本应用的设置键被认出');
+  ok(S.isAppKey(S.KEYS.shelf) === true, '本应用的书架键被认出');
+  ok(S.isAppKey('some-other-site-key') === false, '别的网站的键被排除');
+  ok(S.isAppKey('shuangpin') === false, '只有命名空间前缀不算（必须是带点的完整前缀）');
+  ok(S.isAppKey('') === false, '空字符串不算');
+  ok(S.isAppKey(null) === false, 'null 不算');
+  ok(S.isAppKey(undefined) === false, 'undefined 不算');
+  ok(S.isAppKey(123) === false, '非字符串不算（storage 事件的 key 在 clear() 时是 null）');
+
+  /* ---- storagePressure：分档口径 ---- */
+  const empty = S.storagePressure();
+  ok(empty.level === 'ok', '空存储为 ok 档');
+  ok(empty.ratio === 0, '空存储比例为 0');
+  ok(empty.limit === S.STORAGE_SOFT_LIMIT_BYTES, '返回软上限供界面说明');
+  ok(S.STORAGE_SOFT_LIMIT_BYTES === 8 * 1024 * 1024, '软上限为 8 MB 字节（约常见配额的 80%）');
+
+  /* storageUsage 按 `v.length * 2` 计（UTF-16），所以写入 N 个字符 = 2N 字节。
+     这里直接写进某个 KEYS 条目来构造占用。 */
+  const fill = (chars) => ls.setItem(S.KEYS.history, 'x'.repeat(chars));
+
+  // 约 50% → 仍是 ok
+  fill(Math.floor(S.STORAGE_SOFT_LIMIT_BYTES * 0.5 / 2));
+  ok(S.storagePressure().level === 'ok', '约 50% 占用仍为 ok 档');
+
+  // 约 80% → medium
+  fill(Math.floor(S.STORAGE_SOFT_LIMIT_BYTES * 0.8 / 2));
+  ok(S.storagePressure().level === 'medium', '约 80% 占用进入 medium 档（该提醒备份了）');
+
+  // 约 120% → high
+  fill(Math.floor(S.STORAGE_SOFT_LIMIT_BYTES * 1.2 / 2));
+  const high = S.storagePressure();
+  ok(high.level === 'high', '超过软上限进入 high 档（该提示清理了）');
+  ok(high.ratio > 1, `比例为 ${high.ratio.toFixed(2)}（>1）`);
+
+  // 边界：恰好 70% 算 medium（≥），恰好 100% 算 high（≥）
+  // 用 ceil 而不是 floor：floor 会让实际占用差一点点不到阈值，测的是舍入而不是语义
+  fill(Math.ceil(S.STORAGE_SOFT_LIMIT_BYTES * 0.7 / 2));
+  ok(S.storagePressure().level === 'medium', '恰好 70% 即进入 medium（≥ 语义）');
+  fill(Math.ceil(S.STORAGE_SOFT_LIMIT_BYTES / 2));
+  ok(S.storagePressure().level === 'high', '恰好 100% 即进入 high（≥ 语义）');
+
+  // 压力只是提示，绝不能因为估算改动数据
+  const rawBefore = ls.getItem(S.KEYS.history);
+  S.storagePressure();
+  ok(ls.getItem(S.KEYS.history) === rawBefore, '压力估算不修改任何数据（只读）');
+}
+
 console.log('\n' + (fail === 0
   ? '✅ 存储层自检全部通过'
   : `❌ 存储层自检共 ${fail} 项未通过`));

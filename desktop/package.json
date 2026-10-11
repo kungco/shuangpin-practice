@@ -1,6 +1,6 @@
 {
   "name": "shuangpin-practice-desktop",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "description": "双拼练习的 Windows 桌面封装（Electron 套壳）。应用本体仍是仓库根的零依赖静态站点，此目录只负责打包。",
   "author": "kungco",
@@ -10,7 +10,8 @@
     "start": "electron .",
     "build": "electron-builder --win portable",
     "build:dir": "electron-builder --win --dir",
-    "build:installer": "electron-builder --win nsis"
+    "build:installer": "electron-builder --win nsis",
+    "build:slim": "node scripts/build-slim.cjs"
   },
   "devDependencies": {
     "electron": "^33.2.0",
@@ -19,6 +20,7 @@
   "build": {
     "appId": "com.kungco.shuangpinpractice",
     "productName": "双拼练习",
+    "afterPack": "./after-pack.cjs",
     "directories": {
       "output": "dist"
     },

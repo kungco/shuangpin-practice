@@ -3131,6 +3131,86 @@ console.log('\n【12d4】书架搜索过滤（接线层）');
   cleanupAll();
 }
 
+/* ---------- 【12d5】跨标签页同步 ---------- */
+console.log('\n【12d5】跨标签页同步（storage 事件）');
+{
+  const cleanupAll = () => {
+    if (app.engine) { app.engine.destroy(); app.engine = null; }
+    app.sessionActive = false;
+    q('#sessionPanel').hidden = true;
+    q('#setupPanel').hidden = false;
+    q('#overlay').hidden = true;
+  };
+  cleanupAll();
+
+  /* 模拟「另一个标签页改了存储」：浏览器只在**其它**标签页触发 storage 事件，
+     这里直接调我们注册在 window 上的那个监听器，语义等价。 */
+  const handlers = (fakeWindow._ls && fakeWindow._ls.storage) || [];
+  ok(handlers.length >= 1, `已注册 storage 监听（${handlers.length} 个）`);
+  const emit = (key) => handlers.forEach(h => { try { h({ key, newValue: 'x' }); } catch (_) {} });
+  const toastText = () => (q('#toastWrap') ? q('#toastWrap').textContent : '');
+
+  fire(q('[data-view="practice"]'), 'click');
+  await settle();
+
+  /* ① 别的网页写自己的键也会触发 storage 事件 —— 必须完全无视，
+     否则用户开着别的网站，我们就会莫名其妙重画界面。 */
+  q('#toastWrap').innerHTML = '';
+  emit('some-other-site-key');
+  await H.advance(300);
+  await settle();
+  ok(!/已同步/.test(toastText()), '非本应用的键被忽略（不触发同步）');
+
+  /* ② 本应用的书架键 → 重画书架列表 */
+  sMod.clearAll();
+  q('#toastWrap').innerHTML = '';
+  sMod.saveShelf([{ id: 'ct1', title: '同步测试材料', tags: [], text: '同步用的正文内容' }]);
+  emit(sMod.KEYS.shelf);
+  await H.advance(300);
+  await settle();
+  ok(qa('#shelfList .shelf-item').length === 1,
+    `另一标签页改书架后本页列表已刷新（${qa('#shelfList .shelf-item').length} 项）`);
+  ok(/已同步/.test(toastText()), '给出了「已同步」提示');
+
+  /* ③ 设置键 → 本页内存态重新读盘（否则本页随后保存旧值会把对方覆盖掉） */
+  const st = sMod.loadSettings();
+  st.duration = 777;
+  sMod.saveSettings(st);
+  emit(sMod.KEYS.settings);
+  await H.advance(300);
+  await settle();
+  ok(app.settings.duration === 777,
+    `另一标签页改设置后本页已同步（duration=${app.settings.duration}）`);
+
+  /* ④ 连续多次改动只处理一次：一次导入会连写十几个键，
+     不合并的话界面会被重画十几次。 */
+  q('#toastWrap').innerHTML = '';
+  emit(sMod.KEYS.history);
+  emit(sMod.KEYS.daily);
+  emit(sMod.KEYS.weak);
+  await H.advance(300);
+  await settle();
+  const syncToasts = (toastText().match(/已同步/g) || []).length;
+  ok(syncToasts === 1, `同一批改动合并成一次同步（实际 ${syncToasts} 次）`);
+
+  /* ⑤ 练习进行中不重画界面（会打断注意力），但要告知。
+     判据是**引擎状态**，不是 app.view —— 停在练习页不等于在练习。 */
+  fire(q('#btnSmartMix'), 'click');
+  await settle();
+  ok(!!app.engine && app.engine.state === 'running', '已进入练习（前提成立）');
+  q('#toastWrap').innerHTML = '';
+  sMod.saveShelf([]);
+  emit(sMod.KEYS.shelf);
+  await H.advance(300);
+  await settle();
+  ok(/本轮结束后同步/.test(toastText()), `练习中提示将在本轮结束后同步（${toastText().slice(0, 40)}）`);
+  ok(qa('#shelfList .shelf-item').length === 1,
+    '练习中不重画书架列表（列表仍是旧内容，未打断当前这一局）');
+
+  app.engine.destroy(); app.engine = null;
+  cleanupAll();
+}
+
 /* ---------- 【12e】刷新 → 续练 → 达标 → 晋级 ---------- */
 console.log('\n【12e】课程续练：归属跟着存档走');
 {
