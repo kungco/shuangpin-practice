@@ -11,6 +11,11 @@
  *   C. 标签 / goto 是否配对（错一个就是死循环或跳到文件尾）
  *   D. 回退链是否三级齐全
  *   E. 服务端脚本（serve.mjs / serve.ps1）的接口是否与调用方式一致
+ *   F. 安全检查（不引入外部可执行文件、不越权）
+ *   G. 模块类型声明（src/ 必须在 ESM 语境下被 Node 解析）
+ *   H/I. GitHub 工作流：action 版本号、Node 矩阵、命令真实存在
+ *   J. 每套自检都挂进了 npm test，且没有写错文件名
+ *   K. 版本号在五个文件里一致（漏改 tauri.conf.json 只有用户会发现）
  *
  * 运行：node _test/launcher.mjs
  */
@@ -268,6 +273,42 @@ console.log('\n【J】每套自检都必须挂进 npm test，且脚本里的文�
     ok(single.some(k => k === `test:${base}`),
       `自检文件 ${f} 有单项入口 test:${base}`);
   }
+}
+
+console.log('\n【K】版本号在五个地方必须一致');
+{
+  /* 背景：版本号散在 5 个文件里，手工发布时漏改一处是迟早的事。
+     最阴的一种漏法是漏掉 tauri.conf.json —— 下载文件名是新版本，
+     但 exe 属性里显示的还是旧版本，只有用户会碰到，开发时发现不了。
+     改动版本号请用 _test/tools/bump_version.mjs，这一节负责守住它。 */
+  const readVersionJson = (rel) =>
+    JSON.parse(readFileSync(resolve(ROOT, rel), 'utf8')).version;
+
+  const rootVer = readVersionJson('package.json');
+  ok(/^\d+\.\d+\.\d+$/.test(rootVer), `★ 根 package.json 的版本号格式合法（${rootVer}）`);
+
+  const others = [
+    ['desktop/package.json', readVersionJson('desktop/package.json')],
+    ['tauri/package.json', readVersionJson('tauri/package.json')],
+    ['tauri/src-tauri/tauri.conf.json', readVersionJson('tauri/src-tauri/tauri.conf.json')]
+  ];
+
+  // Cargo.toml 不是 JSON，单独取
+  const cargo = readFileSync(resolve(ROOT, 'tauri/src-tauri/Cargo.toml'), 'utf8');
+  const cargoVer = (cargo.match(/^version\s*=\s*"([^"]+)"/m) || [])[1];
+  ok(!!cargoVer, '★ Cargo.toml 里能取到版本号（取不到说明格式变了）');
+  others.push(['tauri/src-tauri/Cargo.toml', cargoVer]);
+
+  for (const [file, ver] of others) {
+    ok(ver === rootVer,
+      `★ ${file} 的版本号与根 package.json 一致（${ver} vs ${rootVer}）`);
+  }
+
+  // 打包脚本要从根 package.json 读版本 —— 它读的文件名必须存在
+  ok(existsSync(resolve(ROOT, 'tauri/tools/make_package.py')),
+    '★ Tauri 打包脚本存在');
+  ok(existsSync(resolve(ROOT, '_test/tools/bump_version.mjs')),
+    '★ 版本号统一脚本存在（改版本号请用它，别手改）');
 }
 
 console.log('\n' + (fail === 0

@@ -4,6 +4,10 @@
 应用本体仍然是仓库根那份**零依赖、零构建**的 `index.html + assets/ + src/`，
 这里只负责打包。
 
+> **这是当前的桌面版主力。** 早先的 Electron 版（`desktop/`）从 v1.6.0 之后
+> 不再作为下载提供 —— 同一份代码用 Tauri 打包只要 1.6 MB，Electron 是 65 MB。
+> Electron 工程保留在仓库里作为兜底，也留着一份「在 Electron 里抠体积」的实测记录。
+
 ## 实测结果
 
 已在本机构建并跑通（Windows / Rust 1.99.0 / `x86_64-pc-windows-gnu` / MinGW-w64 GCC 16.2.0）：
@@ -61,16 +65,24 @@
 cd tauri
 npm install              # 只装 @tauri-apps/cli
 npm run build            # 出 NSIS 安装包
-npm run build:portable   # 只要裸 exe（等价于 Electron 版的 portable）
+npm run build:portable   # 只要裸 exe
 npm run dev              # 开发模式
 ```
 
-也可以完全绕开 npm CLI，直接用 cargo（本机就是这么构建的）：
+也可以完全绕开 npm CLI，直接用 cargo（本机就是这么构建的），
+再打成发布用的 zip：
 
 ```bash
-node tools/prepare-frontend.mjs            # 先备好 tauri/dist
-cd src-tauri && cargo build --release      # 产物在 src-tauri/target/release/
+node tauri/tools/prepare-frontend.mjs            # 1. 备好 tauri/dist
+cd tauri/src-tauri && cargo build --release      # 2. 编译 → target/release/
+python tauri/tools/make_package.py               # 3. 打包 → dist/ShuangpinPractice-<版本>-win64.zip
 ```
+
+第 3 步**不要手工压缩**。`target/release/` 里躺着一个 22 MB 的
+`shuangpin_practice_lib.dll`（`crate-type` 里 `cdylib` 的副产物，桌面运行不需要），
+手工拖拽很容易把它一起压进去，包从 1.6 MB 变成 26 MB 而没人会注意。
+`make_package.py` 精确列出**恰好两个文件**（exe + `WebView2Loader.dll`），
+并在压缩包异常大时主动告警。
 
 ## 构建时踩到的两个坑
 
@@ -129,6 +141,7 @@ tauri/
 ├── package.json                   npm 脚本（prepare / dev / build）
 ├── tools/
 │   ├── prepare-frontend.mjs       把仓库根的静态站点复制到 tauri/dist/
+│   ├── make_package.py            打包发布用的 zip（exe + DLL + 使用说明）
 │   └── make_icons.py              生成 PNG + ICO 图标（纯标准库，无需 Pillow）
 └── src-tauri/                     Rust 工程
     ├── Cargo.toml                 依赖、体积优化、indexmap 修正（见内注释）
@@ -160,8 +173,12 @@ tauri/
 
 ## 与 Electron 版的关系
 
-两者**并存**，共用同一份静态站点，互不影响。日常还是用 Electron 版
-（已发布多版、验证充分）；Tauri 版体积小得多，但生态与踩坑记录都更少。
+**Tauri 版是当前的桌面版主力**，Electron 版（`desktop/`）从 v1.6.0 之后
+不再作为下载提供，但工程保留在仓库里 —— 它已验证过多个版本，是最稳的兜底；
+而且它那份 `build:slim` 的实测记录说明了「在 Electron 里抠体积」的天花板在哪
+（裁掉 7 个用不到的运行时组件只省 8%，因为主程序一个就 180 MB）。
+
+两者共用同一份静态站点，互不影响。
 
 > **练习记录不互通。** localStorage 按 origin 隔离：Electron 版跑在 `app://local`，
 > Tauri 版跑在 `tauri://localhost`，网页版又是另一个。三者的记录各自独立 ——
