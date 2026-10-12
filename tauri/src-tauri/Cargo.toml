@@ -19,6 +19,36 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# ---------------------------------------------------------------------------
+# 这个 indexmap 不是我们要用的，它是一条**依赖链上的必要修正**，别删。
+#
+# 问题：`indexmap 1.x` 的 build.rs 用 autocfg 编译探测「sysroot 里有没有 std」
+# 来决定是否 emit `has_std`；而这个 cfg 控制着
+#     #[cfg(has_std)]      pub struct IndexMap<K, V, S = RandomState>
+#     #[cfg(not(has_std))] pub struct IndexMap<K, V, S>
+# —— 也就是 IndexMap 有没有那个默认类型参数。
+#
+# 探测一旦失败，`schemars 0.8.22`（tauri-build / tauri-utils 依赖它做配置校验）
+# 里那句 `type Map<K, V> = indexmap::IndexMap<K, V>;` 就编译不过：
+#     error[E0107]: struct takes 3 generic arguments but 2 were supplied
+# 实测本机（rustup 的 x86_64-pc-windows-gnu）就会失败：
+# `<sysroot>/lib` 下只有 rustlib/，libstd 在 lib/rustlib/<target>/lib/，
+# autocfg 的探测拿不到，于是 has_std 没被 emit。
+#
+# 修法用的是 indexmap 作者自己留的后门 —— 它的 build.rs 第一行就是：
+#     match env::var_os("CARGO_FEATURE_STD") {
+#         Some(_) => autocfg::emit("has_std"),      // 显式开了 std 就不探测
+#         None    => autocfg::new().emit_sysroot_crate("std"),
+#     }
+# 所以这里显式打开 std feature，探测这一步就被跳过，结果与正常环境一致
+# （正常环境本来也会探测出 has_std=true）。
+#
+# 为什么放在 [build-dependencies]：出问题的 schemars 位于**构建期/过程宏**那一组
+# 依赖里（tauri-build、tauri-codegen、tauri-macros 都是 host 侧），
+# 而 resolver v2 下 host 与 target 两组的 feature 是分开统一的，放这里才对得上。
+# ---------------------------------------------------------------------------
+indexmap = { version = "1", features = ["std"] }
+
 [dependencies]
 # 本应用是纯静态站点：所有逻辑都在 WebView 里的 JS 中，
 # 不调用任何 Rust 命令、不需要任何 Tauri 插件。

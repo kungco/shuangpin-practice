@@ -33,7 +33,7 @@
       "icons/icon.ico"
     ],
     "windows": {
-      "webviewInstallMode": "downloadBootstrapper"
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true }
     }
   }
 }
