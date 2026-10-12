@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""打包「网页版」分发包（供 GitHub Release 使用）。
+"""打包「网页版」分发包。
 
-为什么需要这个脚本：
-    Release 里除了桌面版 .exe，还要挂一个网页版 zip。网页版不能直接把
-    整个仓库压进去 —— 那样会把 _test/ 下的开发期自检脚本（integration.mjs
-    一个就 147KB）、docs/、desktop/、.git/ 全都带给用户，既臃肿又让人困惑。
+⚠️ **自 v1.6.0 起，官方 Release 不再提供网页版 zip。**
+   它当初存在的理由是桌面版要 65 MB、太重；换成 Tauri 后桌面版只有 1.6 MB，
+   这个「轻量替代」就没有意义了。脚本保留下来，是因为它仍然有用：
+   Tauri 版只出 Windows 包，非 Windows 用户（或想用浏览器跑的人）
+   可以用它把仓库里必要的文件单独打包，拷到别的机器上直接用。
+   用法没变，见下方。
 
-    但也不能只挑 index.html + assets + src + .bat 四样：启动双拼练习.bat
+为什么不能直接把整个仓库压进去：
+    那样会把 _test/ 下的开发期自检脚本（integration.mjs 一个就 147KB）、
+    docs/、desktop/、.git/ 全都带给用户，既臃肿又让人困惑。
+
+但也不能只挑 index.html + assets + src + .bat 四样：启动双拼练习.bat
     还依赖 _test/ 下的三个辅助脚本（probe-service.ps1 / serve.mjs / serve.ps1），
     漏掉任何一个，用户双击就会看到「没找到可用的本地服务方式」。
 

@@ -91,7 +91,7 @@
 | `tools/dedupe_chars.mjs` | 单字表跨档去重。`--write` 才会写盘。 |
 | `tools/gen_expand.mjs` | 题库扩充生成器：逐条校验候选内容（可拆分 / 无大写 / 字数对应 / 无重复 / 短文用字全覆盖），任何一条不过就整体失败。`--write` 才会写盘。 |
 | `tools/shot.mjs` | headless Chrome + CDP 截图工具，用于视觉验证。用法：`node _test/tools/shot.mjs <url> <out.png> [width] [height] [script-file]`，可选 `script-file` 会在截图前注入执行（切视图 / 模拟按键）。注意两点：环境里有代理，必须带 `--no-proxy-server`；用 `--force-device-scale-factor=2` 才能看清细节。临时 profile 落在 `_test/.chrome-profile/`（已 gitignore）；Chrome 不在默认路径时可用 `CHROME_PATH` 环境变量指定。 |
-| `tools/make_web_package.py` | 打包网页版分发包 → `dist/ShuangpinPractice-<版本>-web.zip`。精确列出运行时必需的文件清单（含 `启动双拼练习.bat` 依赖的三个辅助脚本），二进制原样复制以保留 CRLF / BOM 约定。 |
+| `tools/make_web_package.py` | 打包网页版分发包 → `dist/ShuangpinPractice-<版本>-web.zip`。精确列出运行时必需的文件清单（含 `启动双拼练习.bat` 依赖的三个辅助脚本），二进制原样复制以保留 CRLF / BOM 约定。**自 v1.6.0 起官方 Release 不再提供这个 zip**（桌面版换成 Tauri 后只有 1.6 MB，轻量替代失去意义），脚本保留给非 Windows 用户与想用浏览器跑的人。 |
 | `tools/bump_version.mjs` | **统一修改版本号**（5 个文件：根 / desktop / tauri 的 package.json、Cargo.toml、tauri.conf.json）。用 `--dry-run` 预览。只替换版本值那一处、不重新序列化整个文件，所以 diff 里只有一行变化。漏改 `tauri.conf.json` 会让 exe 属性显示旧版本 —— `launcher.mjs` 的 K 组守着这条不变式。 |
 
 ## 运行
