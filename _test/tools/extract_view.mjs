@@ -124,6 +124,16 @@ for (const blk of lines.join('\n').matchAll(/import\s*\{([^}]*)\}\s*from/g)) {
     if (n) mainDecls.add(n);
   }
 }
+// 解构形式也要扫：`const { renderHeatmap } = heatmapView;`
+// 这类名字是「视图构造区」里转发出来的，语法上不是 `const NAME =`，
+// 所以上面那条正则扫不到。漏掉它，下一个视图（统计页面要用 renderHeatmap）
+// 就会在运行时 ReferenceError。
+for (const blk of lines.join('\n').matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=/g)) {
+  for (const item of blk[1].split(',')) {
+    const n = item.trim().split(/\s+as\s+/).pop().trim();
+    if (n) mainDecls.add(n);
+  }
+}
 
 const CTX = [...mainDecls]
   .filter((n) => !declaredInside.has(n) && IDENT(n).test(bodyText))
