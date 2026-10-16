@@ -23,13 +23,13 @@ console.log('【1】音节拆分正确性 — 抽样核对小鹤官方键位');
 const expect = {
   // 拼音: 期望编码（小鹤：每个音节恒 2 键；zh→V、ch→I、sh→U 各占一键）
   'zhang': 'VH',  'chun': 'IY',   'shuang': 'UL',
-  'xian': 'XM',   'an': 'AJ',     'lv': 'LV',
+  'xian': 'XM',   'an': 'AN',     'lv': 'LV',
   'xue': 'XT',    'que': 'QT',    'yong': 'YS',
   'jun': 'JY',    'nv': 'NV',     'er': 'ER',
   'guang': 'GL',  'xiong': 'XS',  'ri': 'RI',
   'zeng': 'ZG',   'wang': 'WH',   'yu': 'YU',
   'yun': 'YY',    'ying': 'YK',   'o': 'OO',
-  'ei': 'EW',     'weng': 'WG',   'nve': 'NT',
+  'ei': 'EI',     'weng': 'WG',   'nve': 'NT',
   // zh/ch/sh 专项：声母只占一键，第二键是韵母键
   'zhi': 'VI',    'chi': 'II',    'shi': 'UI',
   'zhu': 'VU',    'chu': 'IU',    'shu': 'UU',
@@ -250,8 +250,8 @@ console.log('【4c】零声母：数据结构统一 + 恒为 2 键');
   /* ① 数据结构一致性：buildSyllables 产出的音节对象顶层 zero 字段
         必须与 split.zero 完全一致（曾经顶层根本没这个字段，
         导致 engine 里读 syl.zero 的分支成了永远走不到的死代码）。
-     ② 行为一致性：零声母**也是 2 键**（首字母 + 韵母键），
-        与 README 的 an → AJ / a → AA / ang → AH 完全对齐。 */
+     ② 行为一致性：零声母**也是 2 键**，
+        与 README 的 an → AN / a → AA / ang → AH 完全对齐。 */
   const ZERO_SAMPLES = ['an', 'a', 'ang', 'en', 'ei', 'er', 'ou', 'ai', 'ao', 'e', 'o'];
   const mismatched = [];
   const notTwoKeys = [];
@@ -275,7 +275,7 @@ console.log('【4c】零声母：数据结构统一 + 恒为 2 键');
   ok(badAll.length === 0, `全量题库零声母音节均为 2 键且字段一致（异常 ${badAll.length}：${badAll.slice(0, 5).join(' ')}）`);
 
   // 几个点名核对（与 README 对照表一致）
-  const README_CASES = { an: 'AJ', a: 'AA', ang: 'AH' };
+  const README_CASES = { an: 'AN', a: 'AA', ang: 'AH', en:'EN', ai:'AI', ao:'AO', ou:'OU', ei:'EI', er:'ER' };
   for (const [py, code] of Object.entries(README_CASES)) {
     const s = buildSyllables([py])[0];
     ok(s.split.code === code, `${py} → ${code}（实际 ${s.split.code}）`);
@@ -1133,8 +1133,8 @@ console.log('【新增】死代码清扫：两个导出确实没有调用方且�
   // 反向确认：零声母判定仍然工作（删掉的只是一个没用的常量，不是功能）
   // 注意 splitSyllable 返回的是**数组**（一个拼音可能有多种拆法）。
   const zero = splitSyllable('an');
-  ok(zero.length >= 1 && zero[0].zero === true && zero[0].code === 'AJ',
-    '零声母判定仍然正常（an → AJ，零声母）');
+  ok(zero.length >= 1 && zero[0].zero === true && zero[0].code === 'AN',
+    '零声母判定仍然正常（an → AN，零声母）');
   const zh = splitSyllable('zhang');
   ok(zh.length >= 1 && zh[0].code === 'VH',
     '正常音节的拆分不受影响（zhang → VH）');

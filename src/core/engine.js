@@ -643,8 +643,7 @@ export class PracticeEngine {
 
     /* 零声母音节（an / a / ang / en…）在这里**不做特殊处理**。
        曾有一个 `if (syl.zero) { ...slice(0,1) }` 分支，把零声母截成「只按一键」。
-       那是错的：小鹤里零声母同样恒为 2 键，编码 = 首字母（占声母位）+ 韵母键，
-       例如 an → AJ、a → AA、ang → AH（README「关于键位」一节写得很明确）。
+       小鹤里零声母同样恒为 2 键，例如 an → AN、a → AA、ang → AH。
        该分支当时是死代码（syl 上没有 zero 字段），但一旦有人补上该字段，
        就会开始逼用户少按一键 —— 属于埋雷，故直接删除。
        零声母与有声母共用下面同一套两键推进逻辑。 */
@@ -883,7 +882,10 @@ export class PracticeEngine {
     // 任何一次按键都重置「停留计时」——即使按错，也说明用户在思考
     this._resetHintTimer();
 
-    if (key === expected) {
+    const correct = target.kind === 'syllable' && target.syl?.candidates?.length
+      ? target.syl.candidates.some(c => c.code.toLowerCase().startsWith(this.typed + key))
+      : key === expected;
+    if (correct) {
       return this._onCorrectKey(target, key);
     }
     /* 严格模式（默认）：按错必须原地修正，不推进。
@@ -900,7 +902,7 @@ export class PracticeEngine {
   /* ---- 按键正确 ---- */
   _onCorrectKey(target, key) {
     // 先取样再推进：一旦 keyIndex/charIndex 变了，期望键就换人了。
-    this._observeKeyWait(target.keys[target.pos]);
+    this._observeKeyWait(key);
     this.typed += key;
     this.stats.combo += 1;
     this.stats.maxCombo = Math.max(this.stats.maxCombo, this.stats.combo);

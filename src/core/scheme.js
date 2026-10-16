@@ -218,12 +218,19 @@ export function splitSyllable(pinyin) {
   }
 
   // —— 方案 B：零声母 ——
-  // 整串作为韵母，双拼编码为「首字母 + 韵母键」
+  // 两字母零声母优先保留拼写；首字母 + 韵母键作为兼容编码。
+  // 对照 Rime 官方小鹤方案的 derive/^([aoe])([ioun])$/ 规则。
   const yunAll = canonicalYunmu('', py);
   if (YUNMU_SET.has(yunAll)) {
     const yunKeys = YUNMU_TO_KEYS[yunAll];
     if (yunKeys && yunKeys.length) {
       const firstKey = py[0].toUpperCase();
+      if (/^[aoe][ioun]$/.test(py)) {
+        const natural = buildResult('', yunAll, [firstKey], py[1].toUpperCase(), true);
+        natural.steps[1].label = '韵尾';
+        natural.steps[1].part = py[1];
+        result.push(natural);
+      }
       result.push(buildResult('', yunAll, [firstKey], yunKeys[0], true));
     }
   }
@@ -264,12 +271,12 @@ function buildResult(sheng, yun, shengKeys, yunKey, zero) {
   };
 }
 
-/** 去重（同声母同韵母只保留一个） */
+/** 去重；零声母的同音节兼容编码分别保留。 */
 function dedupe(list) {
   const seen = new Set();
   const out = [];
   for (const r of list) {
-    const id = r.sheng + '|' + r.yun;
+    const id = r.sheng + '|' + r.yun + '|' + r.code;
     if (seen.has(id)) continue;
     seen.add(id);
     out.push(r);
@@ -298,7 +305,8 @@ export function primarySplit(pinyin) {
  *   现在顶层字段与 split 保持一致，读 syl.zero 与读 syl.split.zero 结果相同。
  *
  *   注意：零声母**不代表只需按一键**。小鹤里零声母音节同样恒为 2 键 ——
- *   编码是「首字母 + 韵母键」，例如 an → AJ、a → AA、ang → AH。
+ *   两字母零声母保留拼写（an → AN），其余用首字母 + 韵母键（a → AA、ang → AH）。
+ *   旧版的 an → AJ 等兼容编码也接受。
  *   首字母起到声母的位置作用（因为零声母没有声母键）。
  */
 export function buildSyllables(pinyins, hanziList = []) {
@@ -390,7 +398,7 @@ export function isPrefixValid(syl, typed) {
  * 一个音节最少需要几次按键。
  *
  * 【恒为 2】小鹤里每个音节都是 2 键：zh/ch/sh 各占**一个**键
- * （V/I/U），不额外加 H；零声母音节同样是「首字母 + 韵母键」两键。
+ * （V/I/U），不额外加 H；零声母同样是两键，含保留拼写的两字母音节。
  * 所以返回值实际恒为 2，保留 Math.min 只是为了让「多候选拆分」的
  * 语义在代码里显式可见。
  *

@@ -91,17 +91,15 @@ console.log('\n【3】初始界面');
 ok(!!q('#nav'), '导航栏存在');
 ok(qa('#nav .nav-btn').length === 6, `导航按钮 6 个（实际 ${qa('#nav .nav-btn').length}）`);
 
-/* 导航顺序：介绍页在前，「练习」放到最后。
-   理由：新用户进来先要知道「双拼是什么 / 值不值得学」，再谈练不练；
-   把「练习」放末位，顺带降低误点开始的门槛感。顺序本身是产品决策，
-   容易被后续插页打乱，因此这里锁死顺序，而不只是锁数量。 */
+/* 首页优先展示练习路径，说明、键位图与设置收进更多菜单。 */
 {
   const order = qa('#nav .nav-btn').map(b => b.getAttribute('data-view'));
-  const want = ['why', 'keymap', 'stats', 'review', 'settings', 'practice'];
+  const want = ['practice', 'stats', 'review', 'keymap', 'why', 'settings'];
   ok(JSON.stringify(order) === JSON.stringify(want),
     `导航顺序为 ${want.join(' → ')}（实际 ${order.join(' → ')}）`);
-  ok(order[order.length - 1] === 'practice', '「练习」排在最后一位');
-  ok(order[0] === 'why', '「为什么用双拼」排在第一位');
+  ok(order[0] === 'practice', '「今日练习」排在第一位');
+  ok(q('[data-view="why"]').closest('.nav-more') && q('[data-view="settings"]').closest('.nav-more'),
+    '说明与设置放在更多菜单，仍可访问');
 }
 
 ok(qa('#modeGrid .mode-card').length === 9, `模式卡片 9 个（实际 ${qa('#modeGrid .mode-card').length}）`);
@@ -2782,17 +2780,16 @@ console.log('\n【12d】智能混合 · 书架 · 课程（接线层）');
   app.engine.destroy(); app.engine = null;
   cleanupAll();
 
-  /* 课程：卡片渲染当前课，开始按钮用课程参数开局并标记 courseActiveId。
-     开完课**不做完**，留给【12e】验证「刷新 → 续练 → 达标 → 晋级」。 */
+  /* 小关卡入口；【12e】再验证续练、独立小测和晋级。 */
   ok(q('#courseBox') && !q('#courseBox').hidden, '课程卡片可见（还有未完成的课）');
-  ok(/第 1 课/.test(q('#courseTitle').textContent), `当前课正确（${q('#courseTitle').textContent}）`);
-  ok(/过关条件/.test(q('#courseCheck').textContent), '过关条件展示（晋级判定透明）');
+  ok(/一字两键/.test(q('#courseTitle').textContent), `当前课正确（${q('#courseTitle').textContent}）`);
+  ok(/小测标准/.test(q('#courseCheck').textContent), '小测标准展示（晋级判定透明）');
   fire(q('#btnCourseStart'), 'click');
   await settle();
-  ok(!!app.engine && app.engine.mode === 'yun', '「开始本课」用课程参数开局（yun）');
-  ok(app.courseActiveId === 'c1-yun', '会话标记了课程 id（练完做晋级判定）');
-  ok(!q('#courseCheck').textContent.includes('独立正确率'),
-    '第 1 课不卡独立正确率（基础教学允许提示）');
+  ok(!!app.engine && app.engine.mode === 'char', '「提示练习」用课程参数开局（char）');
+  ok(app.learningActive.lessonId === 'two-keys', '会话标记小关卡 id');
+  ok(app.learningActive.phase === 'guided' && app.engine.hintEnabled,
+    '初次进入提示练习，独立小测另行判定');
   cleanupAll();
 
   /* 【P1】书架完整链路：存入 → 打开 → 开始 → 结束 → 统计回写。
@@ -3224,9 +3221,11 @@ console.log('\n【12e】课程续练：归属跟着存档走');
   cleanupAll();
   // 从第 1 课干净开始
   sMod.saveCourseProgress({ completed: [], lessons: {}, currentId: '', updatedAt: 0 });
+  sMod.saveLearningProgress({ lessons: {} });
+  sMod.clearResume();
   fire(q('#btnCourseStart'), 'click');
   await settle();
-  ok(!!app.engine && app.courseActiveId === 'c1-yun', '课程第 1 课开局');
+  ok(!!app.engine && app.learningActive?.lessonId === 'two-keys', '第一小关开局');
 
   /* 打 4 键（**真实按键路径**：onKeyDown → handleKeyInput → saveProgress，
      存档才会带上归属。直接调 engine.pressKey 会绕过 UI 链路，
@@ -3243,11 +3242,12 @@ console.log('\n【12e】课程续练：归属跟着存档走');
   }
   ok(pressed === 4, `打了 ${pressed} 键`);
   ok(!!sMod.loadResume(), '存档已生成（saveProgress 随按键自动保存）');
-  ok(sMod.loadResume().courseLessonId === 'c1-yun',
-    '存档带课程归属（P1 缺陷的修复点：以前没这个字段）');
+  ok(sMod.loadResume().learning?.lessonId === 'two-keys', '存档带小关卡归属');
+  const savedEvidence = JSON.stringify(sMod.loadResume().learning?.evidence);
   app.engine.destroy(); app.engine = null;
   app.sessionActive = false;
   app.courseActiveId = null;          // 刷新后内存里什么都不剩
+  app.learningActive = null;
   app.shelfActiveId = null;
   q('#sessionPanel').hidden = true;
   q('#setupPanel').hidden = false;
@@ -3256,8 +3256,8 @@ console.log('\n【12e】课程续练：归属跟着存档走');
   fire(q('#btnResume'), 'click');
   await settle();
   ok(!!app.engine, '续练恢复了会话');
-  ok(app.courseActiveId === 'c1-yun',
-    `续练恢复了课程归属（实际 ${JSON.stringify(app.courseActiveId)}）`);
+  ok(app.learningActive?.lessonId === 'two-keys', '续练恢复小关卡归属');
+  ok(JSON.stringify(app.learningActive?.evidence) === savedEvidence, '续练保留已完成成分的证据');
 
   // 打完全部 → 达标 → 晋级
   const eng2 = app.engine;
@@ -3274,13 +3274,29 @@ console.log('\n【12e】课程续练：归属跟着存档走');
   }
   ok(eng2.state === 'finished', '续练打完了整卷');
   await settle();
-  const prog = sMod.loadCourseProgress();
-  ok(prog.completed.includes('c1-yun'),
-    `续练完成的那一局判了晋级（completed: ${JSON.stringify(prog.completed)}）`);
-  ok(prog.currentId === 'c2-sheng', `下一课推进到第 2 课（${prog.currentId}）`);
+  let prog = sMod.loadLearningProgress();
+  ok(!!prog.lessons['two-keys']?.practicedAt && !prog.lessons['two-keys']?.passedAt,
+    '提示练习完成只记录已练过，不代替独立小测');
+  fire(q('#modal [data-act="again"]'), 'click');
+  await settle();
+  ok(app.learningActive?.phase === 'check' && app.engine.examMode && !app.engine.hintEnabled,
+    '下一步进入无提示独立小测');
+  const check = app.engine;
+  for (let i = 0; check.state === 'running' && i < 1000; i++) {
+    const t = check.currentTarget();
+    check.pressKey(t.keys[t.pos]);
+    await settle();
+  }
+  prog = sMod.loadLearningProgress();
+  ok(!!prog.lessons['two-keys']?.passedAt && !prog.lessons['two-keys']?.masteredAt,
+    '独立小测通过但当日不标记为掌握');
+  fire(q('#modal [data-act="again"]'), 'click');
+  await settle();
+  ok(app.learningActive?.lessonId === 'special-sheng', '通过后进入下一小关');
   cleanupAll();
   sMod.clearResume();
   sMod.saveCourseProgress({ completed: [], lessons: {}, currentId: '', updatedAt: 0 });
+  sMod.saveLearningProgress({ lessons: {} });
 }
 
 /* ---------- 收尾 ---------- */

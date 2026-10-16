@@ -83,6 +83,7 @@ console.log('【1】exportPack 的内容范围');
   ok(pack.keyConfusions === undefined, '不含键位混淆数据');
   ok(pack.keyTimings === undefined, '不含按键耗时数据');
   ok(pack.course === undefined, '不含课程进度');
+  ok(pack.learning === undefined, '不含小关卡学习进度');
   ok(pack.exportedAt !== undefined, '带导出时间（便于接收方了解包的新旧）');
 
   /* 材料里的进度/统计字段也要剥掉 —— 那是发送者自己的练习痕迹，

@@ -69,11 +69,12 @@ try {
   console.log('【回归】重练保留课程、智能混合、今日计划与书架归属');
   H.fire('[data-view="practice"]', 'click');
   H.fire('#btnCourseStart', 'click');
-  const lessonId = app.courseActiveId, lessonMode = app.engine.mode;
+  const lessonId = app.learningActive.lessonId, lessonMode = app.engine.mode;
   app.engine.finish('user');
-  assert.match(H.q('#modal [data-act="again"]').textContent, /重练本课/);
+  assert.match(H.q('#modal [data-act="again"]').textContent, /继续本关/);
   H.fire('#modal [data-act="again"]', 'click');
-  assert.equal(app.courseActiveId, lessonId);
+  assert.equal(app.learningActive.lessonId, lessonId);
+  assert.equal(app.learningActive.phase, 'guided');
   assert.equal(app.engine.mode, lessonMode);
   app.engine.finish('user'); closeResult();
   H.fire('[data-view="practice"]', 'click'); H.fire('#btnSmartMix', 'click');

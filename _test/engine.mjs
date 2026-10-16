@@ -289,7 +289,7 @@ console.log('\n【9】速度与正确率计算（含 finish 补时）');
   }
 }
 
-console.log('\n【9b】零声母音节恒为 2 键（an → AJ，与 README 一致）');
+console.log('\n【9b】零声母音节恒为 2 键（an → AN，与 README 一致）');
 {
   /* 回归要点
      ---------
@@ -298,10 +298,9 @@ console.log('\n【9b】零声母音节恒为 2 键（an → AJ，与 README 一�
         就完全测不出问题（事实上当时 syl 确实没有 zero 字段，
         引擎里那个 syl.zero 分支是死代码，测试却「通过」了）。
         现在改用 buildSyllables —— 与出题 / 引擎用的是同一条构造路径。
-     ② 断言的是 **2 键**（AJ），不是 1 键。小鹤里零声母同样恒为 2 键：
-        首字母占声母位 + 韵母键。README 与方案表都是这么写的。 */
+     ② 断言的是 **2 键**（AN），不是 1 键。 */
   const CASES = [
-    { ch: '安', py: 'an', code: 'AJ' },
+    { ch: '安', py: 'an', code: 'AN' },
     { ch: '啊', py: 'a', code: 'AA' },
     { ch: '昂', py: 'ang', code: 'AH' }
   ];

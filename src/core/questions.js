@@ -346,7 +346,8 @@ function makePartQuestion(part, usedPinyin) {
     return sp && (!wantSheng || !sp.zero);
   }));
   const py = pickUnused(pool, usedPinyin, py => `${part}:${py}`);
-  const picked = primarySplit(py);
+  // 成分专项考韵母映射键；零声母保留拼写的韵尾键不代表韵母键位。
+  const picked = splitSyllable(py).find(sp => !sp.zero || sp.steps[1]?.label === '韵母');
   if (!picked) return makeFallbackCharQuestion();
 
   /* 声母是第 0 步；韵母在第 1 步 —— 零声母也一样。

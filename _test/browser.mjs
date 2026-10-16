@@ -320,7 +320,32 @@ try {
     ok(r && r.sw <= NARROW_W + 1,
       `窄屏无横向滚动（scrollWidth ${r && r.sw} ≤ 模拟视口 ${NARROW_W}）`);
     ok(r && r.navH > 0 && r.navBtns >= 6, `导航在窄屏下仍可用（高 ${r && r.navH}px，${r && r.navBtns} 个按钮）`);
-    ok(r && r.gridH > 0, `模式卡片在窄屏下仍渲染（高 ${r && r.gridH}px）`);
+    await click(chrome, '.nav-more summary');
+    const menuVisible = (await evaluate(chrome.send, `(()=>{const b=document.querySelector('[data-view="settings"]');
+      const r=b.getBoundingClientRect(); return r.width>0 && r.left>=0 && r.right<=innerWidth &&
+      document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===b;})()`)).value;
+    ok(menuVisible, '更多菜单在窄屏完整可点，未被导航滚动区裁切');
+    await click(chrome, '.nav-more summary');
+    const collapsed = (await evaluate(chrome.send, `!document.querySelector('#freePracticePanel').open`)).value;
+    ok(collapsed, '自由模式默认收起，首页突出推荐关卡');
+    await click(chrome, '#btnFreePractice');
+    const free = (await evaluate(chrome.send, `({ open: document.querySelector('#freePracticePanel').open,
+      height: document.querySelector('#modeGrid').offsetHeight, width: document.documentElement.scrollWidth })`)).value;
+    ok(free?.open && free.height > 0 && free.width <= NARROW_W + 1, '展开自由练习后模式可见且无横向滚动');
+    await click(chrome, '#btnLearningPath');
+    const path = (await evaluate(chrome.send, `({ count: document.querySelectorAll('[data-lesson]').length,
+      width: document.documentElement.scrollWidth })`)).value;
+    ok(path?.count === 16 && path.width <= NARROW_W + 1, '16 个小关卡在手机上完整展示');
+    await click(chrome, '[data-lesson="special-sheng"]');
+    await click(chrome, '#btnLearningTest');
+    const learning = (await evaluate(chrome.send, `({ phase: __app.learningActive?.phase,
+      exam: __app.engine?.examMode, help: __app.engine?.requestHint(),
+      label: document.querySelector('#hudAccLabel').textContent,
+      speedHidden: getComputedStyle(document.querySelector('.hud-item.learning-secondary')).display === 'none',
+      width: document.documentElement.scrollWidth })`)).value;
+    ok(learning?.phase === 'check' && learning.exam && !learning.help, '地图可直接进入无提示小测');
+    ok(learning?.speedHidden && learning.label === '独立正确率' && learning.width <= NARROW_W + 1,
+      '小测保留独立正确率与进度，收起速度和连击');
 
     // 恢复视口，避免影响（本套件是最后一步，但保持习惯）
     await chrome.setViewport(1240, 900, false);

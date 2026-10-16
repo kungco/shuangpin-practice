@@ -23,10 +23,11 @@ export const KEYS = {
   recent: `${NS}.recent`,       // 最近实际展示的练习内容
   shelf: `${NS}.shelf`,         // 个人文本书架（多份自定义跟打材料）
   course: `${NS}.course`,       // 新手引导课程的进度
+  learning: `${NS}.learning`,   // 小关卡：提示练习 / 独立小测 / 隔天回访
   version: `${NS}.version`
 };
 
-export const DATA_VERSION = 3;
+export const DATA_VERSION = 4;
 
 /* ============================================================
    底层读写（带降级）
@@ -1660,6 +1661,7 @@ export function saveResume(state) {
     generation: state.generation,
     generationState: state.generationState,
     retrySource: ['smart', 'daily'].includes(state.retrySource) ? state.retrySource : undefined,
+    learning: state.learning || undefined,
     training: state.training,
     unitStartedAt: state.unitStartedAt,
     charIndex: state.charIndex,
@@ -2164,6 +2166,31 @@ export function saveCourseProgress(p) {
   return writeJSON(KEYS.course, next);
 }
 
+function normalizeLearningProgress(raw) {
+  const lessons = {};
+  for (const [id, entry] of Object.entries(raw?.lessons || {}).slice(0, 100)) {
+    if (!/^[a-z0-9-]{1,48}$/.test(id) || !entry || typeof entry !== 'object') continue;
+    const rec = {};
+    for (const field of ['practicedAt','passedAt','masteredAt','lastCheckAt','lastAt']) {
+      rec[field] = clampNum(entry[field], 0, 8640000000000000, 0);
+    }
+    rec.attempts = clampInt(entry.attempts, 0, 1000000);
+    rec.bestIndependent = clampNum(entry.bestIndependent, 0, 100, 0);
+    rec.legacy = entry.legacy === true;
+    rec.dueDay = /^\d{4}-\d{2}-\d{2}$/.test(entry.dueDay || '') ? entry.dueDay : '';
+    lessons[id] = rec;
+  }
+  return { lessons };
+}
+
+export function loadLearningProgress() {
+  return normalizeLearningProgress(readJSON(KEYS.learning, {}));
+}
+
+export function saveLearningProgress(progress) {
+  return writeJSON(KEYS.learning, normalizeLearningProgress(progress));
+}
+
 /* ============================================================
    备份导入导出
    ============================================================ */
@@ -2183,7 +2210,8 @@ export function exportAll() {
     // 书架与课程进度跟着走：用户整理好的材料清单和「学到第几课」
     // 与练习成绩同等重要，导出时丢掉任何一个都算数据丢失。
     shelf: loadShelf(),
-    course: loadCourseProgress()
+    course: loadCourseProgress(),
+    learning: loadLearningProgress()
   };
 }
 
@@ -2572,6 +2600,22 @@ export function importAll(payload) {
       n++;
     }
 
+    if (payload.learning && typeof payload.learning === 'object') {
+      const cur = loadLearningProgress();
+      const incoming = normalizeLearningProgress(payload.learning);
+      for (const [id, rec] of Object.entries(incoming.lessons)) {
+        const old = cur.lessons[id];
+        if (!old) { cur.lessons[id] = rec; continue; }
+        const merged = { ...old, ...(rec.lastAt > old.lastAt ? rec : {}) };
+        for (const field of ['practicedAt','passedAt','masteredAt','lastCheckAt','lastAt','attempts','bestIndependent']) {
+          merged[field] = Math.max(old[field] || 0, rec[field] || 0);
+        }
+        merged.legacy = old.legacy || rec.legacy;
+        cur.lessons[id] = merged;
+      }
+      saveLearningProgress(cur);
+      n++;
+    }
     return { ok: true, message: `导入完成（合并 ${n} 项）` };
   } catch (err) {
     console.error('[storage] 导入失败', err);

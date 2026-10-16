@@ -21,7 +21,9 @@ import { planMixedSession } from './core/mix.js';
 import {
   dailyPlanProgress, buildDailyPlan, clampPlanMinutes
 } from './core/daily.js';
-import { COURSE, currentLesson, buildLessonQuestions, recordLessonAttempt } from './core/course.js';
+import { COURSE, recordLessonAttempt } from './core/course.js';
+import { LEARNING_MAP, LEARNING_PHASES, buildLearningQuestions, normalizeLearningSession,
+  observeLearning, recordLearning, evaluateLearning, recommendedLearning } from './core/learning.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
@@ -53,6 +55,7 @@ import { createShelfView } from './ui/views/shelf.js';
 import { createHeatmapView } from './ui/views/heatmap.js';
 import { createStatsView } from './ui/views/stats.js';
 import { createKeymapPageView } from './ui/views/keymappage.js';
+import { createLearningView } from './ui/views/learning.js';
 
 /* ============================================================
    全局状态
@@ -191,6 +194,8 @@ const shelfView = createShelfView({
   $, $$, app, S, toast, escapeHtml, openModal, saveSettingsDebounced, watchStorageMode
 });
 const { initShelf, renderShelf, touchShelfAfterSession } = shelfView;
+const learningView = createLearningView({ $, app, S, escapeHtml, startRound: startLearningRound,
+  resumeSession, switchView });
 
 /* ============================================================
    辅助功能（无障碍 / 快捷键 / 音效）
@@ -489,7 +494,7 @@ function applyExternalChange() {
     crossTabNoticeShown = false;
 
     if (touched('shelf')) renderShelf();
-    if (touched('course')) renderCourseBox();
+    if (touched('course') || touched('learning')) renderCourseBox();
     if (touched('settings')) {
       syncSettingsUI();
       initShortcutSettings();
@@ -519,8 +524,22 @@ function applyExternalChange() {
 
 function initNav() {
   $$('#nav .nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => switchView(btn.getAttribute('data-view')));
+    btn.addEventListener('click', () => {
+      switchView(btn.getAttribute('data-view'));
+      const menu = btn.closest('details');
+      if (menu) menu.open = false;
+    });
   });
+  const openPracticeSection = section => {
+    switchView('practice');
+    if (isSessionInProgress()) { toast('先结束或保存本轮，再选择新的练习'); return; }
+    if (section === 'path') {
+      $('#learningPath').open = true;
+      $('#learningPath').scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+    } else learningView.openFree();
+  };
+  $('#btnNavPath')?.addEventListener('click', () => openPracticeSection('path'));
+  $('#btnNavFree')?.addEventListener('click', () => openPracticeSection('free'));
 }
 
 function switchView(view) {
@@ -554,7 +573,7 @@ function switchView(view) {
      分母变掉。不在这里刷的话，用户改完切回来看到的还是旧进度，
      会以为设置没生效。showResumeHint 只在特定几处被调用，
      覆盖不到「从设置页切回来」这条最常见的路径。 */
-  if (v === 'practice') renderDailyPlan();
+  if (v === 'practice') { renderDailyPlan(); renderCourseBox(); }
   // 进设置页时刷新存储状态：配额可能在练习途中写满，
   // 而设置页那段文案是「数据安全」承诺的唯一出处。
   if (v === 'settings') watchStorageMode();
@@ -816,6 +835,7 @@ function initSetupPanel() {
   if (btnDrop) btnDrop.addEventListener('click', () => {
     S.clearResume();
     $('#resumeHint').hidden = true;
+    renderCourseBox();
     toast('已放弃上次进度');
   });
 
@@ -1045,58 +1065,21 @@ function initDailyPlan() {
    ============================================================ */
 
 function initCourse() {
-  const btn = $('#btnCourseStart');
-  if (btn && !btn._bound) {
-    btn._bound = true;
-    btn.addEventListener('click', () => {
-      const lesson = currentLesson(S.loadCourseProgress());
-      if (!lesson) { renderCourseBox(); return; }
-      const qs = buildLessonQuestions(lesson);
-      if (!qs.length) { toast('本课暂时组不出题目，请稍后再试', 'err'); return; }
-      startSession(qs, lesson.mode, { courseLessonId: lesson.id });
-    });
-  }
-  renderCourseBox();
+  learningView.init();
 }
 
 /** 课程卡片：当前课、练过几次、过关条件。每次进练习页 / 练完一局都刷新。 */
 function renderCourseBox() {
-  const box = $('#courseBox');
-  if (!box) return;
-  const progress = S.loadCourseProgress();
-  const lesson = currentLesson(progress);
-  const title = $('#courseTitle');
-  const stat = $('#courseStat');
-  const goal = $('#courseGoal');
-  const check = $('#courseCheck');
-  const note = $('#courseNote');
-  const btn = $('#btnCourseStart');
-  if (!lesson) {
-    box.hidden = false;
-    if (title) title.textContent = '课程已全部完成 🎓';
-    if (goal) goal.textContent = '六门课都过了。接下来可以自由练习、做能力测验，或用「智能混合」保持手感。';
-    if (check) check.textContent = '';
-    if (note) note.textContent = '';
-    if (btn) btn.hidden = true;
-    return;
-  }
-  const rec = progress.lessons[lesson.id] ||
-    { attempts: 0, bestAcc: 0, bestSpeed: 0, bestChars: 0 };
-  box.hidden = false;
-  if (title) title.textContent = lesson.title;
-  if (stat) {
-    stat.textContent = rec.attempts
-      ? `已练 ${rec.attempts} 次 · 最好正确率 ${Math.round(rec.bestAcc)}%`
-      : '还没练过';
-  }
-  if (goal) goal.textContent = lesson.goal;
-  const parts = [];
-  if (lesson.check.minAccuracy != null) parts.push(`正确率 ≥${lesson.check.minAccuracy}%`);
-  if (lesson.check.minSpeed != null) parts.push(`速度 ≥${lesson.check.minSpeed} 字/分`);
-  if (lesson.check.minChars != null) parts.push(`完成 ≥${lesson.check.minChars} 字`);
-  if (check) check.textContent = `过关条件：${parts.join(' 且 ')}`;
-  if (btn) { btn.hidden = false; btn.textContent = rec.attempts ? '继续本课' : '开始本课'; }
-  if (note) note.textContent = lesson.reason || '';
+  learningView.render();
+}
+
+function startLearningRound(raw) {
+  const learning = normalizeLearningSession(raw);
+  if (!learning) { toast('关卡信息不可用，请重新选择', 'err'); return; }
+  const lesson = LEARNING_MAP[learning.lessonId];
+  const questions = buildLearningQuestions(lesson, learning.phase, learning.repairItems);
+  switchView('practice');
+  startSession(questions, lesson.mode, { durationSec: 0, learning: { ...learning, evidence: {} } });
 }
 
 /** 练完一局后做课程晋级判定，并把结果告诉用户 */
@@ -1134,6 +1117,7 @@ function buildCustomQuestions(text) {
 }
 
 function selectMode(mode, silent) {
+  if (!silent && $('#freePracticePanel')) $('#freePracticePanel').open = true;
   const m = LEVEL_MAP[mode] ? mode : 'char';
   app.sessionMode = m;
   app.settings.mode = m;
@@ -1335,6 +1319,7 @@ function saveProgress(force = false) {
   // 逐字用时跟存档走，否则刷新一次前半程的卡顿数据就没了（见 resumeSession）
   if (Array.isArray(app.slowChars) && app.slowChars.length) state.slowChars = app.slowChars;
   state.retrySource = app.retrySession?.options.retrySource;
+  state.learning = app.learningActive;
   S.saveResume(state);
   app.lastResumeSave = now;
 }
@@ -1382,6 +1367,10 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
        也不该记成模式对不上的课。 */
     app.shelfActiveId = (typeof opts.shelfId === 'string' && opts.shelfId) || null;
     app.courseActiveId = (typeof opts.courseLessonId === 'string' && opts.courseLessonId) || null;
+    app.learningActive = normalizeLearningSession(opts.learning);
+    app.learningResult = null;
+    app.decodeHidden = app.learningActive && ['guided','repair'].includes(app.learningActive.phase) ? false : null;
+    app.keymapHidden = null;
     if (mode !== 'custom') app.shelfActiveId = null;
     if (app.courseActiveId) {
       const owned = COURSE.find(l => l.id === app.courseActiveId);
@@ -1399,7 +1388,7 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
     const unlimited = !preset && count === 0 && mode !== 'exam';
     const generation = {
       mode, count: unlimited ? (mode === 'passage' ? 3 : 20) : (count || 50),
-      charTier: app.settings.charTier, weakBoost: app.settings.weakBoost,
+      charTier: app.learningActive ? '1' : app.settings.charTier, weakBoost: app.settings.weakBoost,
       phraseCategory: app.settings.phraseCategory, phraseLength: app.settings.phraseLength
     };
 
@@ -1447,19 +1436,19 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
     /* 测验模式：强制无提示。
        注意这里**不是**沿用 app.settings.hint —— 测验语义是「脱离辅助」，
        用户即使把设置里的提示开着，测验也必须关掉（引擎侧还有 examMode 硬闸门）。 */
-    const isExam = mode === 'exam';
+    const isExam = mode === 'exam' || ['check','review'].includes(app.learningActive?.phase);
 
     app.engine = new PracticeEngine({
       questions,
       unlimited, questionSource, generation,
       mode,
-      modeName: modeDisplayName(mode),
+      modeName: app.learningActive ? `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]}` : modeDisplayName(mode),
       durationSec,
       strict: app.settings.strict,
       skipPunct: app.settings.skipPunct,
       examMode: isExam,
-      trainingPolicy: app.settings.trainingPolicy,
-      hintEnabled: isExam ? false : app.settings.hint,
+      trainingPolicy: app.learningActive ? (isExam ? 'independent' : 'full') : app.settings.trainingPolicy,
+      hintEnabled: isExam ? false : app.learningActive ? true : app.settings.hint,
       hintDelayMs: isExam ? 0 : app.settings.hintDelay,
       revealDelayMs: isExam ? 0 : app.settings.revealDelay
     });
@@ -1501,7 +1490,7 @@ function resumeSession() {
        而出题器只认内置语料。不过续练其实不需要重建：saved.questions
        里已经存着剩余的题目，PracticeEngine.restore 靠它恢复。
        所以这里对 custom 传 null source（与有限题量练习一致）。 */
-    const canResumeBySource = saved.unlimited || generation.charTier === 'progressive';
+    const canResumeBySource = !saved.learning && (saved.unlimited || generation.charTier === 'progressive');
     const source = (canResumeBySource && generation.mode !== 'custom')
       ? createQuestionSource(generation, saved.questions, saved.generationState) : null;
     const eng = PracticeEngine.restore(saved, source);
@@ -1509,6 +1498,16 @@ function resumeSession() {
     if (app.engine) app.engine.destroy();
     app.engine = eng;
     app.sessionMode = eng.mode;
+    app.learningActive = normalizeLearningSession(saved.learning);
+    app.learningResult = null;
+    app.decodeHidden = app.learningActive && ['guided','repair'].includes(app.learningActive.phase) ? false : null;
+    app.keymapHidden = null;
+    if (app.learningActive && ['check','review'].includes(app.learningActive.phase)) {
+      eng.examMode = true;
+      eng.hintEnabled = false;
+      eng.hintDelayMs = 0;
+      eng.revealDelayMs = 0;
+    }
     /* 恢复会话归属：存档里带了 shelfId / courseLessonId / shelfSegBase
        （saveProgress 写入）。没有这三个字段的就是普通练习，置空即可。
        有了它们，「刷新 → 续练 → 打完」才能正确判晋级、写材料统计 ——
@@ -1533,7 +1532,7 @@ function resumeSession() {
       mode: eng.mode,
       questions: eng.unlimited ? null : eng.questions.slice(),
       options: { durationSec: eng.durationSec, shelfId: app.shelfActiveId,
-        courseLessonId: app.courseActiveId, retrySource: saved.retrySource },
+        courseLessonId: app.courseActiveId, retrySource: saved.retrySource, learning: app.learningActive },
       shelfSegBase: app.shelfSegBase
     };
     bindEngineEvents();
@@ -1601,6 +1600,9 @@ function bindEngineEvents() {
   });
 
   eng.on('unit', ({ target, independent, seconds }) => {
+    const learningQuestion = eng.currentQuestion();
+    if (learningQuestion?.kind === 'key' || learningQuestion?.chars?.length === 1)
+      observeLearning(app.learningActive, learningQuestion, independent);
     // 每个音节/题目完成：记录易错的「正确一次」
     try {
       if (independent && target && target.char) {
@@ -1626,6 +1628,7 @@ function bindEngineEvents() {
   });
 
   eng.on('questionComplete', ({ question, independent }) => {
+    observeLearning(app.learningActive, question, independent);
     if (independent && question.text) S.recordWeakCorrect({ word: question.text });
   });
 
@@ -1663,9 +1666,16 @@ function showSessionUI(show) {
      用 class 统一控制，样式见 .session-panel.is-exam */
   const isExam = !!(app.engine && app.engine.examMode);
   if (session) session.classList.toggle('is-exam', !!show && isExam);
+  if (session) session.classList.toggle('is-learning', !!show && !!app.learningActive);
+  const banner = $('#learningSessionBanner');
+  if (banner) {
+    banner.hidden = !show || !app.learningActive;
+    if (!banner.hidden) banner.textContent = `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]} · 先按准，不限时`;
+  }
   // 迷你键位图同样按模式收敛（属性式隐藏，便于断言）
   applyMiniKeymapVisibility();
   if (!show && !isSessionInProgress() && crossTabPendingKeys.size) applyExternalChange();
+  if (!show) renderCourseBox();
 }
 
 function quitSession() {
@@ -1674,7 +1684,7 @@ function quitSession() {
   if (eng.state === STATE.FINISHED) { showSessionUI(false); return; }
   if (eng.state === STATE.RUNNING) eng.pause();
 
-  const isExam = !!eng.examMode;
+  const isExam = eng.mode === 'exam';
   openModal(`
     <h2>${isExam ? '结束本次测验？' : '结束本次练习？'}</h2>
     <p class="modal-sub">${isExam
@@ -1732,7 +1742,7 @@ function persistRecord(summary) {
     /* 测验成绩：先算分，再决定是否落库。
        分数只对 exam 模式有意义，其它模式不做评分（避免「练习也被打分」
        造成的压力 —— 练习与考核要分开）。 */
-    const examIsMode = s.mode === 'exam' || s.examMode === true;
+    const examIsMode = !app.learningActive && (s.mode === 'exam' || s.examMode === true);
     const examResult = examIsMode ? scoreExam(s) : null;
     if (examResult) s.score = examResult;
     // 供结果弹窗与测试读取（summary() 本身是纯函数，不携带分数）
@@ -1844,6 +1854,15 @@ function persistRecord(summary) {
     /* 把本轮记录 id 带上：结算页的「本轮对照」要拿近几轮做基线，
        而自己刚刚已经落库了（就在上面 appendRecord）。不排除自己的话
        基线里混进了「本轮」，N=1 时还会变成「本轮 vs 本轮」= 永远持平。 */
+    app.learningResult = null;
+    if (app.learningActive) {
+      const learning = app.learningActive;
+      const result = s.keystrokes >= 5 ? recordLearning(learning, s) : evaluateLearning(learning, s);
+      app.learningResult = { ...result, lesson: LEARNING_MAP[learning.lessonId], phase: learning.phase,
+        session: learning };
+      learningView.resetSelection();
+      renderCourseBox();
+    }
     showResultModal(s, meaningful, recordId);
   } catch (err) {
     console.error('[persistRecord] 失败', err);
@@ -1856,7 +1875,18 @@ function persistRecord(summary) {
 function showResultModal(s, recorded, recordId) {
   const sc = s.score || null;
   const retry = app.retrySession;
-  const retryLabel = retry?.options.courseLessonId ? '重练本课'
+  const learningResult = app.learningResult;
+  let learningNext = null;
+  if (learningResult) {
+    const id = learningResult.lesson.id;
+    learningNext = !s.completed ? { lessonId: id, phase: learningResult.phase }
+      : learningResult.passed && ['guided','repair'].includes(learningResult.phase) ? { lessonId: id, phase: 'check' }
+      : !learningResult.passed ? { lessonId: id, phase: 'repair', repairItems: learningResult.failedItems }
+      : (() => { const next = recommendedLearning(); return next ? { lessonId: next.lesson.id, phase: next.phase } : null; })();
+  }
+  const retryLabel = learningResult ? (!s.completed ? '继续本关'
+    : !learningResult.passed ? '补练薄弱项' : ['guided','repair'].includes(learningResult.phase) ? '开始独立小测'
+    : learningNext?.phase === 'review' ? '开始隔天回访' : learningNext ? '继续下一关' : '回到学习路径') : retry?.options.courseLessonId ? '重练本课'
     : retry?.options.shelfId ? '重练本次片段'
     : retry?.options.retrySource === 'daily' ? '继续今日计划'
     : s.mode === 'mix' ? '再练一组' : sc ? '再测一次' : '再来一次';
@@ -1868,8 +1898,10 @@ function showResultModal(s, recorded, recordId) {
     : acc >= 85 ? '不错'
     : acc >= 70 ? '继续加油' : '仍需熟悉键位';
 
-  const title = s.reason === 'timeup' ? '时间到' : '练习完成';
-  const headRight = sc ? `${sc.grade}` : practiceGrade;
+  const title = learningResult ? (!s.completed ? '本关暂未完成' : learningResult.passed ? '本轮完成' : '先补练，再试一次')
+    : s.reason === 'timeup' ? '时间到' : '练习完成';
+  const headRight = learningResult ? (learningResult.passed ? LEARNING_PHASES[learningResult.phase] + '通过' : '继续巩固')
+    : sc ? `${sc.grade}` : practiceGrade;
 
   const noteParts = [];
   if (sc && sc.warnings && sc.warnings.length) {
@@ -2072,9 +2104,15 @@ function showResultModal(s, recorded, recordId) {
     <h2>${title} · ${escapeHtml(headRight)}</h2>
     <p class="modal-sub">${escapeHtml(s.modeName || '')} · 用时 ${formatClock(s.durationSec)}</p>
 
+    ${learningResult ? `<div class="learning-result"><strong>${escapeHtml(learningResult.lesson.title)} · ${escapeHtml(LEARNING_PHASES[learningResult.phase])}</strong>
+      <p>${escapeHtml(learningResult.reason)}</p>${!learningResult.passed && s.completed ? `<p>补练：${learningResult.failedItems.map(escapeHtml).join('、')}</p>` : ''}</div>` : ''}
     ${scoreBlock}
 
-    <div class="result-grid">
+    ${learningResult ? `<div class="result-grid learning-result-grid">
+      <div class="result-cell is-hl"><div class="result-cell-label">${['check','review'].includes(learningResult.phase) ? '独立正确率' : '作答正确率'}</div>
+        <div class="result-cell-value">${['check','review'].includes(learningResult.phase) ? s.independentAccuracy : s.accuracy}<i>%</i></div></div>
+      <div class="result-cell"><div class="result-cell-label">完成题目</div>
+        <div class="result-cell-value">${s.doneQuestions}<i>/${s.questionCount}</i></div></div></div>` : `<div class="result-grid">
       <div class="result-cell is-hl">
         <div class="result-cell-label">速度</div>
         <div class="result-cell-value">${s.speed}<i>字/分</i></div>
@@ -2117,6 +2155,7 @@ function showResultModal(s, recorded, recordId) {
     ${slowBlock}
 
     ${noteParts.length ? `<div class="result-note">${noteParts.map(escapeHtml).join('<br>')}</div>` : ''}
+    `}
 
     <div class="modal-actions">
       <button class="btn btn-ghost" data-act="stats">查看统计</button>
@@ -2129,7 +2168,11 @@ function showResultModal(s, recorded, recordId) {
     else if (act === 'review') switchView('review');
     else if (act === 'again') {
       showSessionUI(false);
-      if (retry?.options.retrySource === 'daily') startDailyPlan();
+      if (learningResult) {
+        if (learningNext) startLearningRound(learningNext);
+        else { switchView('practice'); $('#learningPath').open = true; }
+      }
+      else if (retry?.options.retrySource === 'daily') startDailyPlan();
       else if (retry?.options.retrySource === 'smart') $('#btnSmartMix')?.click();
       else if (retry) {
         app.shelfSegOffset = retry.shelfSegBase || 0;
@@ -2257,7 +2300,9 @@ function renderSession(arg) {
      （重复播报同一句说明）。 */
   if (level !== 'key') {
     if (stageMode) stageMode.textContent = (q.label || '练习') + (!eng.examMode ? ` · ${TRAINING_LABELS[eng.assistanceLevel()]}` : '') + (eng.adaptive ? ` · 第 ${eng.training.tier} 档` : '');
-    if (stageTip) stageTip.textContent = eng.training.policy === 'progressive' && eng.assistanceLevel() < 2
+    if (stageTip) stageTip.textContent = app.learningActive
+      ? (eng.examMode ? '本轮不提供提示；完成整关后检查每一项。' : '先看声韵拆分，按准这一小组；完成后再独立检验。')
+      : eng.training.policy === 'progressive' && eng.assistanceLevel() < 2
       ? '每 10 个作答单元评估一次：正确率达 90% 且反应稳定后减少提示；卡住可按 Tab 求助。'
       : (LEVEL_MAP[eng.mode] ? LEVEL_MAP[eng.mode].tip : '');
   }
@@ -2332,7 +2377,7 @@ function renderSession(arg) {
          单字模式每道题只含一个字（见 questions.js::makeCharQuestion），
          所以后续字得从题目队列 eng.questions 里取，而不是本题的 chars。
          只做展示、不参与判分；测验模式不显示（那会泄露考题）。 */
-      const upcoming = q.kind === 'word' && q.level === 3 ? upcomingChars(eng) : [];
+      const upcoming = !eng.examMode && q.kind === 'word' && q.level === 3 ? upcomingChars(eng) : [];
       if (upcoming.length) {
         html += '<span class="prompt-upcoming" aria-label="接下来要练的字">' +
           upcoming.map(ch => `<span class="ch ch-upcoming">${escapeHtml(ch)}</span>`).join('') +
@@ -2500,7 +2545,7 @@ function buildSylBlock(split, eng, isCurrent, chOverride) {
       if (i < typedCount) cls.push('is-hit');
       else if (i === curPos) cls.push('is-next');
     }
-    const roleLabel = step.role === 'sheng' ? '声'
+    const roleLabel = step.label === '韵尾' ? '尾' : step.role === 'sheng' ? '声'
       : step.role === 'zero' ? '首' : '韵';
     return `<span class="${cls.join(' ')}">
       <span class="kc-role">${roleLabel}</span>
@@ -2527,6 +2572,9 @@ function updateHud() {
 
   setText('#hudSpeed', st.speed);
   setText('#hudAcc', st.accuracy);
+  const assessment = app.learningActive && ['check','review'].includes(app.learningActive.phase);
+  if (assessment) setText('#hudAcc', st.independentAccuracy);
+  setText('#hudAccLabel', assessment ? '独立正确率' : '正确率');
   setText('#hudTime', formatClock(st.elapsedSec));
   setText('#hudProgress', st.progress);
   setText('#hudCombo', st.combo);
@@ -3900,7 +3948,7 @@ function applyHintSettingsToEngine() {
   const eng = app.engine;
   if (!eng) return;
   try {
-    eng.hintEnabled = !!app.settings.hint;
+    eng.hintEnabled = eng.examMode ? false : app.learningActive ? true : !!app.settings.hint;
     eng.hintDelayMs = Math.max(0, Number(app.settings.hintDelay) || 0);
     eng.revealDelayMs = Math.max(0, Number(app.settings.revealDelay) || 0);
     if (eng.revealDelayMs > 0 && eng.revealDelayMs < eng.hintDelayMs) {
