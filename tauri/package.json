@@ -1,6 +1,6 @@
 {
   "name": "shuangpin-practice-tauri",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "private": true,
   "description": "双拼练习的 Tauri 外壳（用系统 WebView2）。应用本体仍是仓库根的零依赖静态站点，此目录只负责打包。",
   "author": "kungco",

@@ -320,6 +320,40 @@ try {
       `dailyChart 的 aria-label 是数据摘要（「${(labels.d || '').slice(0, 30)}」）`);
   }
 
+  console.log('\n【规则小课堂】真实键盘完成补练与换字验收');
+  {
+    await goto(chrome);
+    await click(chrome, '#btnLearningPath');
+    await click(chrome, '#btnCoachLibrary');
+    await click(chrome, '#modal [data-act="u-v"]');
+    const guide = (await evaluate(chrome.send, `({ phase: __app.coachActive?.phase,
+      visible: !document.querySelector('#coachTip').hidden,
+      guide: __app.engine.questions.map(q=>q.text), holdouts: __app.coachActive?.holdouts.map(([ch])=>ch) })`)).value;
+    ok(guide?.phase === 'guided' && guide.visible && guide.holdouts.every(ch=>!guide.guide.includes(ch)),
+      '补练展示规则；验收字不提前出现在对照题中');
+    for (let i=0;i<12;i++) {
+      const key=(await evaluate(chrome.send, `(()=>{const t=__app.engine.currentTarget();return t.keys[t.pos].toUpperCase();})()`)).value;
+      await sleep(12); // 跨过输入层 8ms 防重复事件窗口。
+      await realKey(chrome,{key:key.toLowerCase(),code:`Key${key}`,vk:key.charCodeAt(0),text:key.toLowerCase()});
+    }
+    await until(chrome, `__app.coachResult?.passed`, {label:'补练完成'});
+    await click(chrome, '#modal [data-act="again"]');
+    const check=(await evaluate(chrome.send, `({phase:__app.coachActive?.phase,exam:__app.engine.examMode,
+      tip:document.querySelector('#coachTip').innerHTML, hint:__app.engine.requestHint(),
+      keymap:getComputedStyle(document.querySelector('#miniKeymap')).display})`)).value;
+    ok(check?.phase==='transfer' && check.exam && !check.hint && check.tip==='' && check.keymap==='none',
+      '换字验收撤掉解释、键位图与主动提示');
+    for (let i=0;i<12;i++) {
+      const key=(await evaluate(chrome.send, `(()=>{const t=__app.engine.currentTarget();return t.keys[t.pos].toUpperCase();})()`)).value;
+      await sleep(12);
+      await realKey(chrome,{key:key.toLowerCase(),code:`Key${key}`,vk:key.charCodeAt(0),text:key.toLowerCase()});
+    }
+    await until(chrome, `__app.coachResult?.passed && __app.engine.state==='finished'`, {label:'换字验收通过'});
+    ok((await evaluate(chrome.send, `document.querySelector('#modal').textContent.includes('本轮未见字全部独立答对')`)).value,
+      '物理按键完成六个新字，结果按独立作答判定');
+    await click(chrome, '#modal [data-act="again"]');
+  }
+
   /* ---------- 【4】窄屏布局 ---------- */
   console.log('\n【4】窄屏布局（390×844）');
   {

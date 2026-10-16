@@ -2276,6 +2276,15 @@ html.reduce-motion *::after {
 .review-result { margin: 16px 0; padding: 16px; background: var(--primary-soft); border-radius: var(--radius-sm); }
 .review-result p { margin: 8px 0 0; font-size: 13px; line-height: 1.7; }
 .review-primary-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 16px 0; }
+.session-panel.is-coach .learning-secondary { display: none; }
+.coach-tip, .coach-rule-card { margin: 14px 0; padding: 16px 18px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--primary-soft); color: var(--text); }
+.coach-tip { border-left: 3px solid var(--primary); }
+.coach-tip p, .coach-rule-card p { margin: 8px 0; font-size: 13px; line-height: 1.7; }
+.coach-examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.coach-examples > span { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 7px 10px; font-size: 13px; }
+.coach-examples code { margin-left: 5px; color: var(--primary-dark); }
+.coach-library .coach-rule-card { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.coach-results h3 { margin: 18px 0 8px; font-size: 16px; }
 .learning-result { padding: 16px; border-radius: 10px; background: var(--primary-soft); margin: 16px 0; color: var(--text); }
 .learning-result p { margin: 7px 0 0; font-size: 13px; color: var(--text-2); }
 .nav-action, .nav-more > summary { border: 0; background: transparent; padding: 7px 12px; border-radius: 8px; font: inherit; color: var(--text-2); cursor: pointer; white-space: nowrap; list-style: none; font-size: 14px; }

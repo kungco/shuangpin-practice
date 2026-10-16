@@ -25,6 +25,8 @@ import { COURSE, recordLessonAttempt } from './core/course.js';
 import { LEARNING_MAP, LEARNING_PHASES, buildLearningQuestions, normalizeLearningSession,
   observeLearning, recordLearning, evaluateLearning, recommendedLearning } from './core/learning.js';
 import { normalizeReviewSession, isReviewFailure, reviewTotals } from './core/review.js';
+import { COACH_MAP, createCoachSession, normalizeCoachSession, buildCoachQuestions, evaluateCoach,
+  normalizeCoachLog, observeCoachSeen, observeCoachError, observeCoachAnswer } from './core/coach.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
@@ -57,6 +59,7 @@ import { createHeatmapView } from './ui/views/heatmap.js';
 import { createStatsView } from './ui/views/stats.js';
 import { createKeymapPageView } from './ui/views/keymappage.js';
 import { createLearningView } from './ui/views/learning.js';
+import { createCoachView } from './ui/views/coach.js';
 
 /* ============================================================
    全局状态
@@ -197,6 +200,7 @@ const shelfView = createShelfView({
 const { initShelf, renderShelf, touchShelfAfterSession } = shelfView;
 const learningView = createLearningView({ $, app, S, escapeHtml, startRound: startLearningRound,
   resumeSession, switchView });
+const coachView = createCoachView({ $, app, escapeHtml, openModal, toast, startRule: startRuleCoach });
 
 /* ============================================================
    辅助功能（无障碍 / 快捷键 / 音效）
@@ -1067,6 +1071,7 @@ function initDailyPlan() {
 
 function initCourse() {
   learningView.init();
+  coachView.init();
 }
 
 /** 课程卡片：当前课、练过几次、过关条件。每次进练习页 / 练完一局都刷新。 */
@@ -1081,6 +1086,20 @@ function startLearningRound(raw) {
   const questions = buildLearningQuestions(lesson, learning.phase, learning.repairItems);
   switchView('practice');
   startSession(questions, lesson.mode, { durationSec: 0, learning: { ...learning, evidence: {} } });
+}
+
+function startRuleCoach(ruleId, exclusions = [], returnView = 'practice') {
+  // “本轮未见”指刚完成的练习与对照字；排除全部历史会很快耗尽 ü 的题池。
+  const session=createCoachSession(ruleId,[...exclusions,...(app.coachLog?.seen || [])],returnView);
+  if(!session){toast('本轮可用于换字的新字不足，请先练其他规则或继续原关卡。');return;}
+  startCoachRound(session);
+}
+
+function startCoachRound(raw) {
+  const session=normalizeCoachSession({...raw,evidence:{}});
+  if(!session){toast('规则课堂进度不可用，请重新选择。','err');return;}
+  switchView('practice');
+  startSession(buildCoachQuestions(session),'char',{durationSec:0,coach:session});
 }
 
 /** 练完一局后做课程晋级判定，并把结果告诉用户 */
@@ -1322,6 +1341,8 @@ function saveProgress(force = false) {
   state.retrySource = app.retrySession?.options.retrySource;
   state.learning = app.learningActive;
   state.review = app.reviewActive;
+  state.coach = app.coachActive;
+  state.coachLog = app.coachLog;
   S.saveResume(state);
   app.lastResumeSave = now;
 }
@@ -1369,10 +1390,13 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
        也不该记成模式对不上的课。 */
     app.shelfActiveId = (typeof opts.shelfId === 'string' && opts.shelfId) || null;
     app.courseActiveId = (typeof opts.courseLessonId === 'string' && opts.courseLessonId) || null;
-    app.learningActive = normalizeLearningSession(opts.learning);
+    app.coachActive = normalizeCoachSession(opts.coach);
+    app.coachLog = normalizeCoachLog(null);
+    app.coachResult = null;
+    app.learningActive = app.coachActive ? null : normalizeLearningSession(opts.learning);
     app.learningResult = null;
-    app.reviewActive = normalizeReviewSession(opts.review);
-    app.decodeHidden = app.learningActive && ['guided','repair'].includes(app.learningActive.phase) ? false : null;
+    app.reviewActive = app.coachActive ? null : normalizeReviewSession(opts.review);
+    app.decodeHidden = app.coachActive?.phase==='guided' || (app.learningActive && ['guided','repair'].includes(app.learningActive.phase)) ? false : null;
     app.keymapHidden = null;
     if (mode !== 'custom') app.shelfActiveId = null;
     if (app.courseActiveId) {
@@ -1391,7 +1415,7 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
     const unlimited = !preset && count === 0 && mode !== 'exam';
     const generation = {
       mode, count: unlimited ? (mode === 'passage' ? 3 : 20) : (count || 50),
-      charTier: app.learningActive || app.reviewActive ? '1' : app.settings.charTier, weakBoost: app.settings.weakBoost,
+      charTier: app.coachActive || app.learningActive || app.reviewActive ? '1' : app.settings.charTier, weakBoost: app.settings.weakBoost,
       phraseCategory: app.settings.phraseCategory, phraseLength: app.settings.phraseLength
     };
 
@@ -1440,20 +1464,21 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
     /* 测验模式：强制无提示。
        注意这里**不是**沿用 app.settings.hint —— 测验语义是「脱离辅助」，
        用户即使把设置里的提示开着，测验也必须关掉（引擎侧还有 examMode 硬闸门）。 */
-    const isExam = mode === 'exam' || ['check','review'].includes(app.learningActive?.phase);
+    const isExam = mode === 'exam' || app.coachActive?.phase==='transfer' || ['check','review'].includes(app.learningActive?.phase);
 
     app.engine = new PracticeEngine({
       questions,
       unlimited, questionSource, generation,
       mode,
-      modeName: app.learningActive ? `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]}`
+      modeName: app.coachActive ? `${COACH_MAP[app.coachActive.ruleId].title} · ${app.coachActive.phase==='guided'?'对照补练':app.coachActive.repeat?'复测这组字':'换字验收'}`
+        : app.learningActive ? `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]}`
         : app.reviewActive ? '错题复习 · 独立检验' : modeDisplayName(mode),
       durationSec,
-      strict: app.reviewActive ? true : app.settings.strict,
+      strict: app.coachActive || app.reviewActive ? true : app.settings.strict,
       skipPunct: app.settings.skipPunct,
       examMode: isExam,
-      trainingPolicy: app.reviewActive ? 'independent' : app.learningActive ? (isExam ? 'independent' : 'full') : app.settings.trainingPolicy,
-      hintEnabled: isExam ? false : app.reviewActive || app.learningActive ? true : app.settings.hint,
+      trainingPolicy: app.coachActive ? (isExam?'independent':'full') : app.reviewActive ? 'independent' : app.learningActive ? (isExam ? 'independent' : 'full') : app.settings.trainingPolicy,
+      hintEnabled: isExam ? false : app.coachActive || app.reviewActive || app.learningActive ? true : app.settings.hint,
       hintDelayMs: isExam || app.reviewActive ? 0 : app.settings.hintDelay,
       revealDelayMs: isExam || app.reviewActive ? 0 : app.settings.revealDelay
     });
@@ -1495,7 +1520,7 @@ function resumeSession() {
        而出题器只认内置语料。不过续练其实不需要重建：saved.questions
        里已经存着剩余的题目，PracticeEngine.restore 靠它恢复。
        所以这里对 custom 传 null source（与有限题量练习一致）。 */
-    const canResumeBySource = !saved.learning && (saved.unlimited || generation.charTier === 'progressive');
+    const canResumeBySource = !saved.learning && !saved.coach && (saved.unlimited || generation.charTier === 'progressive');
     const source = (canResumeBySource && generation.mode !== 'custom')
       ? createQuestionSource(generation, saved.questions, saved.generationState) : null;
     const eng = PracticeEngine.restore(saved, source);
@@ -1503,14 +1528,17 @@ function resumeSession() {
     if (app.engine) app.engine.destroy();
     app.engine = eng;
     app.sessionMode = eng.mode;
-    app.learningActive = normalizeLearningSession(saved.learning);
+    app.coachActive = normalizeCoachSession(saved.coach);
+    app.coachLog = normalizeCoachLog(saved.coachLog);
+    app.coachResult = null;
+    app.learningActive = app.coachActive ? null : normalizeLearningSession(saved.learning);
     app.learningResult = null;
-    app.reviewActive = normalizeReviewSession(saved.review);
+    app.reviewActive = app.coachActive ? null : normalizeReviewSession(saved.review);
     if (app.reviewActive && !app.reviewActive.keys.length)
       app.reviewActive.keys = [...new Set(eng.questions.map(q => q.text || q.promptText).filter(Boolean))];
-    app.decodeHidden = app.learningActive && ['guided','repair'].includes(app.learningActive.phase) ? false : null;
+    app.decodeHidden = app.coachActive?.phase==='guided' || (app.learningActive && ['guided','repair'].includes(app.learningActive.phase)) ? false : null;
     app.keymapHidden = null;
-    if (app.learningActive && ['check','review'].includes(app.learningActive.phase)) {
+    if (app.coachActive?.phase==='transfer' || (app.learningActive && ['check','review'].includes(app.learningActive.phase))) {
       eng.examMode = true;
       eng.hintEnabled = false;
       eng.hintDelayMs = 0;
@@ -1540,7 +1568,7 @@ function resumeSession() {
       mode: eng.mode,
       questions: eng.unlimited ? null : eng.questions.slice(),
       options: { durationSec: eng.durationSec, shelfId: app.shelfActiveId,
-        courseLessonId: app.courseActiveId, retrySource: saved.retrySource, learning: app.learningActive, review: app.reviewActive },
+        courseLessonId: app.courseActiveId, retrySource: saved.retrySource, learning: app.learningActive, review: app.reviewActive, coach:app.coachActive },
       shelfSegBase: app.shelfSegBase
     };
     bindEngineEvents();
@@ -1560,6 +1588,7 @@ function resumeSession() {
 
 function rememberCurrentQuestion(eng) {
   const q = eng.currentQuestion();
+  if(app.coachLog)observeCoachSeen(app.coachLog,q);
   if (q && q.meta?.from !== 'review') {
     S.recordRecent(eng.mode, q.kind === 'key' ? `${q.role}:${q.promptText}` : q.kind === 'part' ? `${q.part}:${q.pinyin}` : (q.text || q.promptText));
   }
@@ -1588,6 +1617,7 @@ function bindEngineEvents() {
        'question' —— 换题：允许全量重绘。
      不传（旧调用/第三方）时按 'question' 处理，宁可多画也不漏画。 */
   eng.on('change', (_snap, level) => {
+    if(level!=='key')coachView.refreshTip();
     renderSession(level || 'question');
   });
 
@@ -1597,6 +1627,9 @@ function bindEngineEvents() {
   });
 
   eng.on('error', (fb) => {
+    const target=eng.currentTarget();
+    const diagnosis=observeCoachError(app.coachLog,fb,eng.currentQuestion(),target,`${eng.questionOffset+eng.index}:${eng.charIndex}:${target?.role}`);
+    coachView.refreshTip(diagnosis);
     recordReviewFailure('wrong');
     showErrorFeedback(fb);
     app.lastErrorTarget = fb;
@@ -1609,6 +1642,7 @@ function bindEngineEvents() {
   });
 
   eng.on('unit', ({ target, independent, seconds }) => {
+    observeCoachAnswer(app.coachActive,eng.currentQuestion(),independent);
     const learningQuestion = eng.currentQuestion();
     if (learningQuestion?.kind === 'key' || learningQuestion?.chars?.length === 1)
       observeLearning(app.learningActive, learningQuestion, independent);
@@ -1662,6 +1696,8 @@ function bindEngineEvents() {
 }
 
 function recordReviewCorrect(item) {
+  // 规则课堂的结果只评价本轮；原错题仍需回到复习队列独立回访。
+  if (app.coachActive) return;
   const key = item.word || item.char;
   const previous = app.reviewActive?.outcomes[key];
   if (isReviewFailure(previous)) return;
@@ -1706,19 +1742,24 @@ function showSessionUI(show) {
   if (session) session.classList.toggle('is-exam', !!show && isExam);
   if (session) session.classList.toggle('is-learning', !!show && !!app.learningActive);
   if (session) session.classList.toggle('is-review', !!show && !!app.reviewActive);
+  if (session) session.classList.toggle('is-coach', !!show && !!app.coachActive);
   const banner = $('#learningSessionBanner');
   if (banner) {
-    banner.hidden = !show || (!app.learningActive && !app.reviewActive);
-    if (!banner.hidden) banner.textContent = app.reviewActive
+    banner.hidden = !show || (!app.coachActive && !app.learningActive && !app.reviewActive);
+    if (!banner.hidden) banner.textContent = app.coachActive
+      ? `${COACH_MAP[app.coachActive.ruleId].title} · ${app.coachActive.phase==='guided'?'看规则，练对照字':app.coachActive.repeat?'复测这组已练过的字':'换成本轮未出现的字；全程无提示'} · 不限时`
+      : app.reviewActive
       ? '错题复习 · 先独立输入；可主动求助，求助后转为补练，不推进掌握。不限时。'
       : `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]} · 先按准，不限时`;
   }
   // 迷你键位图同样按模式收敛（属性式隐藏，便于断言）
   applyMiniKeymapVisibility();
+  coachView.refreshTip();
+  if(!show){const tip=$('#coachTip');if(tip){tip.hidden=true;tip.innerHTML='';}}
   if (!show && !isSessionInProgress() && crossTabPendingKeys.size) applyExternalChange();
   if (!show) {
     // 续练把 sessionMode 设成了关卡模式；返回自由练习时恢复用户原来的模式。
-    if (app.learningActive || app.reviewActive) selectMode(app.settings.mode, true);
+    if (app.coachActive || app.learningActive || app.reviewActive) selectMode(app.settings.mode, true);
     renderCourseBox();
   }
 }
@@ -1787,7 +1828,7 @@ function persistRecord(summary) {
     /* 测验成绩：先算分，再决定是否落库。
        分数只对 exam 模式有意义，其它模式不做评分（避免「练习也被打分」
        造成的压力 —— 练习与考核要分开）。 */
-    const examIsMode = !app.learningActive && (s.mode === 'exam' || s.examMode === true);
+    const examIsMode = !app.coachActive && !app.learningActive && (s.mode === 'exam' || s.examMode === true);
     const examResult = examIsMode ? scoreExam(s) : null;
     if (examResult) s.score = examResult;
     // 供结果弹窗与测试读取（summary() 本身是纯函数，不携带分数）
@@ -1917,6 +1958,7 @@ function persistRecord(summary) {
       learningView.resetSelection();
       renderCourseBox();
     }
+    app.coachResult = app.coachActive ? {...evaluateCoach(app.coachActive,s),session:app.coachActive} : null;
     showResultModal(s, meaningful, recordId);
   } catch (err) {
     console.error('[persistRecord] 失败', err);
@@ -1931,6 +1973,13 @@ function showResultModal(s, recorded, recordId) {
   const retry = app.retrySession;
   const learningResult = app.learningResult;
   const reviewResult = app.reviewActive ? reviewTotals(app.reviewActive) : null;
+  const coachResult = app.coachResult;
+  const coachSeen = (app.coachLog?.seen || []).slice();
+  const coachSuggestions = coachResult ? '' : coachView.resultHTML(app.coachLog);
+  const coachReturnView = reviewResult ? 'review' : 'practice';
+  const coachNext = !coachResult ? null : !s.completed ? coachResult.session
+    : coachResult.passed && coachResult.session.phase==='guided' ? {...coachResult.session,phase:'transfer'}
+    : !coachResult.passed ? {...coachResult.session,phase:'guided',repeat:coachResult.session.phase==='transfer'||coachResult.session.repeat} : null;
   let learningNext = null;
   if (learningResult) {
     const id = learningResult.lesson.id;
@@ -1939,7 +1988,9 @@ function showResultModal(s, recorded, recordId) {
       : !learningResult.passed ? { lessonId: id, phase: 'repair', repairItems: learningResult.failedItems }
       : (() => { const next = recommendedLearning(); return next ? { lessonId: next.lesson.id, phase: next.phase } : null; })();
   }
-  const retryLabel = reviewResult ? '返回复习队列' : learningResult ? (!s.completed ? '继续本关'
+  const retryLabel = coachResult ? (!s.completed?'重新练完本轮':!coachResult.passed?'再练对照组':coachResult.session.phase==='guided'
+    ? coachResult.session.repeat?'复测这组字':'开始换字验收':coachResult.session.returnView==='review'?'返回复习队列':'返回学习路径')
+    : reviewResult ? '返回复习队列' : learningResult ? (!s.completed ? '继续本关'
     : !learningResult.passed ? '补练薄弱项' : ['guided','repair'].includes(learningResult.phase) ? '开始独立小测'
     : learningNext?.phase === 'review' ? '开始隔天回访' : learningNext ? '继续下一关' : '回到学习路径') : retry?.options.courseLessonId ? '重练本课'
     : retry?.options.shelfId ? '重练本次片段'
@@ -1953,9 +2004,10 @@ function showResultModal(s, recorded, recordId) {
     : acc >= 85 ? '不错'
     : acc >= 70 ? '继续加油' : '仍需熟悉键位';
 
-  const title = reviewResult ? '复习结束' : learningResult ? (!s.completed ? '本关暂未完成' : learningResult.passed ? '本轮完成' : '先补练，再试一次')
+  const title = coachResult ? (coachResult.passed?'本轮完成':'再巩固一下') : reviewResult ? '复习结束' : learningResult ? (!s.completed ? '本关暂未完成' : learningResult.passed ? '本轮完成' : '先补练，再试一次')
     : s.reason === 'timeup' ? '时间到' : '练习完成';
-  const headRight = reviewResult ? (reviewResult.repair ? '有内容需要补练' : reviewResult.advanced ? '独立检验完成' : '巩固完成')
+  const headRight = coachResult ? (coachResult.session.phase==='guided'?'对照补练':coachResult.session.repeat?'复测结果':'换字验收')
+    : reviewResult ? (reviewResult.repair ? '有内容需要补练' : reviewResult.advanced ? '独立检验完成' : '巩固完成')
     : learningResult ? (learningResult.passed ? LEARNING_PHASES[learningResult.phase] + '通过' : '继续巩固')
     : sc ? `${sc.grade}` : practiceGrade;
 
@@ -2163,13 +2215,15 @@ function showResultModal(s, recorded, recordId) {
     ${learningResult ? `<div class="learning-result"><strong>${escapeHtml(learningResult.lesson.title)} · ${escapeHtml(LEARNING_PHASES[learningResult.phase])}</strong>
       <p>${escapeHtml(learningResult.reason)}</p>${!learningResult.passed && s.completed ? `<p>补练：${learningResult.failedItems.map(escapeHtml).join('、')}</p>` : ''}</div>` : ''}
     ${scoreBlock}
+    ${coachResult ? `<div class="coach-rule-card">${coachView.ruleHTML(COACH_MAP[coachResult.session.ruleId])}
+      <p><strong>${escapeHtml(coachResult.reason)}</strong></p>${coachResult.session.repeat?'<p>这组字已经出现过，本轮为复测。</p>':''}</div>` : ''}
     ${reviewResult ? `<div class="review-result"><strong>本轮复习判定</strong>
       <p>有效独立通过 ${reviewResult.advanced} 项 · 提前巩固 ${reviewResult.practice} 项 · 待补练 ${reviewResult.repair} 项</p>
       <p>提前或同日重练不拉长排期；答错、求助、跳过后明天回访。未作答的项目保持原排期。</p></div>` : ''}
 
-    ${learningResult || reviewResult ? `<div class="result-grid learning-result-grid">
-      <div class="result-cell is-hl"><div class="result-cell-label">${reviewResult || ['check','review'].includes(learningResult?.phase) ? '独立正确率' : '作答正确率'}</div>
-        <div class="result-cell-value">${reviewResult || ['check','review'].includes(learningResult?.phase) ? s.independentAccuracy : s.accuracy}<i>%</i></div></div>
+    ${coachResult || learningResult || reviewResult ? `<div class="result-grid learning-result-grid">
+      <div class="result-cell is-hl"><div class="result-cell-label">${coachResult?.session.phase==='transfer' || reviewResult || ['check','review'].includes(learningResult?.phase) ? '独立正确率' : '作答正确率'}</div>
+        <div class="result-cell-value">${coachResult?.session.phase==='transfer' || reviewResult || ['check','review'].includes(learningResult?.phase) ? s.independentAccuracy : s.accuracy}<i>%</i></div></div>
       <div class="result-cell"><div class="result-cell-label">完成题目</div>
         <div class="result-cell-value">${s.doneQuestions}<i>/${s.questionCount}</i></div></div></div>` : `<div class="result-grid">
       <div class="result-cell is-hl">
@@ -2215,6 +2269,7 @@ function showResultModal(s, recorded, recordId) {
 
     ${noteParts.length ? `<div class="result-note">${noteParts.map(escapeHtml).join('<br>')}</div>` : ''}
     `}
+    ${coachSuggestions}
 
     <div class="modal-actions">
       <button class="btn btn-ghost" data-act="stats">查看统计</button>
@@ -2225,9 +2280,15 @@ function showResultModal(s, recorded, recordId) {
     close();
     if (act === 'stats') switchView('stats');
     else if (act === 'review') switchView('review');
+    else if (act.startsWith('coach-') && Object.hasOwn(COACH_MAP,act.slice(6)))
+      startRuleCoach(act.slice(6),coachSeen,coachReturnView);
     else if (act === 'again') {
       showSessionUI(false);
-      if (reviewResult) switchView('review');
+      if(coachResult){
+        if(coachNext)startCoachRound(coachNext);
+        else {switchView(coachResult.session.returnView);if(coachResult.session.returnView==='practice')$('#learningPath').open=true;}
+      }
+      else if (reviewResult) switchView('review');
       else if (learningResult) {
         if (learningNext) startLearningRound(learningNext);
         else { switchView('practice'); $('#learningPath').open = true; }
@@ -2360,7 +2421,8 @@ function renderSession(arg) {
      （重复播报同一句说明）。 */
   if (level !== 'key') {
     if (stageMode) stageMode.textContent = (q.label || '练习') + (!eng.examMode ? ` · ${TRAINING_LABELS[eng.assistanceLevel()]}` : '') + (eng.adaptive ? ` · 第 ${eng.training.tier} 档` : '');
-    if (stageTip) stageTip.textContent = app.reviewActive ? '先凭记忆输入；需要时按求助快捷键，帮助不会算独立通过。'
+    if (stageTip) stageTip.textContent = app.coachActive ? (eng.examMode?'每个规则成分换两个字，全对且未求助才通过；不设速度门槛。':'先读规则和对照字，练完后换字独立检验。')
+      : app.reviewActive ? '先凭记忆输入；需要时按求助快捷键，帮助不会算独立通过。'
       : app.learningActive
       ? (eng.examMode ? '本轮不提供提示；完成整关后检查每一项。' : '先看声韵拆分，按准这一小组；完成后再独立检验。')
       : eng.training.policy === 'progressive' && eng.assistanceLevel() < 2
@@ -2633,7 +2695,7 @@ function updateHud() {
 
   setText('#hudSpeed', st.speed);
   setText('#hudAcc', st.accuracy);
-  const assessment = app.reviewActive || (app.learningActive && ['check','review'].includes(app.learningActive.phase));
+  const assessment = app.coachActive?.phase==='transfer' || app.reviewActive || (app.learningActive && ['check','review'].includes(app.learningActive.phase));
   if (assessment) setText('#hudAcc', st.independentAccuracy);
   setText('#hudAccLabel', assessment ? '独立正确率' : '正确率');
   setText('#hudTime', formatClock(st.elapsedSec));
@@ -3356,6 +3418,7 @@ function renderReviewView() {
       ${noDue || !groups.other.length ? '' : groupHtml('声韵母键位及其他', groups.other, '')}
 
       <div class="review-cta">
+        <button class="btn btn-ghost" id="btnReviewCoach">易混规则小课堂</button>
         <button class="btn btn-ghost" id="btnReviewPracticeAll">普通练习</button>
         <button class="btn btn-ghost" id="btnReviewToCustom"
                 title="把易错字词连成一段跟打文本，练字与字之间的连贯">错题连成一段跟打</button>
@@ -3391,6 +3454,7 @@ function fmtDays(d) {
 }
 
 function bindReviewActions() {
+  $('#btnReviewCoach')?.addEventListener('click',()=>coachView.openLibrary('review'));
   const btnAll = $('#btnReviewPracticeAll');
   if (btnAll) btnAll.addEventListener('click', () => {
     switchView('practice');
@@ -4011,7 +4075,7 @@ function applyHintSettingsToEngine() {
   const eng = app.engine;
   if (!eng) return;
   try {
-    eng.hintEnabled = eng.examMode ? false : app.learningActive || app.reviewActive ? true : !!app.settings.hint;
+    eng.hintEnabled = eng.examMode ? false : app.coachActive || app.learningActive || app.reviewActive ? true : !!app.settings.hint;
     eng.hintDelayMs = eng.examMode || app.reviewActive ? 0 : Math.max(0, Number(app.settings.hintDelay) || 0);
     eng.revealDelayMs = eng.examMode || app.reviewActive ? 0 : Math.max(0, Number(app.settings.revealDelay) || 0);
     if (eng.revealDelayMs > 0 && eng.revealDelayMs < eng.hintDelayMs) {

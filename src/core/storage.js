@@ -1685,6 +1685,8 @@ export function saveResume(state) {
     retrySource: ['smart', 'daily'].includes(state.retrySource) ? state.retrySource : undefined,
     learning: state.learning || undefined,
     review: state.review || undefined,
+    coach: state.coach || undefined,
+    coachLog: state.coachLog || undefined,
     training: state.training,
     unitStartedAt: state.unitStartedAt,
     charIndex: state.charIndex,
