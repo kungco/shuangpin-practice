@@ -2,6 +2,8 @@
 
 一个离线可用的双拼输入法练习应用。零依赖、零构建，打开即用。
 
+当前版本 **v1.6.1**：修复整词复习进度、重练来源、跨标签同步、主题即时生效和主动结束时重复记账。详见 [更新记录](CHANGELOG.md)。
+
 ## 怎么打开
 
 > **为什么不能直接双击 `index.html`？**
@@ -10,23 +12,23 @@
 
 ### Windows 桌面版（唯一的下载）
 
-下载 **`ShuangpinPractice-<版本>-win64.zip`**（约 1.6 MB），**解压到任意目录**，
+下载 **`ShuangpinPractice-<版本>-win64.zip`**，**解压到任意目录**，
 双击里面的 **`双拼练习.exe`** 即可 —— 免安装、可随意挪位置（桌面、U 盘都行）。
 
 > 早先还提供过一个「网页版 zip」（解压后双击 `启动双拼练习.bat`，用浏览器打开）。
 > 它当初存在的理由是桌面版要 65 MB、太重；现在桌面版只有 1.6 MB，它就没有必要了，
 > **从 v1.6.0 起不再发布**。想用浏览器跑仍然可以，见下方「直接用仓库源码」。
 
-解压出来是两个文件（外加一份使用说明），**必须放在同一个文件夹里**：
+从 v1.6.1 起，GitHub 自动构建使用 MSVC，WebView2 加载器已包含在程序中：
 
 ```
-双拼练习.exe          3.36 MB
-WebView2Loader.dll    0.15 MB   ← 运行库，别单独把 exe 拷走
+双拼练习.exe
 使用说明.txt
 ```
 
 它用 **Windows 自带的 WebView2** 渲染界面，自己不携带浏览器内核 ——
-这就是整个下载只有 1.6 MB 的原因（对比旧版 Electron 的 65 MB，小了约 **40 倍**）。
+因此无需在下载包中携带完整浏览器内核。
+v1.6.0 的 MinGW 构建仍需将 `WebView2Loader.dll` 与 exe 放在一起。
 
 > **前提是系统里有 WebView2。** Windows 11 全系预装；Windows 10（1803 及以上）
 > 随 Edge 一起提供，绝大多数已更新的机器都有。真缺了装一次即可
@@ -39,7 +41,8 @@ WebView2Loader.dll    0.15 MB   ← 运行库，别单独把 exe 拷走
 ```bash
 node tauri/tools/prepare-frontend.mjs
 cd tauri/src-tauri && cargo build --release   # 产物在 target/release/
-python tauri/tools/make_package.py            # 打成 dist/ 下的分发 zip
+python tauri/tools/make_package.py            # MinGW 构建：exe + DLL
+# MSVC 构建使用：python tauri/tools/make_package.py --static-loader
 ```
 
 ### 旧版：Electron 桌面版（不再发布）

@@ -1659,6 +1659,7 @@ export function saveResume(state) {
     unlimited: state.unlimited,
     generation: state.generation,
     generationState: state.generationState,
+    retrySource: ['smart', 'daily'].includes(state.retrySource) ? state.retrySource : undefined,
     training: state.training,
     unitStartedAt: state.unitStartedAt,
     charIndex: state.charIndex,

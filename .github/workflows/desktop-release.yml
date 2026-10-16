@@ -1,0 +1,75 @@
+name: desktop release build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - run: npm ci
+        working-directory: _test
+      - run: npm test
+        working-directory: _test
+
+  windows:
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Prepare frontend
+        run: node tauri/tools/prepare-frontend.mjs
+      - name: Select stable MSVC toolchain
+        run: rustup default stable-x86_64-pc-windows-msvc
+      - name: Build Windows desktop app
+        working-directory: tauri/src-tauri
+        run: cargo build --release --locked
+      - name: Verify executable version and startup
+        shell: pwsh
+        run: |
+          $exePath = (Resolve-Path 'tauri/src-tauri/target/release/shuangpin-practice.exe').Path
+          $expectedVersion = (Get-Content package.json | ConvertFrom-Json).version
+          $actualVersion = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
+          if ($actualVersion -notlike "$expectedVersion*") { throw "Executable version mismatch: $actualVersion" }
+          $appProcess = Start-Process -FilePath $exePath -WindowStyle Hidden -PassThru
+          try {
+            Start-Sleep -Seconds 12
+            $appProcess.Refresh()
+            if ($appProcess.HasExited) { throw "App exited early: $($appProcess.ExitCode)" }
+            $webviews = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" |
+              Where-Object { $_.ParentProcessId -eq $appProcess.Id }
+            if (-not $webviews) { throw 'WebView2 did not start' }
+          } finally {
+            if (-not $appProcess.HasExited) { Stop-Process -Id $appProcess.Id -Force }
+          }
+      - name: Package Windows download
+        run: python tauri/tools/make_package.py --static-loader
+        env:
+          PYTHONUTF8: '1'
+      - name: Record checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist/*.zip | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -LiteralPath ($_.FullName + '.sha256') -Encoding utf8
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error

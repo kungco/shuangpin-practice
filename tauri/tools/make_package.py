@@ -93,6 +93,8 @@ def read_version() -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="打包 Tauri 桌面版分发包")
     ap.add_argument("--out", default=str(REPO_ROOT / "dist"), help="输出目录（默认 dist/）")
+    ap.add_argument("--static-loader", action="store_true",
+                    help="MSVC 构建：WebView2 加载器已静态链接，不需要额外 DLL")
     args = ap.parse_args()
 
     if not RELEASE_DIR.is_dir():
@@ -102,8 +104,18 @@ def main() -> int:
         print("     cd tauri/src-tauri && cargo build --release")
         return 1
 
-    # 先确认需要的文件都在，再动手 —— 免得压出一个残缺的包
-    missing = [src for src in PAYLOAD.values() if not (RELEASE_DIR / src).is_file()]
+    payload = {name: src for name, src in PAYLOAD.items()
+               if not (args.static_loader and name == "WebView2Loader.dll")}
+    usage = USAGE_TXT
+    if args.static_loader:
+        usage = usage.replace(
+            "两个文件必须放在**同一个文件夹**里（WebView2Loader.dll 是运行库，\n"
+            "单独把 exe 拷走会提示找不到它）。",
+            "本版由 MSVC 构建，WebView2 加载器已包含在 exe 中，无需附带 DLL。")
+        usage = usage.replace("这也是它只有 3.5 MB 的原因。", "因此下载包不需要携带完整浏览器内核。")
+
+    # Dynamic builds still require the DLL; only explicit static builds omit it.
+    missing = [src for src in payload.values() if not (RELEASE_DIR / src).is_file()]
     if missing:
         print(f"❌ 构建产物不完整，缺少：{', '.join(missing)}")
         print(f"   目录：{RELEASE_DIR}")
@@ -112,7 +124,7 @@ def main() -> int:
 
     # 断言那些「绝不能进包」的文件确实没被列进来
     for bad in FORBIDDEN:
-        if bad in PAYLOAD.values():
+        if bad in payload.values():
             print(f"❌ 打包清单里混入了不该分发的文件：{bad}")
             return 1
 
@@ -124,12 +136,12 @@ def main() -> int:
 
     total = 0
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        for arcname, srcname in PAYLOAD.items():
+        for arcname, srcname in payload.items():
             src = RELEASE_DIR / srcname
             zf.write(src, arcname)
             total += src.stat().st_size
         # 使用说明：UTF-8 with BOM —— 老版本记事本没 BOM 会按 GBK 解码而乱码
-        zf.writestr("使用说明.txt", USAGE_TXT.encode("utf-8-sig"))
+        zf.writestr("使用说明.txt", usage.encode("utf-8-sig"))
 
     # 压缩后如果接近 22 MB，说明那个 cdylib 混进来了
     size = out_zip.stat().st_size
@@ -139,17 +151,18 @@ def main() -> int:
 
     print(f"✅ 已生成 {out_zip}")
     print(f"   版本：{version}")
-    print(f"   文件数：{len(PAYLOAD) + 1}（含使用说明）")
+    print(f"   文件数：{len(payload) + 1}（含使用说明）")
     print(f"   原始大小：{total / 1024:.1f} KB")
     print(f"   压缩包：{size / 1024:.1f} KB")
     print()
     print("   包内清单：")
-    for arcname, srcname in PAYLOAD.items():
+    for arcname, srcname in payload.items():
         mb = (RELEASE_DIR / srcname).stat().st_size / 1048576
         print(f"     {arcname}  ({mb:.3f} MB)")
     print("     使用说明.txt")
     print()
-    print("   注意：WebView2Loader.dll 必须与 exe 放在同一目录（已在说明里写明）。")
+    if not args.static_loader:
+        print("   注意：WebView2Loader.dll 必须与 exe 放在同一目录（已在说明里写明）。")
     return 0
 
 

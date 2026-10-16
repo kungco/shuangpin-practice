@@ -90,6 +90,30 @@ const app = {
 
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+let settingsBaseline = null;
+
+function acceptSettings(settings) {
+  if (app.saveTimer) clearTimeout(app.saveTimer);
+  app.saveTimer = null;
+  app.settings = settings;
+  app.settings.shortcuts = mergeShortcuts(app.settings.shortcuts);
+  settingsBaseline = JSON.parse(JSON.stringify(app.settings));
+}
+
+// Only local edits win over freshly read settings; unrelated external edits survive.
+function localSettingsChanges() {
+  return Object.fromEntries(Object.keys(S.DEFAULT_SETTINGS).filter(key =>
+    JSON.stringify(app.settings[key]) !== JSON.stringify(settingsBaseline?.[key])
+  ).map(key => [key, app.settings[key]]));
+}
+
+function mergeStoredSettings() {
+  const changes = localSettingsChanges();
+  const stored = S.loadSettings();
+  stored.shortcuts = mergeShortcuts(stored.shortcuts);
+  settingsBaseline = JSON.parse(JSON.stringify(stored));
+  app.settings = Object.assign(stored, changes);
+}
 
 /* ------------------------------------------------------------
    常驻节点缓存
@@ -263,7 +287,7 @@ function initA11y() {
 
 function boot() {
   try {
-    app.settings = S.loadSettings();
+    acceptSettings(S.loadSettings());
     // 快捷键：把「脏数据」在进入应用前就修正掉（合并默认值 + 冲突校验），
     // 免得后面每个用到的地方都要自己防一手
     app.settings.shortcuts = mergeShortcuts(app.settings.shortcuts);
@@ -415,6 +439,7 @@ function watchStorageMode() {
 /** 合并短时间内的多次改动：一次导入会连写十几个键，不必刷十几次界面。 */
 let crossTabTimer = null;
 let crossTabPendingKeys = new Set();
+let crossTabNoticeShown = false;
 
 /**
  * 当前是否有正在进行的练习（含暂停）。
@@ -444,22 +469,24 @@ function initCrossTabSync() {
 function applyExternalChange() {
   crossTabTimer = null;
   const keys = crossTabPendingKeys;
-  crossTabPendingKeys = new Set();
   if (!keys.size) return;
 
   try {
     /* 设置：重新读盘。练习进行中也读 —— 本轮已经用到的参数（时长、题量）
        早就复制进引擎了，不会中途改变正在进行的这一局；而下一局该用新值。 */
-    app.settings = S.loadSettings();
+    mergeStoredSettings();
 
     const touched = (k) => keys.has(S.KEYS[k]);
 
     /* 练习进行中不重画界面：正在答题时列表被换掉，光标和注意力都会断。
        等这一局结束，原有的结算流程本来就会重画。 */
     if (isSessionInProgress()) {
-      toast('另一个标签页更新了数据，将在本轮结束后同步', 'ok', 4000);
+      if (!crossTabNoticeShown) toast('另一个标签页更新了数据，将在本轮结束后同步', 'ok', 4000);
+      crossTabNoticeShown = true;
       return;
     }
+    crossTabPendingKeys = new Set();
+    crossTabNoticeShown = false;
 
     if (touched('shelf')) renderShelf();
     if (touched('course')) renderCourseBox();
@@ -902,7 +929,7 @@ function initSmartMix() {
         return;
       }
       renderMixReasons(plan.reasons);
-      startSession(plan.questions, 'mix', { durationSec: 300 });
+      startSession(plan.questions, 'mix', { durationSec: 300, retrySource: 'smart' });
     } catch (err) {
       console.error('[smartmix] 组题失败', err);
       toast('智能混合组题失败：' + (err && err.message ? err.message : '未知错误'), 'err');
@@ -998,7 +1025,7 @@ function startDailyPlan() {
       return;
     }
     renderMixReasons(built.reasons);
-    startSession(built.questions, 'mix', { durationSec: built.roundSec });
+    startSession(built.questions, 'mix', { durationSec: built.roundSec, retrySource: 'daily' });
   } catch (err) {
     console.error('[dailyplan] 组题失败', err);
     toast('今日计划组题失败：' + (err && err.message ? err.message : '未知错误'), 'err');
@@ -1285,7 +1312,12 @@ function saveSettingsDebounced() {
 function flushSettings() {
   if (app.saveTimer) clearTimeout(app.saveTimer);
   app.saveTimer = null;
-  try { S.saveSettings(app.settings); } catch (e) { console.warn(e); }
+  try {
+    if (!Object.keys(localSettingsChanges()).length) return;
+    mergeStoredSettings();
+    S.saveSettings(app.settings);
+    settingsBaseline = JSON.parse(JSON.stringify(app.settings));
+  } catch (e) { console.warn(e); }
 }
 
 function saveProgress(force = false) {
@@ -1302,6 +1334,7 @@ function saveProgress(force = false) {
   if (app.shelfSegBase) state.shelfSegBase = app.shelfSegBase;
   // 逐字用时跟存档走，否则刷新一次前半程的卡顿数据就没了（见 resumeSession）
   if (Array.isArray(app.slowChars) && app.slowChars.length) state.slowChars = app.slowChars;
+  state.retrySource = app.retrySession?.options.retrySource;
   S.saveResume(state);
   app.lastResumeSave = now;
 }
@@ -1431,6 +1464,11 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
       revealDelayMs: isExam ? 0 : app.settings.revealDelay
     });
 
+    app.retrySession = {
+      mode, questions: preset || customPreset,
+      options: { ...opts, durationSec }, shelfSegBase
+    };
+
     bindEngineEvents();
     showSessionUI(true);
     ensureMiniKeymap();
@@ -1491,6 +1529,13 @@ function resumeSession() {
     app.slowChars = (eng.mode === 'custom' && app.shelfActiveId)
       ? (Array.isArray(saved.slowChars) ? saved.slowChars.slice() : [])
       : null;
+    app.retrySession = {
+      mode: eng.mode,
+      questions: eng.unlimited ? null : eng.questions.slice(),
+      options: { durationSec: eng.durationSec, shelfId: app.shelfActiveId,
+        courseLessonId: app.courseActiveId, retrySource: saved.retrySource },
+      shelfSegBase: app.shelfSegBase
+    };
     bindEngineEvents();
     showSessionUI(true);
     ensureMiniKeymap();
@@ -1580,6 +1625,10 @@ function bindEngineEvents() {
     } catch (e) { /* 忽略 */ }
   });
 
+  eng.on('questionComplete', ({ question, independent }) => {
+    if (independent && question.text) S.recordWeakCorrect({ word: question.text });
+  });
+
   eng.on('finish', (summary) => {
     // 落盘时配额可能刚好写满 → 状态转差，趁结算页还在就告诉用户。
     watchStorageMode();
@@ -1616,6 +1665,7 @@ function showSessionUI(show) {
   if (session) session.classList.toggle('is-exam', !!show && isExam);
   // 迷你键位图同样按模式收敛（属性式隐藏，便于断言）
   applyMiniKeymapVisibility();
+  if (!show && !isSessionInProgress() && crossTabPendingKeys.size) applyExternalChange();
 }
 
 function quitSession() {
@@ -1645,8 +1695,8 @@ function quitSession() {
       saveProgressAndExit();
     } else if (act === 'end') {
       close();
-      const s = app.engine ? app.engine.finish('user') : null;
-      persistRecord(s);
+      // The finish event owns persistence; recording here as well duplicates a result.
+      if (app.engine) app.engine.finish('user');
     }
   });
 }
@@ -1655,8 +1705,7 @@ function saveProgressAndExit() {
   try {
     const eng = app.engine;
     if (!eng) { showSessionUI(false); return; }
-    const snap = eng.exportResume();
-    S.saveResume(snap);
+    saveProgress(true);
     eng.destroy();
     app.engine = null;
     showSessionUI(false);
@@ -1806,6 +1855,11 @@ function persistRecord(summary) {
 
 function showResultModal(s, recorded, recordId) {
   const sc = s.score || null;
+  const retry = app.retrySession;
+  const retryLabel = retry?.options.courseLessonId ? '重练本课'
+    : retry?.options.shelfId ? '重练本次片段'
+    : retry?.options.retrySource === 'daily' ? '继续今日计划'
+    : s.mode === 'mix' ? '再练一组' : sc ? '再测一次' : '再来一次';
 
   // 测验模式用「分数 + 等级」做标题，练习模式沿用「正确率」评语
   const acc = s.accuracy;
@@ -2067,7 +2121,7 @@ function showResultModal(s, recorded, recordId) {
     <div class="modal-actions">
       <button class="btn btn-ghost" data-act="stats">查看统计</button>
       <button class="btn btn-ghost" data-act="review">错题复习</button>
-      <button class="btn btn-primary" data-act="again">${sc ? '再测一次' : '再来一次'}</button>
+      <button class="btn btn-primary" data-act="again">${retryLabel}</button>
     </div>
   `, (act, close) => {
     close();
@@ -2075,7 +2129,12 @@ function showResultModal(s, recorded, recordId) {
     else if (act === 'review') switchView('review');
     else if (act === 'again') {
       showSessionUI(false);
-      startSession();
+      if (retry?.options.retrySource === 'daily') startDailyPlan();
+      else if (retry?.options.retrySource === 'smart') $('#btnSmartMix')?.click();
+      else if (retry) {
+        app.shelfSegOffset = retry.shelfSegBase || 0;
+        startSession(retry.questions, retry.mode, retry.options);
+      } else startSession(null, s.mode);
     }
   }, () => {
     // 关闭弹窗后回到设置面板
@@ -3567,7 +3626,7 @@ function initSettingsView() {
           const res = S.importAll(payload);
           toast(res.message, res.ok ? 'ok' : 'err', 4000);
           if (res.ok) {
-            app.settings = S.loadSettings();
+            acceptSettings(S.loadSettings());
             renderStatsView();
             renderReviewView();
             syncSettingsUI();
@@ -3594,7 +3653,7 @@ function initSettingsView() {
       `, (act, close) => {
         close();
         if (act !== 'ok') return;
-        app.settings = Object.assign({}, S.DEFAULT_SETTINGS);
+        acceptSettings(Object.assign({}, S.DEFAULT_SETTINGS));
         // 快捷键是对象，必须单独合并（DEFAULT_SETTINGS 里是 null，
         // 直接用会得到一个没有快捷键的状态）
         app.settings.shortcuts = mergeShortcuts(null);
@@ -3647,7 +3706,7 @@ function initSettingsView() {
             `, (act, close) => close());
           }
           renderShelf();
-          app.settings = S.loadSettings();
+          acceptSettings(S.loadSettings());
           syncSettingsUI();
         } catch (err) {
           toast('解析失败：不是有效的 JSON 文件', 'err');
@@ -4003,6 +4062,8 @@ function speakCurrentQuestion() {
 
 /** 把 settings 同步到所有相关 UI */
 function syncSettingsUI() {
+  applyThemeNow(app.settings.theme || 'auto');
+  syncThemeControls();
   syncCountControls();
   const selects = [
     ['#selDuration', 'duration'], ['#setDuration', 'duration'],

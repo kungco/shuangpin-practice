@@ -275,7 +275,7 @@ console.log('\n【J】每套自检都必须挂进 npm test，且脚本里的文�
   }
 }
 
-console.log('\n【K】版本号在五个地方必须一致');
+console.log('\n【K】版本号与锁文件必须一致');
 {
   /* 背景：版本号散在 5 个文件里，手工发布时漏改一处是迟早的事。
      最阴的一种漏法是漏掉 tauri.conf.json —— 下载文件名是新版本，
@@ -298,6 +298,12 @@ console.log('\n【K】版本号在五个地方必须一致');
   const cargoVer = (cargo.match(/^version\s*=\s*"([^"]+)"/m) || [])[1];
   ok(!!cargoVer, '★ Cargo.toml 里能取到版本号（取不到说明格式变了）');
   others.push(['tauri/src-tauri/Cargo.toml', cargoVer]);
+  const cargoLock = readFileSync(resolve(ROOT, 'tauri/src-tauri/Cargo.lock'), 'utf8');
+  others.push(['tauri/src-tauri/Cargo.lock',
+    (cargoLock.match(/name = "shuangpin-practice"\r?\nversion = "([^"]+)"/) || [])[1]]);
+  const desktopLock = JSON.parse(readFileSync(resolve(ROOT, 'desktop/package-lock.json'), 'utf8'));
+  others.push(['desktop/package-lock.json', desktopLock.version]);
+  others.push(['desktop/package-lock.json packages[""]', desktopLock.packages[''].version]);
 
   for (const [file, ver] of others) {
     ok(ver === rootVer,

@@ -32,6 +32,21 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
  */
 const TARGETS = [
   {
+    file: 'desktop/package-lock.json',
+    pattern: /("version"\s*:\s*")([^"]+)(")/,
+    label: 'Electron 锁文件版本'
+  },
+  {
+    file: 'desktop/package-lock.json',
+    pattern: /("packages"\s*:\s*\{\s*""\s*:\s*\{[\s\S]*?"version"\s*:\s*")([^"]+)(")/,
+    label: 'Electron 锁文件根包'
+  },
+  {
+    file: 'tauri/src-tauri/Cargo.lock',
+    pattern: /(\[\[package\]\]\r?\nname = "shuangpin-practice"\r?\nversion = ")([^"]+)(")/,
+    label: 'Rust Cargo.lock'
+  },
+  {
     file: 'package.json',
     pattern: /("version"\s*:\s*")([^"]+)(")/,
     label: '仓库根 package.json'

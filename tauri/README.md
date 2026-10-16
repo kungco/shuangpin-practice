@@ -4,6 +4,11 @@
 应用本体仍然是仓库根那份**零依赖、零构建**的 `index.html + assets/ + src/`，
 这里只负责打包。
 
+从 v1.6.1 起，正式下载由 `.github/workflows/desktop-release.yml` 在 Windows MSVC 环境构建。
+通过前端自检后，工作流验证 exe 版本号、进程与 WebView2 启动，再以
+`python tauri/tools/make_package.py --static-loader` 生成 exe + 使用说明的 zip 和 SHA-256 文件。
+下方体积数据是 v1.6.0 的 MinGW 实测，MinGW 自行构建仍使用默认打包命令并附带 DLL。
+
 > **这是当前的桌面版主力。** 早先的 Electron 版（`desktop/`）从 v1.6.0 之后
 > 不再作为下载提供 —— 同一份代码用 Tauri 打包只要 1.6 MB，Electron 是 65 MB。
 > Electron 工程保留在仓库里作为兜底，也留着一份「在 Electron 里抠体积」的实测记录。

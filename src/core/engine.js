@@ -1226,6 +1226,17 @@ export class PracticeEngine {
 
   /** 推进到下一题 */
   _advanceQuestion(reason) {
+    // A whole item is learned only after every playable character was independent.
+    // Position marks are saved with resume data, so an earlier hint/error still counts.
+    const question = this.currentQuestion();
+    if ((reason === 'question-done' || reason === 'passage-done') &&
+        question?.text && Array.from(question.text).length > 1) {
+      const playable = (question.chars || []).map((ch, i) => ({ ch, i }))
+        .filter(({ ch }) => !this._isSkippable(ch));
+      const independent = playable.length > 0 && playable.every(({ i }) =>
+        !this._erroredChars.has(`${this.index}:${i}`) && !this._hintedChars.has(`${this.index}:${i}`));
+      this.emit('questionComplete', { question, independent });
+    }
     if (reason === 'skip') {
       observeTraining(this.training, { correct: false, independent: false,
         seconds: this.activeSeconds() - this._unitStartedAt }, this.adaptive);

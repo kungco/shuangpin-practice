@@ -19,7 +19,8 @@
  *    不该让没有浏览器的环境红掉。
  */
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -94,13 +95,16 @@ export async function launchChrome(opts = {}) {
   const port = opts.port ?? 9333;
   const width = opts.width ?? 1240;
   const height = opts.height ?? 900;
-  const profileDir = opts.profileDir || resolve(HERE, '..', '.chrome-profile');
+  const profileDir = opts.profileDir || mkdtempSync(resolve(tmpdir(), 'shuangpin-browser-'));
 
   const exe = findChrome();
   if (!exe) return null;
 
   const chrome = spawn(exe, [
     '--headless=new',
+    // Hosted Linux runners may disable unprivileged user namespaces via AppArmor.
+    // This flag applies only to the disposable CI browser, never the shipped app.
+    ...(process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' ? ['--no-sandbox'] : []),
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
     '--no-first-run', '--no-default-browser-check',
@@ -109,10 +113,16 @@ export async function launchChrome(opts = {}) {
     `--window-size=${width},${height}`,
     '--force-device-scale-factor=2',        // 2x 便于看清细节
     'about:blank'
-  ], { stdio: 'ignore' });
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  let diagnostics = '';
+  chrome.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-4000); });
+  chrome.on('error', err => { diagnostics = String(err); });
+  if (!opts.profileDir) chrome.once('exit', () => {
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch (_) {}
+  });
 
   try {
-    const target = await cdpTargets(port);
+    const target = await cdpTargets(port, chrome, () => diagnostics);
     const ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
     const send = makeClient(ws);
@@ -143,8 +153,9 @@ export async function launchChrome(opts = {}) {
 }
 
 /** 轮询 /json/list 直到 CDP 就绪（60 次 × 250ms） */
-async function cdpTargets(port) {
+async function cdpTargets(port, chrome, diagnostics) {
   for (let i = 0; i < 60; i++) {
+    if (chrome.exitCode !== null) throw new Error('浏览器启动失败：' + diagnostics());
     try {
       const r = await fetch(`http://127.0.0.1:${port}/json/list`);
       const j = await r.json();
@@ -153,7 +164,7 @@ async function cdpTargets(port) {
     } catch (_) { /* 还没起来 */ }
     await sleep(250);
   }
-  throw new Error('CDP 未就绪');
+  throw new Error('CDP 未就绪：' + diagnostics());
 }
 
 /** CDP 请求/响应配对。拒绝时带上方法名，方便定位是哪一步挂了 */
