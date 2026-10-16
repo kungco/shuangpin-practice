@@ -561,7 +561,7 @@ export function reviewAdvice(summary, weakItems) {
   }
 
   if (weak.length) {
-    lines.push(`共记录 ${weak.length} 个易错项，其中「${weak.slice(0, 3).map(w => w.key).join('、')}」错误最多，建议优先专项突破。`);
+    lines.push(`当前队列 ${weak.length} 个易错项，优先复习「${weak.slice(0, 3).map(w => w.key).join('、')}」。`);
   }
 
   // 按能力水平给出建议

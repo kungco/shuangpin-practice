@@ -99,7 +99,11 @@ function atDay(offset, fn, base = Date.now()) {
 }
 function reviewDays(S, char, n) {
   const base = Date.now();
-  for (let i = 0; i < n; i++) atDay(i, () => S.recordWeakCorrect({ char }), base);
+  for (let i = 0; i < n; i++) {
+    const entry = S.loadWeak()[char];
+    const now = i === 0 ? base : entry.due;
+    atDay(0, () => S.recordWeakCorrect({ char }), now);
+  }
 }
 
 /* ============================================================
@@ -507,13 +511,15 @@ console.log('\n【10】间隔重复与记录联动');
   ok(sameDay.correct === 1 && sameDay.due === after1.due, '同日重复答对不推进排期');
   atDay(1, () => S.recordWeakCorrect({ char: '进' }));
   atDay(2, () => S.recordWeakCorrect({ char: '进' }));
+  ok(S.getWeakList({ limit: 10 })[0].streak === 2, '跨日但尚未到期的练习不推进排期');
+  atDay(4, () => S.recordWeakCorrect({ char: '进' }));
   const after3 = S.getWeakList({ limit: 10, minCount: 1 })[0];
   ok(after3.streak === 3, `连对 3（实际 ${after3.streak}）`);
   ok(after3.interval === 7, `连对 3 次后间隔 7 天（实际 ${after3.interval}）`);
   ok(after3.due > after1.due, '间隔推进后 due 更靠后');
 
   /* ---- 再答错会重置，且取消掌握 ---- */
-  atDay(3, () => S.recordWeakCorrect({ char: '进' }));
+  atDay(11, () => S.recordWeakCorrect({ char: '进' }));
   const beforeRelapse = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
   S.recordWeak({ char: '进', pinyin: 'jin' });  // 又错了
   const relapse = S.getWeakList({ limit: 10, minCount: 1, includeMastered: true })[0];
@@ -609,7 +615,7 @@ console.log('\n【11】到期优先排序 / dueOnly / reviewSummary');
   S._setAllDue(now - 1000);
   const sum3 = S.reviewSummary(now);
   ok(sum3.total === 1, `概览包含已掌握项（total=${sum3.total}）`);
-  ok(sum3.due === 0, `★ 已掌握的项不再计入「今日到期」（due=${sum3.due}）`);
+  ok(sum3.due === 1, `★ 已掌握的项到期后仍安排回访（due=${sum3.due}）`);
   ok(sum3.mastered === 1, `已掌握计数正确（mastered=${sum3.mastered}）`);
 }
 

@@ -24,6 +24,7 @@ import {
 import { COURSE, recordLessonAttempt } from './core/course.js';
 import { LEARNING_MAP, LEARNING_PHASES, buildLearningQuestions, normalizeLearningSession,
   observeLearning, recordLearning, evaluateLearning, recommendedLearning } from './core/learning.js';
+import { normalizeReviewSession, isReviewFailure, reviewTotals } from './core/review.js';
 import { PracticeEngine, STATE, normalizeKey } from './core/engine.js';
 import { TRAINING_LABELS } from './core/training.js';
 import * as S from './core/storage.js';
@@ -1320,6 +1321,7 @@ function saveProgress(force = false) {
   if (Array.isArray(app.slowChars) && app.slowChars.length) state.slowChars = app.slowChars;
   state.retrySource = app.retrySession?.options.retrySource;
   state.learning = app.learningActive;
+  state.review = app.reviewActive;
   S.saveResume(state);
   app.lastResumeSave = now;
 }
@@ -1369,6 +1371,7 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
     app.courseActiveId = (typeof opts.courseLessonId === 'string' && opts.courseLessonId) || null;
     app.learningActive = normalizeLearningSession(opts.learning);
     app.learningResult = null;
+    app.reviewActive = normalizeReviewSession(opts.review);
     app.decodeHidden = app.learningActive && ['guided','repair'].includes(app.learningActive.phase) ? false : null;
     app.keymapHidden = null;
     if (mode !== 'custom') app.shelfActiveId = null;
@@ -1388,7 +1391,7 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
     const unlimited = !preset && count === 0 && mode !== 'exam';
     const generation = {
       mode, count: unlimited ? (mode === 'passage' ? 3 : 20) : (count || 50),
-      charTier: app.learningActive ? '1' : app.settings.charTier, weakBoost: app.settings.weakBoost,
+      charTier: app.learningActive || app.reviewActive ? '1' : app.settings.charTier, weakBoost: app.settings.weakBoost,
       phraseCategory: app.settings.phraseCategory, phraseLength: app.settings.phraseLength
     };
 
@@ -1429,6 +1432,7 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
       toast(mode === 'phrase' ? '此分类与长度组合暂无词组，请更换筛选条件' : '题目生成失败，请重试', 'err');
       return;
     }
+    if (app.reviewActive) app.reviewActive.keys = [...new Set(questions.map(q => q.text || q.promptText).filter(Boolean))];
 
     // 清理旧引擎
     if (app.engine) { app.engine.destroy(); app.engine = null; }
@@ -1442,15 +1446,16 @@ function startSession(questionsOverride, modeOverride, opts = {}) {
       questions,
       unlimited, questionSource, generation,
       mode,
-      modeName: app.learningActive ? `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]}` : modeDisplayName(mode),
+      modeName: app.learningActive ? `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]}`
+        : app.reviewActive ? '错题复习 · 独立检验' : modeDisplayName(mode),
       durationSec,
-      strict: app.settings.strict,
+      strict: app.reviewActive ? true : app.settings.strict,
       skipPunct: app.settings.skipPunct,
       examMode: isExam,
-      trainingPolicy: app.learningActive ? (isExam ? 'independent' : 'full') : app.settings.trainingPolicy,
-      hintEnabled: isExam ? false : app.learningActive ? true : app.settings.hint,
-      hintDelayMs: isExam ? 0 : app.settings.hintDelay,
-      revealDelayMs: isExam ? 0 : app.settings.revealDelay
+      trainingPolicy: app.reviewActive ? 'independent' : app.learningActive ? (isExam ? 'independent' : 'full') : app.settings.trainingPolicy,
+      hintEnabled: isExam ? false : app.reviewActive || app.learningActive ? true : app.settings.hint,
+      hintDelayMs: isExam || app.reviewActive ? 0 : app.settings.hintDelay,
+      revealDelayMs: isExam || app.reviewActive ? 0 : app.settings.revealDelay
     });
 
     app.retrySession = {
@@ -1500,6 +1505,9 @@ function resumeSession() {
     app.sessionMode = eng.mode;
     app.learningActive = normalizeLearningSession(saved.learning);
     app.learningResult = null;
+    app.reviewActive = normalizeReviewSession(saved.review);
+    if (app.reviewActive && !app.reviewActive.keys.length)
+      app.reviewActive.keys = [...new Set(eng.questions.map(q => q.text || q.promptText).filter(Boolean))];
     app.decodeHidden = app.learningActive && ['guided','repair'].includes(app.learningActive.phase) ? false : null;
     app.keymapHidden = null;
     if (app.learningActive && ['check','review'].includes(app.learningActive.phase)) {
@@ -1532,7 +1540,7 @@ function resumeSession() {
       mode: eng.mode,
       questions: eng.unlimited ? null : eng.questions.slice(),
       options: { durationSec: eng.durationSec, shelfId: app.shelfActiveId,
-        courseLessonId: app.courseActiveId, retrySource: saved.retrySource, learning: app.learningActive },
+        courseLessonId: app.courseActiveId, retrySource: saved.retrySource, learning: app.learningActive, review: app.reviewActive },
       shelfSegBase: app.shelfSegBase
     };
     bindEngineEvents();
@@ -1589,6 +1597,7 @@ function bindEngineEvents() {
   });
 
   eng.on('error', (fb) => {
+    recordReviewFailure('wrong');
     showErrorFeedback(fb);
     app.lastErrorTarget = fb;
     // 错误反馈：音效 + 屏幕阅读器播报（assertive：走打断队列，因为用户需要立刻知道按错了）
@@ -1606,7 +1615,7 @@ function bindEngineEvents() {
     // 每个音节/题目完成：记录易错的「正确一次」
     try {
       if (independent && target && target.char) {
-        S.recordWeakCorrect({ char: target.char });
+        recordReviewCorrect({ char: target.char });
       }
     } catch (e) { /* 忽略 */ }
 
@@ -1629,7 +1638,7 @@ function bindEngineEvents() {
 
   eng.on('questionComplete', ({ question, independent }) => {
     observeLearning(app.learningActive, question, independent);
-    if (independent && question.text) S.recordWeakCorrect({ word: question.text });
+    if (independent && question.text) recordReviewCorrect({ word: question.text });
   });
 
   eng.on('finish', (summary) => {
@@ -1640,6 +1649,7 @@ function bindEngineEvents() {
 
   /* ---- 卡住提示 ---- */
   eng.on('hint', (payload) => {
+    recordReviewFailure('helped');
     app.hint = payload;
     applyMiniKeymapVisibility();
     renderHint(payload);
@@ -1647,7 +1657,35 @@ function bindEngineEvents() {
   });
 
   eng.on('pause', () => { updatePauseButton(); clearFeedback(); clearHint(); saveProgress(true); });
+  eng.on('skip', () => recordReviewFailure('skipped'));
   eng.on('resume', () => { updatePauseButton(); clearHint(); });
+}
+
+function recordReviewCorrect(item) {
+  const key = item.word || item.char;
+  const previous = app.reviewActive?.outcomes[key];
+  if (isReviewFailure(previous)) return;
+  const result = S.recordWeakCorrect(item);
+  if (app.reviewActive && result && previous?.status !== 'advanced')
+    app.reviewActive.outcomes[key] = result;
+}
+
+function recordReviewFailure(reason) {
+  if (!app.reviewActive || !app.engine) return;
+  const q = app.engine.currentQuestion(), target = app.engine.currentTarget();
+  const keys = new Set([target?.char, q?.text].filter(Boolean));
+  const weak = S.loadWeak();
+  for (const key of keys) {
+    if (!weak[key]) continue;
+    const previous = app.reviewActive.outcomes[key];
+    if (isReviewFailure(previous)) {
+      if (reason === 'wrong') previous.status = 'wrong';
+      else if (reason === 'skipped' && previous.status === 'helped') previous.status = 'skipped';
+      continue;
+    }
+    const result = S.recordWeakLapse({ word: key }, reason);
+    app.reviewActive.outcomes[key] = { status: reason, lapsed: !!result, due: result?.due || 0 };
+  }
 }
 
 function showSessionUI(show) {
@@ -1667,17 +1705,20 @@ function showSessionUI(show) {
   const isExam = !!(app.engine && app.engine.examMode);
   if (session) session.classList.toggle('is-exam', !!show && isExam);
   if (session) session.classList.toggle('is-learning', !!show && !!app.learningActive);
+  if (session) session.classList.toggle('is-review', !!show && !!app.reviewActive);
   const banner = $('#learningSessionBanner');
   if (banner) {
-    banner.hidden = !show || !app.learningActive;
-    if (!banner.hidden) banner.textContent = `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]} · 先按准，不限时`;
+    banner.hidden = !show || (!app.learningActive && !app.reviewActive);
+    if (!banner.hidden) banner.textContent = app.reviewActive
+      ? '错题复习 · 先独立输入；可主动求助，求助后转为补练，不推进掌握。不限时。'
+      : `${LEARNING_MAP[app.learningActive.lessonId].title} · ${LEARNING_PHASES[app.learningActive.phase]} · 先按准，不限时`;
   }
   // 迷你键位图同样按模式收敛（属性式隐藏，便于断言）
   applyMiniKeymapVisibility();
   if (!show && !isSessionInProgress() && crossTabPendingKeys.size) applyExternalChange();
   if (!show) {
     // 续练把 sessionMode 设成了关卡模式；返回自由练习时恢复用户原来的模式。
-    if (app.learningActive) selectMode(app.settings.mode, true);
+    if (app.learningActive || app.reviewActive) selectMode(app.settings.mode, true);
     renderCourseBox();
   }
 }
@@ -1790,12 +1831,16 @@ function persistRecord(summary) {
       }
       S.appendRecord(rec);
       recordId = rec.id;
+    }
 
+    if (meaningful || app.reviewActive) {
+      const reviewWeak = app.reviewActive ? S.loadWeak() : {};
       // 记录易错字词
       const perErr = s.perCharErrors || {};
       Object.entries(perErr).forEach(([k, cnt]) => {
         if (!cnt) return;
-        S.recordWeak({ char: k, word: '', pinyin: ALL_CHARS[k] || '' });
+        S.recordWeak({ char: k, word: '', pinyin: reviewWeak[k]?.pinyin || ALL_CHARS[k] || '' },
+          { keepSchedule: app.reviewActive?.outcomes[k]?.lapsed === true, reason: app.reviewActive?.outcomes[k]?.status });
       });
 
       /* 词组 / 短文按「整条」记一次。上面那条永远传 word: ''，所以复习页的
@@ -1808,11 +1853,16 @@ function persistRecord(summary) {
         if (!cnt) return;
         const entry = PHRASES.find(p => p.w === text);
         const chars = Array.from(text);
-        const pys = entry ? entry.p : chars.map(c => ALL_CHARS[c]).filter(Boolean);
+        const stored = reviewWeak[text]?.pinyin;
+        const savedPys = Array.isArray(stored) ? stored : String(stored || '').trim().split(/\s+/).filter(Boolean);
+        const pys = savedPys.length === chars.length ? savedPys : entry ? entry.p : chars.map(c => ALL_CHARS[c]).filter(Boolean);
         if (!entry && pys.length !== chars.length) return;   // 拼音不齐就不收，避免生成不出题
-        S.recordWeak({ char: chars[0], word: text, pinyin: (pys || []).join(' ') });
+        S.recordWeak({ char: chars[0], word: text, pinyin: (pys || []).join(' ') },
+          { keepSchedule: app.reviewActive?.outcomes[text]?.lapsed === true, reason: app.reviewActive?.outcomes[text]?.status });
       });
+    }
 
+    if (meaningful) {
       // 记录键维度错误（错误热力图的数据来源）。
       // 与字词表分开存：字词表是「哪些字不会」，热力图是「哪些键不熟」。
       if (s.keyErrors && Object.keys(s.keyErrors).length) {
@@ -1880,6 +1930,7 @@ function showResultModal(s, recorded, recordId) {
   const sc = s.score || null;
   const retry = app.retrySession;
   const learningResult = app.learningResult;
+  const reviewResult = app.reviewActive ? reviewTotals(app.reviewActive) : null;
   let learningNext = null;
   if (learningResult) {
     const id = learningResult.lesson.id;
@@ -1888,7 +1939,7 @@ function showResultModal(s, recorded, recordId) {
       : !learningResult.passed ? { lessonId: id, phase: 'repair', repairItems: learningResult.failedItems }
       : (() => { const next = recommendedLearning(); return next ? { lessonId: next.lesson.id, phase: next.phase } : null; })();
   }
-  const retryLabel = learningResult ? (!s.completed ? '继续本关'
+  const retryLabel = reviewResult ? '返回复习队列' : learningResult ? (!s.completed ? '继续本关'
     : !learningResult.passed ? '补练薄弱项' : ['guided','repair'].includes(learningResult.phase) ? '开始独立小测'
     : learningNext?.phase === 'review' ? '开始隔天回访' : learningNext ? '继续下一关' : '回到学习路径') : retry?.options.courseLessonId ? '重练本课'
     : retry?.options.shelfId ? '重练本次片段'
@@ -1902,9 +1953,10 @@ function showResultModal(s, recorded, recordId) {
     : acc >= 85 ? '不错'
     : acc >= 70 ? '继续加油' : '仍需熟悉键位';
 
-  const title = learningResult ? (!s.completed ? '本关暂未完成' : learningResult.passed ? '本轮完成' : '先补练，再试一次')
+  const title = reviewResult ? '复习结束' : learningResult ? (!s.completed ? '本关暂未完成' : learningResult.passed ? '本轮完成' : '先补练，再试一次')
     : s.reason === 'timeup' ? '时间到' : '练习完成';
-  const headRight = learningResult ? (learningResult.passed ? LEARNING_PHASES[learningResult.phase] + '通过' : '继续巩固')
+  const headRight = reviewResult ? (reviewResult.repair ? '有内容需要补练' : reviewResult.advanced ? '独立检验完成' : '巩固完成')
+    : learningResult ? (learningResult.passed ? LEARNING_PHASES[learningResult.phase] + '通过' : '继续巩固')
     : sc ? `${sc.grade}` : practiceGrade;
 
   const noteParts = [];
@@ -2111,10 +2163,13 @@ function showResultModal(s, recorded, recordId) {
     ${learningResult ? `<div class="learning-result"><strong>${escapeHtml(learningResult.lesson.title)} · ${escapeHtml(LEARNING_PHASES[learningResult.phase])}</strong>
       <p>${escapeHtml(learningResult.reason)}</p>${!learningResult.passed && s.completed ? `<p>补练：${learningResult.failedItems.map(escapeHtml).join('、')}</p>` : ''}</div>` : ''}
     ${scoreBlock}
+    ${reviewResult ? `<div class="review-result"><strong>本轮复习判定</strong>
+      <p>有效独立通过 ${reviewResult.advanced} 项 · 提前巩固 ${reviewResult.practice} 项 · 待补练 ${reviewResult.repair} 项</p>
+      <p>提前或同日重练不拉长排期；答错、求助、跳过后明天回访。未作答的项目保持原排期。</p></div>` : ''}
 
-    ${learningResult ? `<div class="result-grid learning-result-grid">
-      <div class="result-cell is-hl"><div class="result-cell-label">${['check','review'].includes(learningResult.phase) ? '独立正确率' : '作答正确率'}</div>
-        <div class="result-cell-value">${['check','review'].includes(learningResult.phase) ? s.independentAccuracy : s.accuracy}<i>%</i></div></div>
+    ${learningResult || reviewResult ? `<div class="result-grid learning-result-grid">
+      <div class="result-cell is-hl"><div class="result-cell-label">${reviewResult || ['check','review'].includes(learningResult?.phase) ? '独立正确率' : '作答正确率'}</div>
+        <div class="result-cell-value">${reviewResult || ['check','review'].includes(learningResult?.phase) ? s.independentAccuracy : s.accuracy}<i>%</i></div></div>
       <div class="result-cell"><div class="result-cell-label">完成题目</div>
         <div class="result-cell-value">${s.doneQuestions}<i>/${s.questionCount}</i></div></div></div>` : `<div class="result-grid">
       <div class="result-cell is-hl">
@@ -2172,7 +2227,8 @@ function showResultModal(s, recorded, recordId) {
     else if (act === 'review') switchView('review');
     else if (act === 'again') {
       showSessionUI(false);
-      if (learningResult) {
+      if (reviewResult) switchView('review');
+      else if (learningResult) {
         if (learningNext) startLearningRound(learningNext);
         else { switchView('practice'); $('#learningPath').open = true; }
       }
@@ -2304,7 +2360,8 @@ function renderSession(arg) {
      （重复播报同一句说明）。 */
   if (level !== 'key') {
     if (stageMode) stageMode.textContent = (q.label || '练习') + (!eng.examMode ? ` · ${TRAINING_LABELS[eng.assistanceLevel()]}` : '') + (eng.adaptive ? ` · 第 ${eng.training.tier} 档` : '');
-    if (stageTip) stageTip.textContent = app.learningActive
+    if (stageTip) stageTip.textContent = app.reviewActive ? '先凭记忆输入；需要时按求助快捷键，帮助不会算独立通过。'
+      : app.learningActive
       ? (eng.examMode ? '本轮不提供提示；完成整关后检查每一项。' : '先看声韵拆分，按准这一小组；完成后再独立检验。')
       : eng.training.policy === 'progressive' && eng.assistanceLevel() < 2
       ? '每 10 个作答单元评估一次：正确率达 90% 且反应稳定后减少提示；卡住可按 Tab 求助。'
@@ -2576,7 +2633,7 @@ function updateHud() {
 
   setText('#hudSpeed', st.speed);
   setText('#hudAcc', st.accuracy);
-  const assessment = app.learningActive && ['check','review'].includes(app.learningActive.phase);
+  const assessment = app.reviewActive || (app.learningActive && ['check','review'].includes(app.learningActive.phase));
   if (assessment) setText('#hudAcc', st.independentAccuracy);
   setText('#hudAccLabel', assessment ? '独立正确率' : '正确率');
   setText('#hudTime', formatClock(st.elapsedSec));
@@ -3192,11 +3249,11 @@ function renderReviewView() {
 
     if (sub) {
       sub.textContent = rv.due > 0
-        ? `间隔重复：今天有 ${rv.due} 项到期，另有 ${Math.max(0, rv.total - rv.due - rv.mastered)} 项在等待。`
+        ? `间隔重复：现在有 ${rv.due} 项到期，另有 ${rv.waiting} 项在等待。`
         : '间隔重复：今天没有到期项，复习节奏保持得不错。';
     }
 
-    if (!all.length) {
+    if (!rv.total) {
       body.innerHTML = `
         <div class="empty-state">
           <strong>暂无需要复习的内容</strong>
@@ -3227,6 +3284,11 @@ function renderReviewView() {
           只练到期项
         </label>
       </div>`;
+    const rules = `<details class="review-rules"><summary>复习怎样判定？</summary>
+      <ul><li>先独立输入，不自动揭示答案；可以主动求助。整词需要每个字都独立答对。</li>
+      <li>首次独立确认后，按 1、3、7、16、35、75 天逐步延长；已有复习记录时，只有到期且独立答对才推进，同日只计一次。</li>
+      <li>提前练习只算巩固，不推迟原定日期。连续 4 次有效独立通过标记掌握，之后仍安排低频回访。</li>
+      <li>答错、求助或跳过会回到重新学习，明天回访；本轮后续重复答对不会抵消遗忘。没有作答的项目保持原排期。</li></ul></details>`;
 
     /**
      * 复习项 chip。
@@ -3244,14 +3306,6 @@ function renderReviewView() {
           </div>
           <div class="review-items">
             ${items.map(w => {
-              /* 词组条目的 pinyin 是逐字拼音拼起来的（如 "shuang pin"），
-                 primarySplit 只吃单字拼音，直接调会解析不出来 → 显示不出编码。
-                 逐字拆开各自出码，拼成完整序列。 */
-              const parts = String(w.pinyin || '').split(/\s+/).filter(Boolean);
-              const isPhrase = Array.from(w.key || '').length > 1;
-              const keys = isPhrase
-                ? parts.map(p => (primarySplit(p) || {}).code || '?').join(' ')
-                : (w.char && parts[0] ? (primarySplit(parts[0]) || {}).code || '' : '');
               // 间隔进度：一个条形，越满说明越接近掌握
               const prog = Math.min(100, Math.round((w.streak / 4) * 100));
               const dueText = w.isDue
@@ -3259,16 +3313,16 @@ function renderReviewView() {
                 : `还有 ${fmtDays(w.dueInDays)}`;
               return `<button class="review-chip${w.isDue ? ' is-due' : ''}"
                               data-key="${escapeHtml(w.key)}"
-                              title="点击单独练习｜连对 ${w.streak} 次｜下次 ${escapeHtml(dueText)}">
+                              title="点击独立检验｜有效通过 ${w.streak} 次｜下次 ${escapeHtml(new Date(w.due).toLocaleString('zh-CN'))}">
                 <span class="rc-line">
                   <span class="rc-char">${escapeHtml(w.key)}</span>
                   <span class="rc-py">${escapeHtml(w.pinyin || '')}</span>
-                  ${keys ? `<span class="rc-keys">${escapeHtml(keys)}</span>` : ''}
                   <span class="rc-err">×${w.count}</span>
                 </span>
                 <span class="rc-sched">
                   <span class="rc-bar"><i style="width:${prog}%"></i></span>
-                  <span class="rc-due">${escapeHtml(dueText)}</span>
+                  <span class="rc-due">${w.mastered ? '已掌握 · 回访' : `有效通过 ${Math.min(w.streak, 4)}/4`} · ${escapeHtml(dueText)}</span>
+                  ${w.lapseReason ? `<span class="rc-due">${({wrong:'答错后重学',helped:'求助后重学',skipped:'跳过后重学'})[w.lapseReason]}</span>` : ''}
                 </span>
               </button>`;
             }).join('')}
@@ -3277,10 +3331,15 @@ function renderReviewView() {
         </div>`;
     };
 
-    const noDue = app.settings.reviewDueOnly && !dueList.length;
+    const noDue = !list.length;
 
     body.innerHTML = `
       ${dueCard}
+      <div class="review-primary-actions">
+        <button class="btn btn-primary" id="btnReviewPractice"${noDue ? ' disabled aria-disabled="true"' : ''}>${noDue ? '今天没有到期项' : rv.due ? `复习到期的 ${Math.min(rv.due, 20)} 项` : '强化练习这些内容'}</button>
+        <span class="footnote">每轮最多 20 项 · 不限时 · 主动求助可用</span>
+      </div>
+      ${rules}
 
       <div class="review-summary">
         ${advice.map(escapeHtml).join('<br>')}
@@ -3289,15 +3348,14 @@ function renderReviewView() {
       ${noDue ? `
         <div class="empty-state" style="padding:26px">
           <strong>今天没有到期的复习项</strong>
-          间隔重复会在你快要忘记的时候把内容送回来。想现在就练，可以关掉上面的「只练到期项」。
+          ${rv.mastered === rv.total ? '已掌握的项目会按较长间隔回来检查。' : '想提前巩固，可以关掉上面的「只练到期项」；提前练习不改变原排期。'}
         </div>` : ''}
 
       ${noDue ? '' : groupHtml('易错单字', groups.char, '')}
       ${noDue ? '' : groupHtml('易错词语', groups.phrase, '')}
-      ${noDue || !groups.other.length ? '' : groupHtml('其他', groups.other, '')}
+      ${noDue || !groups.other.length ? '' : groupHtml('声韵母键位及其他', groups.other, '')}
 
       <div class="review-cta">
-        <button class="btn btn-primary" id="btnReviewPractice"${noDue ? ' disabled aria-disabled="true"' : ''}>${noDue ? '今天没有到期项' : rv.due ? `复习到期的 ${Math.min(rv.due, 20)} 项` : '强化练习这些内容'}</button>
         <button class="btn btn-ghost" id="btnReviewPracticeAll">普通练习</button>
         <button class="btn btn-ghost" id="btnReviewToCustom"
                 title="把易错字词连成一段跟打文本，练字与字之间的连贯">错题连成一段跟打</button>
@@ -3363,10 +3421,10 @@ function bindReviewActions() {
       return;
     }
 
-    const qs = generateReviewQuestions(pick, 20);
+    const qs = generateReviewQuestions(pick, 20, { fallback: false });
     if (!qs.length) { toast('暂时没有可用的复习内容', 'err'); return; }
     switchView('practice');
-    startSession(qs, 'char');
+    startSession(qs, 'char', { durationSec: 0, review: {} });
   });
 
   /* 错题连成一段跟打：把易错项写进「自定义文本」并切过去。
@@ -3445,8 +3503,7 @@ function bindReviewActions() {
  * 复习页的 chip 与结算页的本轮错字 chip 共用这段逻辑 —— 两边要的
  * 完全是同一件事（把某个字词变成 3 道题立刻开练），分开写迟早会长歪。
  *
- * 为什么是 3 道而不是 1 道：单次盲打对了说明不了什么，连做三次
- * 能在几秒内区分「真的记住了」和「蒙对的」。
+ * 三道用于当场补练；同轮重复不重复推进排期，出现遗忘后不能靠后两次抵消。
  *
  * @param {string} key 单字或词组原文（如 "月" / "双拼"）
  */
@@ -3456,8 +3513,10 @@ function practiceSingleItem(key) {
 
   // 优先当词组：【词表里查得到】才有经校对的语境拼音，
   // 这比逐字拼默认音准（多音字如「银行」的「行」）。
+  const saved = S.loadWeak()[key];
+  if (saved) q = generateReviewQuestions([{ ...saved, key }], 1, { fallback: false })[0] || null;
   const phrase = PHRASES.find(p => p.w === key);
-  if (phrase) q = questionFromPhrase(phrase.w, phrase.p);
+  if (!q && phrase) q = questionFromPhrase(phrase.w, phrase.p);
 
   if (!q) {
     const chars = Array.from(key);
@@ -3474,7 +3533,7 @@ function practiceSingleItem(key) {
 
   if (!q) { toast('该条目暂无法生成练习', 'err'); return; }
   switchView('practice');
-  startSession([q, q, q], 'char');
+  startSession([q, q, q], 'char', { durationSec: 0, review: {} });
 }
 
 /* ============================================================
@@ -3952,9 +4011,9 @@ function applyHintSettingsToEngine() {
   const eng = app.engine;
   if (!eng) return;
   try {
-    eng.hintEnabled = eng.examMode ? false : app.learningActive ? true : !!app.settings.hint;
-    eng.hintDelayMs = Math.max(0, Number(app.settings.hintDelay) || 0);
-    eng.revealDelayMs = Math.max(0, Number(app.settings.revealDelay) || 0);
+    eng.hintEnabled = eng.examMode ? false : app.learningActive || app.reviewActive ? true : !!app.settings.hint;
+    eng.hintDelayMs = eng.examMode || app.reviewActive ? 0 : Math.max(0, Number(app.settings.hintDelay) || 0);
+    eng.revealDelayMs = eng.examMode || app.reviewActive ? 0 : Math.max(0, Number(app.settings.revealDelay) || 0);
     if (eng.revealDelayMs > 0 && eng.revealDelayMs < eng.hintDelayMs) {
       eng.revealDelayMs = eng.hintDelayMs;
     }

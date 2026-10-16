@@ -153,6 +153,34 @@ try {
     ok(value && value.modes >= 9, `练习模式卡片渲染完整（实际 ${value && value.modes} 个）`);
   }
 
+  console.log('\n【0r】复习：真实输入、整词范围与独立排期');
+  {
+    await evaluate(chrome.send, `(async()=>{const S=await import('./src/core/storage.js');
+      S.clearWeak();S.recordWeak({word:'你好',char:'你',pinyin:'ni hao'});S._setAllDue(Date.now()-1000);
+      __app.settings.trainingPolicy='full';document.querySelector('[data-view="review"]').click();
+      document.querySelector('#btnReviewPractice').click();return true;})()`);
+    const review=(await evaluate(chrome.send, `({word:__app.engine.currentQuestion().text,
+      policy:__app.engine.training.policy,duration:__app.engine.durationSec,delay:__app.engine.hintDelayMs,
+      label:document.querySelector('#hudAccLabel').textContent})`)).value;
+    ok(review?.word==='你好' && review.policy==='independent' && review.duration===0 && review.delay===0,
+      '词组复习不被换成随机题，独立检验且不限时');
+    ok(review?.label==='独立正确率','复习显示独立正确率');
+    for(let n=0;n<4;n++){
+      const key=(await evaluate(chrome.send, `(()=>{const t=__app.engine.currentTarget();return t.keys[t.pos].toLowerCase();})()`)).value;
+      await sleep(12);
+      await realKey(chrome,{key,code:'Key'+key.toUpperCase(),vk:key.toUpperCase().charCodeAt(0),text:key});
+    }
+    await until(chrome, `__app.engine.state==='finished'`,{label:'整词复习完成'});
+    const result=(await evaluate(chrome.send, `(async()=>{const S=await import('./src/core/storage.js');
+      return {correct:S.loadWeak()['你好'].correct,streak:S.loadWeak()['你好'].streak,
+        text:document.querySelector('.review-result').textContent};})()`)).value;
+    ok(result?.correct===1 && result.streak===1 && /有效独立通过 1 项/.test(result.text),
+      '整词独立完成后只推进一次，结算说明实际判定');
+    await click(chrome,'#modal [data-act="again"]');
+    await evaluate(chrome.send, `(async()=>{const S=await import('./src/core/storage.js');S.clearWeak();
+      document.querySelector('[data-view="practice"]').click();return true;})()`);
+  }
+
   /* ---------- 【1】练习输入：真实键盘事件推进引擎 ---------- */
   console.log('\n【1】练习输入（CDP 真实键盘事件）');
   {

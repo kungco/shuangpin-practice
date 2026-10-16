@@ -749,6 +749,8 @@ function normalizeWeakEntry(e, key) {
     ease: numFloat(e.ease) || EASE_DEFAULT,
     due: num(e.due),
     reviewedAt: num(e.reviewedAt),
+    lapsedAt: num(e.lapsedAt),
+    lapseReason: ['wrong','helped','skipped'].includes(e.lapseReason) ? e.lapseReason : '',
     successDay: typeof e.successDay === 'string' ? e.successDay : '',
     countsBySource: weakSources(e)
   };
@@ -807,7 +809,7 @@ export function saveWeak(map) {
  * 同时把这条打回复习队列的起点：连对清零、间隔回落、明天到期。
  * @param {object} item { char?, word?, pinyin? }
  */
-export function recordWeak(item) {
+export function recordWeak(item, options = {}) {
   if (!item) return;
   try {
     const map = loadWeak();
@@ -823,18 +825,33 @@ export function recordWeak(item) {
     if (item.word) cur.word = item.word;
 
     // 答错 → 重新排期
-    const s = nextSchedule(cur, false);
+    const s = options.keepSchedule ? cur : nextSchedule(cur, false);
     cur.streak = s.streak;
     cur.interval = s.interval;
     cur.ease = s.ease;
-    cur.due = dueAt(now, s.interval);
+    if (!options.keepSchedule) cur.due = dueAt(now, s.interval);
     cur.mastered = false;          // 又错了，谈不上掌握
+    cur.lapsedAt = now;
+    cur.lapseReason = options.reason === 'skipped' ? 'skipped' : 'wrong';
 
     map[key] = cur;
     saveWeak(map);
   } catch (err) {
     console.warn('[storage] 易错记录失败', err && err.message);
   }
+}
+
+/** 求助、遗忘或跳过也说明需要重学；不伪造按错次数。 */
+export function recordWeakLapse(item, reason = 'helped') {
+  const key = item?.word || item?.char || '';
+  const map = loadWeak();
+  if (!key || !map[key]) return null;
+  const cur = normalizeWeakEntry(map[key], key), now = Date.now();
+  Object.assign(cur, nextSchedule(cur, false), { mastered: false, lapsedAt: now,
+    lapseReason: ['wrong','helped','skipped'].includes(reason) ? reason : 'helped' });
+  cur.due = dueAt(now, cur.interval);
+  map[key] = cur; saveWeak(map);
+  return { status: 'lapsed', due: cur.due, mastered: false };
 }
 
 /**
@@ -851,12 +868,14 @@ export function recordWeakCorrect(item) {
     const cur = normalizeWeakEntry(map[key], key);
     const now = Date.now();
 
-    // 同一天的重复练习不代表已经形成长期记忆。
+    // 首次独立确认后，必须等到期；跨了日历日期也不等于经过了复习间隔。
     const today = dateStr(new Date(now));
-    if (cur.successDay === today) return;
+    if (cur.successDay === today || (cur.reviewedAt && cur.due > now))
+      return { status: 'practice', due: cur.due, mastered: cur.mastered };
     incrementWeak(cur, 'correct');
     cur.reviewedAt = now;
     cur.successDay = today;
+    cur.lapseReason = '';
 
     const s = nextSchedule(cur, true);
     cur.streak = s.streak;
@@ -864,11 +883,12 @@ export function recordWeakCorrect(item) {
     cur.ease = s.ease;
     cur.due = dueAt(now, s.interval);
 
-    // 连对到一定次数且错误率已经不高 → 标记掌握（不再出现在默认队列）
-    if (cur.streak >= 4 && cur.count <= cur.correct) cur.mastered = true;
+    // 连续跨间隔通过才算掌握；历史犯错次数不应永久阻挡后来的进步。
+    cur.mastered = cur.streak >= 4;
 
     map[key] = cur;
     saveWeak(map);
+    return { status: 'advanced', due: cur.due, mastered: cur.mastered };
   } catch (err) {
     console.warn('[storage] 正确记录失败', err && err.message);
   }
@@ -911,7 +931,7 @@ export function getWeakList(options = {}) {
     .filter(e => e && (e.key || e.char || e.word))
     .map(e => normalizeWeakEntry(e, e.key || e.char || e.word))
     .filter(e => e.count >= minCount)
-    .filter(e => includeMastered || !e.mastered)
+    .filter(e => includeMastered || !e.mastered || e.due <= now)
     .filter(e => !dueOnly || e.due <= now)
     .map(e => ({
       key: e.key,
@@ -930,6 +950,8 @@ export function getWeakList(options = {}) {
       ease: round2(e.ease),
       due: e.due,
       reviewedAt: e.reviewedAt,
+      lapsedAt: e.lapsedAt,
+      lapseReason: e.lapseReason,
       dueInDays: Math.round((e.due - now) / DAY_MS * 10) / 10,
       isDue: e.due <= now,
       errorRate: e.count > 0 ? e.count / (e.count + e.correct || 1) : 0,
@@ -959,21 +981,21 @@ export function getWeakList(options = {}) {
 export function reviewSummary(now) {
   const t = Number(now) || Date.now();
   const map = loadWeak();
-  let due = 0, total = 0, learning = 0, mastered = 0, nextDue = 0;
+  let due = 0, total = 0, learning = 0, mastered = 0, nextDue = 0, waiting = 0;
 
   for (const raw of Object.values(map)) {
     if (!raw) continue;
     const e = normalizeWeakEntry(raw, raw.key || raw.char || raw.word);
     if (!e.key) continue;
     total += 1;
-    if (e.mastered) { mastered += 1; continue; }
-    // 已掌握的不参与到期统计（它已经不排队了）
+    if (e.mastered) mastered += 1;
+    // 掌握后也保留低频回访，避免永久退出队列。
     if (e.due <= t) due += 1;
-    else if (!nextDue || e.due < nextDue) nextDue = e.due;
-    if (e.streak >= 1) learning += 1;
+    else { waiting += 1; if (!nextDue || e.due < nextDue) nextDue = e.due; }
+    if (!e.mastered && e.streak >= 1) learning += 1;
   }
 
-  return { due, total, learning, mastered, nextDue };
+  return { due, total, learning, mastered, nextDue, waiting };
 }
 
 /** 仅供测试：把所有记录的 due 直接改成某个时间，便于构造「到期」场景 */
@@ -1662,6 +1684,7 @@ export function saveResume(state) {
     generationState: state.generationState,
     retrySource: ['smart', 'daily'].includes(state.retrySource) ? state.retrySource : undefined,
     learning: state.learning || undefined,
+    review: state.review || undefined,
     training: state.training,
     unitStartedAt: state.unitStartedAt,
     charIndex: state.charIndex,
@@ -2341,8 +2364,8 @@ export function importAll(payload) {
           const old = sources[id] || { count: 0, correct: 0 };
           sources[id] = { count: Math.max(old.count, value.count), correct: Math.max(old.correct, value.correct) };
         }
-        const aTime = Math.max(a.lastTs, a.reviewedAt);
-        const bTime = Math.max(b.lastTs, b.reviewedAt);
+        const aTime = Math.max(a.lastTs, a.reviewedAt, a.lapsedAt);
+        const bTime = Math.max(b.lastTs, b.reviewedAt, b.lapsedAt);
         // 最新作答决定排期，同时间优先短间隔，避免掩盖重新答错。
         const ahead = bTime > aTime || (bTime === aTime && b.interval < a.interval) ? b : a;
         cur[k] = Object.assign({}, ahead, {

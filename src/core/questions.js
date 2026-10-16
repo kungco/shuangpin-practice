@@ -799,7 +799,7 @@ export function generateReviewQuestions(items, limit = 20, opts = {}) {
     if (out.length >= limit) break;
     try {
       if (it.word && /\p{Script=Han}/u.test(it.word) && Array.from(it.word).length >= 2) {
-        const pinyins = Array.isArray(it.pinyin) ? it.pinyin : [it.pinyin];
+        const pinyins = Array.isArray(it.pinyin) ? it.pinyin : String(it.pinyin || '').trim().split(/\s+/).filter(Boolean);
         if (pinyins.length !== Array.from(it.word).length) continue;
         if (!pinyins.every(py => py && splitSyllable(py).length)) continue;
         if (used.has(it.word)) continue;
@@ -811,6 +811,16 @@ export function generateReviewQuestions(items, limit = 20, opts = {}) {
         if (used.has(it.char)) continue;
         used.add(it.char);
         out.push(buildWordQuestion(it.char, [py], 3, { from: 'review' }));
+      } else {
+        const part = it.key || it.char;
+        const component = KEY_COMPONENTS.find(c => c.part === part);
+        if (!component || used.has(part)) continue;
+        used.add(part);
+        out.push({ id: nextId(), kind: 'key', level: 1, role: component.role,
+          label: component.role === 'sheng' ? '声母键' : '韵母键', promptText: part,
+          promptSub: '独立按出这一成分所在的键', answerKeys: [component.key],
+          keyDetail: { key: component.key, shengmu: component.role === 'sheng' ? part : null,
+            yunmu: component.role === 'yun' ? part : null }, meta: { from: 'review' } });
       }
     } catch (err) {
       console.warn('[review] 跳过一条异常题目', it, err);
@@ -820,7 +830,7 @@ export function generateReviewQuestions(items, limit = 20, opts = {}) {
   // 只有**一条都出不来**时才用高频字兜底，保证按钮永远有内容可练。
   // 不能「不足 10 就补」—— 那会把随机高频字掺进「只练到期项」的范围里，
   // 用户明确圈定的练习范围不该被悄悄稀释。
-  if (out.length === 0) {
+  if (out.length === 0 && opts.fallback !== false) {
     const prevRng = _rng;
     if (typeof opts.rng === 'function') _rng = opts.rng;
     else if (opts.seed != null && Number.isFinite(Number(opts.seed))) _rng = makeRng(Number(opts.seed));
