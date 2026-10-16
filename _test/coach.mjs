@@ -93,7 +93,11 @@ try{
   fire('#btnQuit');fire('#modal [data-act="save"]');const saved=S.loadResume();
   assert.ok(saved.coach);assert.equal(saved.coach.phase,'transfer');assert.ok(saved.coachLog);
   fire('#btnResume');e=app.engine;assert.equal(e.examMode,true);assert.deepEqual(app.coachActive.evidence,saved.coach.evidence);
-  assert.equal(H.q('#coachTip').innerHTML,'');e.skipCurrent();complete(e);assert.equal(app.coachResult.passed,false);
+  assert.equal(H.q('#coachTip').innerHTML,'');
+  fire('#btnQuit');fire('#modal [data-act="end"]');assert.equal(app.coachResult.passed,false);
+  fire('#modal [data-act="again"]');e=app.engine;
+  assert.equal(app.coachActive.phase,'transfer');assert.equal(app.coachActive.repeat,true,'中途结束后整轮重来也是复测');
+  assert.deepEqual(app.coachActive.evidence,{});e.skipCurrent();complete(e);assert.equal(app.coachResult.passed,false);
   fire('#modal [data-act="stats"]');
 
   console.log('【规则教练 UI】普通练习即时解释，结算按错因接入小课堂');

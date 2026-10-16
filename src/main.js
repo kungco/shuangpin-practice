@@ -1977,7 +1977,8 @@ function showResultModal(s, recorded, recordId) {
   const coachSeen = (app.coachLog?.seen || []).slice();
   const coachSuggestions = coachResult ? '' : coachView.resultHTML(app.coachLog);
   const coachReturnView = reviewResult ? 'review' : 'practice';
-  const coachNext = !coachResult ? null : !s.completed ? coachResult.session
+  const coachNext = !coachResult ? null : !s.completed ? {...coachResult.session,
+    repeat:coachResult.session.phase==='transfer'||coachResult.session.repeat}
     : coachResult.passed && coachResult.session.phase==='guided' ? {...coachResult.session,phase:'transfer'}
     : !coachResult.passed ? {...coachResult.session,phase:'guided',repeat:coachResult.session.phase==='transfer'||coachResult.session.repeat} : null;
   let learningNext = null;
