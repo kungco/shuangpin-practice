@@ -1083,6 +1083,8 @@ function startLearningRound(raw) {
   const learning = normalizeLearningSession(raw);
   if (!learning) { toast('关卡信息不可用，请重新选择', 'err'); return; }
   const lesson = LEARNING_MAP[learning.lessonId];
+  if (learning.phase === 'repair' && !learning.repairItems.length)
+    learning.repairItems = S.loadLearningProgress().lessons[learning.lessonId]?.repairItems || [];
   const questions = buildLearningQuestions(lesson, learning.phase, learning.repairItems);
   switchView('practice');
   startSession(questions, lesson.mode, { durationSec: 0, learning: { ...learning, evidence: {} } });
@@ -1952,7 +1954,7 @@ function persistRecord(summary) {
     app.learningResult = null;
     if (app.learningActive) {
       const learning = app.learningActive;
-      const result = s.keystrokes >= 5 ? recordLearning(learning, s) : evaluateLearning(learning, s);
+      const result = s.keystrokes >= 5 || s.completed ? recordLearning(learning, s) : evaluateLearning(learning, s);
       app.learningResult = { ...result, lesson: LEARNING_MAP[learning.lessonId], phase: learning.phase,
         session: learning };
       learningView.resetSelection();
@@ -2345,6 +2347,7 @@ function initSessionPanel() {
     btnToggleDecode.addEventListener('click', () => {
       if (btnToggleDecode.disabled) return;
       app.decodeHidden = decodeVisible();   // 当前可见 → 收起；当前隐藏 → 展开
+      coachView.refreshTip();
       renderSession();                      // 立即重绘解码区并更新按钮文案
     });
   }
@@ -3001,7 +3004,7 @@ function applyDecodeVisibility() {
   const btn = $('#btnToggleDecode');
   if (!btn) return;
   const visible = decodeVisible();
-  btn.textContent = visible ? '隐藏提示' : '显示提示';
+  btn.textContent = visible ? '隐藏声韵讲解' : '显示声韵讲解';
   // 测验/辅助模式本来就不显示，按钮点了没意义 → 禁用并说明原因
   const forced = !!(app.engine && (app.engine.examMode || app.engine.assistanceLevel() > 0));
   btn.disabled = forced;

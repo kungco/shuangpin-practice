@@ -9,6 +9,8 @@
  *   4. 写入做节流（history 可能较大）。
  */
 
+import { correctedReading } from './reading-fixes.js';
+
 const NS = 'shuangpin.v1';
 export const KEYS = {
   settings: `${NS}.settings`,
@@ -739,7 +741,7 @@ function normalizeWeakEntry(e, key) {
     key: key || e.key || '',
     char: e.char || '',
     word: e.word || '',
-    pinyin: e.pinyin || '',
+    pinyin: correctedReading(key || e.key || e.word || e.char, e.pinyin || ''),
     count: num(e.count),
     correct: num(e.correct),
     lastTs: num(e.lastTs),
@@ -796,7 +798,12 @@ function incrementWeak(entry, field) {
 
 export function loadWeak() {
   const obj = readJSON(KEYS.weak, {});
-  return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return {};
+  for (const key of ['豫','犹豫']) {
+    const entry = obj[key];
+    if (entry && typeof entry === 'object') obj[key] = { ...entry, pinyin: correctedReading(key, entry.pinyin) };
+  }
+  return obj;
 }
 
 export function saveWeak(map) {
@@ -2196,13 +2203,19 @@ function normalizeLearningProgress(raw) {
   for (const [id, entry] of Object.entries(raw?.lessons || {}).slice(0, 100)) {
     if (!/^[a-z0-9-]{1,48}$/.test(id) || !entry || typeof entry !== 'object') continue;
     const rec = {};
-    for (const field of ['practicedAt','passedAt','masteredAt','lastCheckAt','lastAt']) {
+    for (const field of ['practicedAt','passedAt','masteredAt','failedAt','repairedAt','lastCheckAt','lastAt']) {
       rec[field] = clampNum(entry[field], 0, 8640000000000000, 0);
     }
     rec.attempts = clampInt(entry.attempts, 0, 1000000);
     rec.bestIndependent = clampNum(entry.bestIndependent, 0, 100, 0);
     rec.legacy = entry.legacy === true;
     rec.dueDay = /^\d{4}-\d{2}-\d{2}$/.test(entry.dueDay || '') ? entry.dueDay : '';
+    rec.repairItems = [...new Set((Array.isArray(entry.repairItems) ? entry.repairItems : [])
+      .filter(id => typeof id === 'string' && id.length <= 100))].slice(0,100);
+    if (rec.failedAt) {
+      if (rec.passedAt <= rec.failedAt) { rec.passedAt = 0; rec.dueDay = ''; }
+      if (rec.masteredAt <= rec.failedAt) rec.masteredAt = 0;
+    }
     lessons[id] = rec;
   }
   return { lessons };
@@ -2632,10 +2645,12 @@ export function importAll(payload) {
         const old = cur.lessons[id];
         if (!old) { cur.lessons[id] = rec; continue; }
         const merged = { ...old, ...(rec.lastAt > old.lastAt ? rec : {}) };
-        for (const field of ['practicedAt','passedAt','masteredAt','lastCheckAt','lastAt','attempts','bestIndependent']) {
+        for (const field of ['practicedAt','passedAt','masteredAt','failedAt','repairedAt','lastCheckAt','lastAt','attempts','bestIndependent']) {
           merged[field] = Math.max(old[field] || 0, rec[field] || 0);
         }
         merged.legacy = old.legacy || rec.legacy;
+        if (merged.failedAt && merged.passedAt <= merged.failedAt)
+          merged.repairItems = (rec.failedAt > old.failedAt ? rec : old).repairItems;
         cur.lessons[id] = merged;
       }
       saveLearningProgress(cur);

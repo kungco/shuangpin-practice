@@ -156,27 +156,13 @@ export function normalizeYunmu(y) {
 }
 
 /**
- * 全拼韵母 → 双拼韵母（处理全拼中的缩写形式）
- * 全拼中 ju/qu/xu/yu 后的 u 实际是 ü；wen 实际是 uen；等
- *
- * 【为什么 j/q/x 和 y 要分开处理】
- * 全拼的书写规则是：ü 行韵母在 j/q/x/y 之后省略两点写成 u。
- * 但「省略」的力度在两类声母上不同：
- *   - j/q/x：üe 写成 ue，ü 写成 u —— 两者都要还原成 ve / v
- *     （jue → j+ve、ju → j+v）
- *   - y：**只有** üe 还原成 ve（yue → y+ve）；
- *     而 yu 的韵母在全拼里本来就写作 u（不是 ü 的省略形式），
- *     还原成 v 反而错（yu 应为 y+u，不是 y+v）。
- * 所以这里只给 y 补 ue → ve 一条，绝不能把 y 并进上面那个数组 ——
- * 那会让 yu 变成 yv。
+ * 按输入法拼写生成编码，不能把实际读音直接当作按键。
+ * ju/qu/xu/yu 的 u 在语音上是 ü，主编码仍保留 U；V 兼容码在拆分时添加。
+ * jue/que/xue/yue 的 ue 统一展示为 ve，两种写法均映射 T。
  */
 function canonicalYunmu(sheng, yun) {
   let y = normalizeYunmu(yun);
-  if (['j', 'q', 'x'].includes(sheng)) {
-    if (y === 'u') y = 'v';
-    else if (y === 'ue') y = 've';
-    // jun/qun/xun 的 un 就是 un，无需归一化
-  } else if (sheng === 'y' && y === 'ue') {
+  if (['j', 'q', 'x', 'y'].includes(sheng) && y === 'ue') {
     y = 've';
   }
   // 全拼里的 iou/uei/uen 缩写为 iu/ui/un，这里保持缩写（与韵母表一致）
@@ -215,6 +201,11 @@ export function splitSyllable(pinyin) {
     if (!yunKeys || !yunKeys.length || !smKeys || !smKeys.length) continue;
 
     result.push(buildResult(sm, yun, smKeys, yunKeys[0], false));
+    // Rime 小鹤 derive/^([jqxy])u$/$1v/：保留原拼写，并增加 V 兼容码。
+    if (['j','q','x','y'].includes(sm) && ['u','v'].includes(yun)) {
+      const alias = yun === 'u' ? 'v' : 'u';
+      result.push(buildResult(sm, alias, smKeys, YUNMU_TO_KEYS[alias][0], false));
+    }
   }
 
   // —— 方案 B：零声母 ——

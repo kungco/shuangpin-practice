@@ -173,7 +173,7 @@ export const CHARS_TIER6 = {
 export const CHARS_TIER7 = {
   // 情感与态度
   "喜": "xi", "欢": "huan", "希": "xi", "爱": "ai", "焦": "jiao", "虑": "lv", "兴": "xing", "奋": "fen",
-  "孤": "gu", "骄": "jiao", "傲": "ao", "谦": "qian", "虚": "xu", "幽": "you", "犹": "you", "豫": "lv",
+  "孤": "gu", "骄": "jiao", "傲": "ao", "谦": "qian", "虚": "xu", "幽": "you", "犹": "you", "豫": "yu",
   "若": "ruo", "苟": "gou", "迫": "po", "致": "zhi", "恒": "heng", "锲": "qie", "紊": "wen",
   // 健康与身体
   "健": "jian", "康": "kang", "眠": "mian", "免": "mian", "疫": "yi", "苗": "miao", "锻": "duan", "炼": "lian",
@@ -404,7 +404,7 @@ export const PHRASES = [
   { w: "粗心", p: ["cu", "xin"], c: "daily" },
   { w: "耐心", p: ["nai", "xin"], c: "daily" },
   { w: "果断", p: ["guo", "duan"], c: "daily" },
-  { w: "犹豫", p: ["you", "lv"], c: "daily" },
+  { w: "犹豫", p: ["you", "yu"], c: "daily" },
   { w: "睡眠", p: ["shui", "mian"], c: "daily" },
   { w: "营养", p: ["ying", "yang"], c: "daily" },
   { w: "蔬菜", p: ["shu", "cai"], c: "daily" },

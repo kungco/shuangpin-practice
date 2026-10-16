@@ -10,6 +10,7 @@ const L = await import('../src/core/learning.js');
 const { KEY_COMPONENTS } = await import('../src/core/questions.js');
 const { buildSyllables, primarySplit } = await import('../src/core/scheme.js');
 const { PracticeEngine } = await import('../src/core/engine.js');
+const { questionFromCharChar } = await import('../src/core/questions.js');
 const session = (id = 'two-keys', phase = 'check') => L.normalizeLearningSession({ lessonId: id, phase });
 const perfect = (s) => {
   for (const q of L.buildLearningQuestions(L.LEARNING_MAP[s.lessonId], s.phase, s.repairItems))
@@ -49,6 +50,26 @@ try {
     }
   }
 
+  console.log('【编码】JU/QU/XU/YU 与 V 别名都能独立完成；n/l 不混用 U/V');
+  for(const [ch,py] of [['居','ju'],['去','qu'],['虚','xu'],['鱼','yu']])for(const suffix of ['U','V']){
+    const e=new PracticeEngine({questions:[questionFromCharChar(ch,py)],mode:'char',examMode:true});e.start();
+    for(const key of py[0].toUpperCase()+suffix)assert.equal(e.pressKey(key).correct,true);
+    assert.equal(e.summary().independentAccuracy,100);e.destroy();
+  }
+  for(const [ch,py,key] of [['绿','lv','U'],['路','lu','V']]){
+    const e=new PracticeEngine({questions:[questionFromCharChar(ch,py)],mode:'char',examMode:true});e.start();e.pressKey('L');
+    assert.equal(e.pressKey(key).correct,false);e.destroy();
+  }
+  for(const [ch,py,suffix] of [['去','qu','U'],['豫','lv','U']]){
+    const q=questionFromCharChar(ch,py);
+    if(py==='qu'){const c=q.chars[0];c.syl.candidates=c.syl.candidates.filter(s=>s.code==='QV');c.syl.split=c.syl.candidates[0];}
+    const e=new PracticeEngine({questions:[q],mode:'char',examMode:true});e.start();e.pressKey(ch==='去'?'Q':'L');
+    const saved=e.exportResume();e.destroy();const restored=PracticeEngine.restore(saved);restored.start();
+    if(ch==='豫'){assert.equal(restored.keyIndex,0);assert.equal(restored.pressKey('Y').correct,true);}
+    assert.equal(restored.pressKey(suffix).correct,true,'旧存档续练使用修正后的编码');
+    assert.equal(restored.state,'finished');restored.destroy();
+  }
+
   console.log('【小关卡】练过、小测通过和隔天掌握分别记录');
   S.clearAll();
   const today = new Date(2026, 9, 16, 23, 58).getTime();
@@ -69,6 +90,25 @@ try {
   L.recordLearning(perfect(session('two-keys','review')), summary, tomorrow);
   assert.ok(S.loadLearningProgress().lessons['two-keys'].masteredAt);
 
+  console.log('【小关卡】重测失败撤销掌握；旧备份不能复活已失效的通过记录');
+  const oldMasteredBackup=S.exportAll();
+  const failedAt=tomorrow+60000;
+  const failure=L.recordLearning(session(),{completed:true,independentAccuracy:0},failedAt);
+  assert.equal(failure.passed,false);
+  assert.equal(S.loadLearningProgress().lessons['two-keys'].masteredAt,0);
+  assert.equal(L.recommendedLearning(undefined,failedAt).phase,'repair');
+  const failureBackup=S.exportAll();
+  S.importAll(oldMasteredBackup);
+  assert.equal(S.loadLearningProgress().lessons['two-keys'].masteredAt,0);
+  assert.equal(S.loadLearningProgress().lessons['two-keys'].passedAt,0);
+  assert.deepEqual(S.loadLearningProgress().lessons['two-keys'].repairItems,['你','好','大','吗']);
+  L.recordLearning(perfect(session()),summary,failedAt+60000);
+  assert.equal(S.loadLearningProgress().lessons['two-keys'].masteredAt,0,'重新小测通过后仍需隔天回访');
+  S.importAll(failureBackup);
+  assert.ok(S.loadLearningProgress().lessons['two-keys'].passedAt,'旧失败记录不撤销后续有效通过');
+  L.recordLearning(perfect(session('two-keys','review')),summary,tomorrow+86400000);
+  assert.ok(S.loadLearningProgress().lessons['two-keys'].masteredAt);
+
   console.log('【小关卡】完整覆盖、整体正确率、逐项正确率缺一不可');
   const weak = perfect(session()); weak.evidence['你'].independent = 2;
   assert.deepEqual(L.evaluateLearning(weak, summary).failedItems, ['你']);
@@ -80,6 +120,10 @@ try {
   const repair = session('special-sheng','repair'); repair.repairItems = ['zh'];
   const rqs = L.buildLearningQuestions(L.LEARNING_MAP['special-sheng'], 'repair', repair.repairItems);
   assert.equal(rqs.length, 3); assert.ok(rqs.every(q => q.meta.learningItem === 'zh'));
+  assert.equal(L.evaluateLearning(repair,summary).passed,false,'跳过全部补练不通过');
+  assert.deepEqual(L.evaluateLearning(repair,summary).failedItems,['zh']);
+  for(const q of rqs)L.observeLearning(repair,q,false);
+  assert.equal(L.evaluateLearning(repair,summary).passed,true,'完成全部目标的三次实际输入才能通过补练');
   L.recordLearning(repair, summary, today);
   assert.equal(S.loadLearningProgress().lessons['special-sheng'].passedAt, 0, '补练不代替小测');
 
@@ -126,10 +170,17 @@ try {
     app.engine.pressKey(t.keys[t.pos]);
   }
   assert.equal(app.learningResult.passed, false);
-  fire('#modal [data-act="again"]');
+  fire('#modal [data-act="stats"]');fire('[data-view="practice"]');
+  assert.match(H.q('#courseStat').textContent,/需要巩固/);
+  fire('#btnCourseStart');
   assert.equal(app.learningActive.phase, 'repair');
   assert.ok(app.engine.questions.every(q => q.meta.learningItem === wrongItem));
-  complete(app.engine); fire('#modal [data-act="again"]');
+  while(app.engine.state==='running')app.engine.skipCurrent();
+  assert.equal(app.learningResult.passed,false);
+  fire('#modal [data-act="again"]');assert.equal(app.learningActive.phase,'repair');
+  complete(app.engine); fire('#modal [data-act="stats"]');fire('[data-view="practice"]');
+  assert.match(H.q('#courseStat').textContent,/需要巩固 · 待小测/);
+  fire('#btnCourseStart');
   assert.equal(app.learningActive.phase, 'check');
   complete(app.engine); assert.equal(app.learningResult.passed, true);
   assert.equal(app.engine.summary().score, undefined, '关卡不冒充综合能力测验');

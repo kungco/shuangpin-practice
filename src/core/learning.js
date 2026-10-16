@@ -61,6 +61,7 @@ export function learningProgress() {
 
 export function learningPhase(lesson, p, now = Date.now()) {
   const rec = p.lessons[lesson.id] || {};
+  if (rec.failedAt && !rec.passedAt) return rec.repairedAt > rec.failedAt ? 'check' : 'repair';
   if (rec.passedAt && !rec.masteredAt && rec.dueDay && rec.dueDay <= dateStr(new Date(now))) return 'review';
   return rec.practicedAt ? 'check' : 'guided';
 }
@@ -71,7 +72,8 @@ export function recommendedLearning(p = learningProgress(), now = Date.now()) {
     const r = p.lessons[l.id];
     return r?.passedAt && !r.masteredAt && r.dueDay && r.dueDay <= today;
   });
-  const lesson = due || LEARNING_LESSONS.find(l => !p.lessons[l.id]?.passedAt);
+  const repair = LEARNING_LESSONS.find(l => p.lessons[l.id]?.failedAt && !p.lessons[l.id]?.passedAt);
+  const lesson = due || repair || LEARNING_LESSONS.find(l => !p.lessons[l.id]?.passedAt);
   return lesson ? { lesson, phase: due ? 'review' : learningPhase(lesson, p, now) } : null;
 }
 
@@ -102,19 +104,23 @@ export function observeLearning(session, question, independent) {
 export function evaluateLearning(session, summary) {
   const lesson = Object.hasOwn(LEARNING_MAP, session?.lessonId) ? LEARNING_MAP[session.lessonId] : null;
   if (!lesson) return { passed: false, failedItems: [], reason: '关卡不存在' };
-  const items = learningItems(lesson);
+  const allItems = learningItems(lesson);
+  const selected = session.phase === 'repair' ? allItems.filter(i => session.repairItems.includes(i.id)) : [];
+  const items = selected.length ? selected : allItems;
   const assessment = session.phase === 'check' || session.phase === 'review';
+  const rounds = session.phase === 'repair' ? 3 : 4;
   const failedItems = items.filter(item => {
     const e = session.evidence[item.id];
-    return !e || e.seen < 4 || e.independent / e.seen < .75;
+    return !e || e.seen < rounds || (assessment && e.independent / e.seen < .75);
   }).map(item => item.id);
-  const covered = items.every(item => (session.evidence[item.id]?.seen || 0) >= 4);
+  const covered = items.every(item => (session.evidence[item.id]?.seen || 0) >= rounds);
   const passed = !!summary.completed && (assessment
     ? covered && !failedItems.length && Number(summary.independentAccuracy) >= 90
-    : session.phase === 'repair' || covered);
+    : covered);
   const reason = !summary.completed ? '本轮未完成，继续练完再做判定'
     : assessment && !covered ? '还有本关成分没有完整测到'
     : assessment && !passed ? '先补练薄弱项，再做一次独立小测'
+    : !covered ? '还有目标没有实际练完；跳过不计为完成'
     : session.phase === 'guided' ? '提示练习完成，接下来试试独立输入'
     : session.phase === 'repair' ? '补练完成，回到整关小测检验'
     : session.phase === 'review' ? '隔天仍能独立答对，已标记为掌握'
@@ -128,19 +134,29 @@ export function recordLearning(session, summary, now = Date.now()) {
   const old = p.lessons[session.lessonId] || {};
   const rec = { ...old, attempts: (old.attempts || 0) + 1, lastAt: now };
   if (result.passed && session.phase === 'guided') rec.practicedAt = old.practicedAt || now;
+  if (result.passed && session.phase === 'repair') rec.repairedAt = Math.max(now, (old.failedAt || 0) + 1);
   if (['check','review'].includes(session.phase)) {
     rec.bestIndependent = Math.max(old.bestIndependent || 0, Number(summary.independentAccuracy) || 0);
     rec.lastCheckAt = now;
     if (result.passed) {
       rec.practicedAt = old.practicedAt || now;
-      rec.passedAt = old.passedAt || now;
+      rec.passedAt = old.passedAt || Math.max(now, (old.failedAt || 0) + 1);
+      rec.repairItems = [];
       // Same-day repeats never count as a delayed retention check.
       if (session.phase === 'review' && old.passedAt &&
           dateStr(new Date(now)) > dateStr(new Date(old.passedAt))) rec.masteredAt = now;
       const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1);
       rec.dueDay = dateStr(tomorrow);
+    } else if (summary.completed) {
+      rec.failedAt = Math.max(now, (old.failedAt || 0) + 1, (old.repairedAt || 0) + 1,
+        (old.passedAt || 0) + 1, (old.masteredAt || 0) + 1);
+      rec.passedAt = 0;
+      rec.masteredAt = 0;
+      rec.dueDay = '';
+      rec.repairItems = result.failedItems.slice();
     }
   }
+  rec.lastAt = Math.max(now, rec.failedAt || 0, rec.passedAt || 0, rec.repairedAt || 0);
   p.lessons[session.lessonId] = rec;
   saveLearningProgress(p);
   if (result.passed && session.phase === 'review' && !rec.masteredAt)

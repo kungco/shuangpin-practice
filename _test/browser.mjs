@@ -320,6 +320,23 @@ try {
       `dailyChart 的 aria-label 是数据摘要（「${(labels.d || '').slice(0, 30)}」）`);
   }
 
+  console.log('\n【U/V 兼容】真实键盘输入 U 主编码与 V 兼容码');
+  {
+    await goto(chrome);
+    await click(chrome,'#btnFreePractice');await click(chrome,'[data-mode="custom"]');
+    await evaluate(chrome.send, `document.querySelector('#customTextInput').value='居去虚鱼居去虚鱼绿路';
+      __app.settings.trainingPolicy='independent';__app.settings.duration=0;`);
+    await click(chrome,'#btnStart');
+    for(const upper of 'JUQUXUYUJVQVXVYVLVLU') {
+      await sleep(12);
+      await realKey(chrome,{key:upper.toLowerCase(),code:'Key'+upper,vk:upper.charCodeAt(0),text:upper.toLowerCase()});
+    }
+    const r=(await evaluate(chrome.send, `({finished:__app.engine.state==='finished',wrong:__app.engine.summary().wrongKeystrokes,
+      independent:__app.engine.summary().independentAccuracy})`)).value;
+    ok(r?.finished && r.wrong===0 && r.independent===100,'JU/QU/XU/YU、JV/QV/XV/YV 及 n/l 的正确编码均可独立完成');
+    await click(chrome,'#modal [data-act="stats"]');
+  }
+
   console.log('\n【规则小课堂】真实键盘完成补练与换字验收');
   {
     await goto(chrome);
@@ -331,6 +348,11 @@ try {
       guide: __app.engine.questions.map(q=>q.text), holdouts: __app.coachActive?.holdouts.map(([ch])=>ch) })`)).value;
     ok(guide?.phase === 'guided' && guide.visible && guide.holdouts.every(ch=>!guide.guide.includes(ch)),
       '补练展示规则；验收字不提前出现在对照题中');
+    await click(chrome,'#btnToggleDecode');
+    ok((await evaluate(chrome.send, `document.querySelector('#coachTip').hidden &&
+      document.querySelector('#coachTip').innerHTML==='' && document.querySelector('#decode').textContent.includes('凭记忆输入')`)).value,
+      '隐藏声韵讲解同时撤掉拆分和规则卡中的答案');
+    await click(chrome,'#btnToggleDecode');
     for (let i=0;i<12;i++) {
       const key=(await evaluate(chrome.send, `(()=>{const t=__app.engine.currentTarget();return t.keys[t.pos].toUpperCase();})()`)).value;
       await sleep(12); // 跨过输入层 8ms 防重复事件窗口。

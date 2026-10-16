@@ -164,8 +164,7 @@ console.log('【4d】ü 行韵母的归一化（jue/que/xue/yue → ve，但 yu 
      但 buildResult() 产出的 text（如「y+ue → YT」）会直接显示在界面上 ——
      同一屏里 jue 说「j+ve」、yue 说「y+ue」，对正在学规则的人是误导。
 
-     第二组断言锁定边界：yu 的韵母在全拼里本来就写作 u，
-     不是 ü 的省略形式，绝不能跟着一起变成 v。 */
+     ju/qu/xu/yu 的实际读音含 ü，但按键主编码保留拼写 U，同时接受 V 别名。 */
   const yun = py => (splitSyllable(py)[0] || {}).yun;
   const code = py => (splitSyllable(py)[0] || {}).code;
 
@@ -173,15 +172,16 @@ console.log('【4d】ü 行韵母的归一化（jue/que/xue/yue → ve，但 yu 
     ok(yun(py) === 've', `${py} 的韵母应归一化为 ve，实际 ${yun(py)}`);
   }
   for (const py of ['ju', 'qu', 'xu']) {
-    ok(yun(py) === 'v', `${py} 的韵母应为 v，实际 ${yun(py)}`);
+    ok(yun(py) === 'u', `${py} 按拼写保留 U 主编码，实际 ${yun(py)}`);
+    ok(splitSyllable(py).some(c=>c.code===py[0].toUpperCase()+'V'), `${py} 同时接受 V 兼容码`);
   }
-  // 边界：这三个的 u 是「真 u」，不能变成 v
-  ok(yun('yu') === 'u', `yu 的韵母必须是 u（不是 v），实际 ${yun('yu')}`);
+  // 编码沿用输入法拼写；yun/jun 的缩写 un 不受单韵母别名影响。
+  ok(yun('yu') === 'u', `yu 的主编码保留 U，实际 ${yun('yu')}`);
   ok(yun('yun') === 'un', `yun 的韵母必须是 un，实际 ${yun('yun')}`);
   ok(yun('jun') === 'un', `jun 的韵母必须是 un，实际 ${yun('jun')}`);
 
-  // 编码是既成事实，修复前后都不该变
-  const CODES = { jue: 'JT', que: 'QT', xue: 'XT', yue: 'YT', ju: 'JV', qu: 'QV', xu: 'XV', yu: 'YU' };
+  // 主编码按输入法拼写展示，V 兼容码由上面的断言单独校验。
+  const CODES = { jue: 'JT', que: 'QT', xue: 'XT', yue: 'YT', ju: 'JU', qu: 'QU', xu: 'XU', yu: 'YU' };
   for (const [py, want] of Object.entries(CODES)) {
     ok(code(py) === want, `${py} 编码应为 ${want}，实际 ${code(py)}`);
   }

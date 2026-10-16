@@ -11,7 +11,8 @@ export function createCoachView({ $, app, escapeHtml, openModal, toast, startRul
     const box=$('#coachTip');if(!box)return;
     const eng=app.engine;
     // Answer-bearing explanations must never enter an independent check's DOM.
-    const allowed=eng && !eng.examMode && eng.assistanceLevel()===0;
+    const visible=app.decodeHidden == null ? app.settings.showDecode !== false : !app.decodeHidden;
+    const allowed=eng && !eng.examMode && eng.assistanceLevel()===0 && visible;
     const rule=allowed ? COACH_MAP[app.coachActive?.phase==='guided' ? app.coachActive.ruleId : diagnosis?.ruleId] : null;
     box.hidden=!rule;
     box.innerHTML=rule ? ruleHTML(rule,diagnosis?.text || '') : '';

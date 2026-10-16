@@ -28,7 +28,8 @@ try{
   assert.equal(diagnose('金','jin',true,'K').diagnosis.ruleId,'in-ing');
   assert.equal(diagnose('路','lu',true,'K').diagnosis,null);
   assert.equal(diagnose('安','an',true,'H').diagnosis,null,'零声母韵尾不是普通韵母键');
-  assert.equal(diagnose('去','qu',true,'U').diagnosis,null,'省略 ü 两点的拼写不放进入门对照');
+  assert.equal(diagnose('去','qu',true,'U'),undefined,'U 是正确编码，不产生错误解释');
+  assert.equal(diagnose('去','qu',true,'V'),undefined,'V 兼容码也不产生错误解释');
   const log=C.normalizeCoachLog();const d=diagnose('绿','lv',true,'U');
   C.observeCoachError(log,d.fb,d.q,d.target,'0:0');C.observeCoachError(log,d.fb,d.q,d.target,'0:0');
   C.observeCoachError(log,d.fb,d.q,d.target,'1:0');assert.equal(log.issues[0].marks.length,2);
@@ -67,6 +68,10 @@ try{
   fire('#btnCoachLibrary');fire('#modal [data-act="u-v"]');let e=app.engine;
   assert.equal(app.coachActive.phase,'guided');assert.equal(e.durationSec,0);assert.equal(e.unlimited,false);assert.equal(e.adaptive,false);
   assert.ok(!H.q('#coachTip').hidden);assert.match(H.q('#coachTip').textContent,/ü/);
+  fire('#btnToggleDecode');assert.equal(H.q('#coachTip').innerHTML,'');
+  assert.match(H.q('#btnToggleDecode').textContent,/显示声韵讲解/);
+  e.pressKey('a');assert.equal(H.q('#coachTip').innerHTML,'','隐藏讲解后按错也不重新露出答案');
+  fire('#btnToggleDecode');assert.ok(!H.q('#coachTip').hidden);
   const held=app.coachActive.holdouts.map(([ch])=>ch);
   const tracked=app.coachActive.holdouts[0];
   S.recordWeak({char:tracked[0],pinyin:tracked[1]});S._setAllDue(Date.now()-1);
@@ -101,7 +106,7 @@ try{
   fire('#modal [data-act="stats"]');
 
   console.log('【规则教练 UI】普通练习即时解释，结算按错因接入小课堂');
-  fire('[data-view="practice"]');fire('[data-mode="custom"]');app.settings.trainingPolicy='full';
+  fire('[data-view="practice"]');fire('[data-mode="custom"]');app.settings.trainingPolicy='full';app.settings.showDecode=true;
   H.q('#customTextInput').value='绿路';fire('#btnStart');e=app.engine;e.pressKey('L');e.pressKey('U');
   assert.match(H.q('#coachTip').textContent,/第二键/);assert.match(H.q('#coachTip').textContent,/应.*V/);
   e.pressKey('V');assert.equal(H.q('#coachTip').innerHTML,'','换字后清理上题解释');

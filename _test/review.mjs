@@ -27,6 +27,14 @@ function seed(key='你', pinyin='ni') {
 function start() {fire('[data-view="review"]');fire('#btnReviewPractice');assert.ok(app.engine);return app.engine;}
 function close() {fire('#modal [data-act="again"]');assert.ok(H.q('#view-review').classList.contains('is-active'));}
 try {
+  console.log('【注音修复】旧错题与旧备份修正豫/犹豫，保留原排期');
+  const oldReading={key:'豫',char:'豫',pinyin:'lv',count:3,due:Date.now()+86400000};
+  S.writeJSON(S.KEYS.weak,{'豫':oldReading,'犹豫':{...oldReading,key:'犹豫',word:'犹豫',pinyin:['you','lv']}});
+  assert.equal(S.loadWeak()['豫'].pinyin,'yu');assert.equal(S.loadWeak()['豫'].due,oldReading.due);
+  assert.deepEqual(S.loadWeak()['犹豫'].pinyin,['you','yu']);
+  const migratedReadingBackup=S.exportAll();S.clearWeak();S.importAll(migratedReadingBackup);
+  assert.equal(S.loadWeak()['豫'].pinyin,'yu');
+  S.clearWeak();
   console.log('【复习】真实间隔、同日防刷、历史错误多也能重新掌握');
   S.clearWeak(); const base=Date.now();
   for(let n=0;n<20;n++) S.recordWeak({char:'你',pinyin:'ni'});
