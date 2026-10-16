@@ -149,7 +149,8 @@ try {
   assert.equal(app.learningResult.passed, true, '同键别名也分别计入覆盖');
   fire('#modal [data-act="stats"]'); fire('[data-view="practice"]');
   fire('#btnFreePractice'); assert.ok(H.q('#freePracticePanel').open);
-  fire('[data-mode="char"]'); fire('#btnStart');
+  fire('#btnStart');
+  assert.equal(app.engine.mode, app.settings.mode, '课程续练结束后，自由模式仍与用户选择一致');
   assert.equal(app.learningActive, null);
   assert.ok(!H.q('#sessionPanel').classList.contains('is-learning'));
   assert.equal(H.q('#hudAccLabel').textContent, '正确率');

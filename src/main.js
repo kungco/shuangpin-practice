@@ -1675,7 +1675,11 @@ function showSessionUI(show) {
   // 迷你键位图同样按模式收敛（属性式隐藏，便于断言）
   applyMiniKeymapVisibility();
   if (!show && !isSessionInProgress() && crossTabPendingKeys.size) applyExternalChange();
-  if (!show) renderCourseBox();
+  if (!show) {
+    // 续练把 sessionMode 设成了关卡模式；返回自由练习时恢复用户原来的模式。
+    if (app.learningActive) selectMode(app.settings.mode, true);
+    renderCourseBox();
+  }
 }
 
 function quitSession() {
