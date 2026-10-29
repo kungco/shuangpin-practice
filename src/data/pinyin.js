@@ -13,6 +13,7 @@
  */
 
 import { EXTRA_CHARS, EXTRA_PHRASES, EXTRA_PASSAGES } from './practice-extra.js';
+import { EXPANSION_CHARS, EXPANSION_PHRASES, EXPANSION_PASSAGES } from './practice-expansion.js';
 
 /* ============================================================
    一、单字拼音表
@@ -202,6 +203,7 @@ export const CHARS_TIER7 = {
 
 // 扩充语料所需字收入第七档，不改变前六档的学习范围。
 Object.assign(CHARS_TIER7, EXTRA_CHARS);
+Object.assign(CHARS_TIER7, EXPANSION_CHARS);
 
 /* 合并后的全量单字表 */
 export const ALL_CHARS = Object.assign({}, CHARS_TIER1, CHARS_TIER2, CHARS_TIER3, CHARS_TIER4, CHARS_TIER5, CHARS_TIER6, CHARS_TIER7);
@@ -224,6 +226,7 @@ export const CHAR_TIERS = [
    ============================================================ */
 
 export const PHRASES = [
+  ...EXPANSION_PHRASES,
   ...EXTRA_PHRASES,
   // ---- 双字常用词（难度低） ----
   { w: "工作", p: ["gong", "zuo"], c: "office" }, { w: "时间", p: ["shi", "jian"], c: "daily" },
@@ -487,10 +490,11 @@ export const PHRASES = [
 
 /* ============================================================
    三、短文（跟打用，含标点）
-   每段约 60–140 字，覆盖常见标点：，。、；：？！「」“”
+   包含原有短文与扩充的中长篇，覆盖常见标点：，。、；：？！「」“”
    ============================================================ */
 
 export const PASSAGES = [
+  ...EXPANSION_PASSAGES,
   ...EXTRA_PASSAGES,
   {
     t: "双拼是一种汉字输入方法，它把每个音节拆成声母和韵母两部分，分别对应键盘上的两个键。相比全拼，双拼的按键次数更少，长期使用可以明显提高打字速度。",

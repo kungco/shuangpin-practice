@@ -18,6 +18,7 @@ jobs:
           node-version: '22'
       - run: npm ci
         working-directory: _test
+      - run: npm ci --prefix scripts --ignore-scripts
       - run: npm test
         working-directory: _test
 

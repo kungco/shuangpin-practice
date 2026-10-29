@@ -1,3 +1,5 @@
+import { correctContextReadings } from './reading-fixes.js';
+
 /**
  * 题库与分级系统
  * ------------------------------------------------------------
@@ -23,8 +25,8 @@
  *   把声母、韵母单独抽出来问，诊断粒度立刻从「音节」细到「成分」，
  *   错在哪一半一目了然。
  *
- * 题库规模（见 data/pinyin.js）：1787 单字（7 档） / 2247 词组 / 100 短文，
- * 合计 4134 个可出题项，另加键位图、声母/韵母专项、音节拆分四个无限题库。
+ * 题库见 data/pinyin.js，包含分层单字、词组与实用句子、不同篇幅的文章，
+ * 另加键位图、声母/韵母专项、音节拆分题库。
  *
  * 每道题的统一结构（Question）：
  *   {
@@ -45,6 +47,7 @@ import {
   KEY_TO_SHENGMU, KEY_TO_YUNMU, SHENGMU_TO_KEYS
 } from './scheme.js';
 import { tokenizeWithPinyin, hasPinyin } from './tokenizer.js';
+import { PASSAGE_TOPICS, PASSAGE_LENGTHS, PASSAGE_FOCI, phraseCategories } from '../data/material-options.js';
 
 /* ============================================================
    模式定义
@@ -427,10 +430,13 @@ function buildWordQuestion(word, pinyins, level, meta = {}) {
  * L4：词组打字
  */
 export function phrasePool(opts = {}) {
-  const category = ['daily', 'office', 'travel', 'idiom'].includes(opts.phraseCategory) ? opts.phraseCategory : 'all';
-  const length = [2, 3, 4].includes(Number(opts.phraseLength)) ? Number(opts.phraseLength) : 0;
-  return cachedPool(`phrase:${category}:${length}`, () => PHRASES.filter(p =>
-    (category === 'all' || p.c === category) && (!length || Array.from(p.w).length === length) &&
+  const category = phraseCategories.includes(opts.phraseCategory) ? opts.phraseCategory : 'all';
+  const length = ['2','3','4','5+'].includes(String(opts.phraseLength)) ? String(opts.phraseLength) : 'all';
+  const shortOnly = opts.shortOnly === true;
+  return cachedPool(`phrase:${category}:${length}:${shortOnly}`, () => PHRASES.filter(p =>
+    (category === 'all' || p.c === category) &&
+    (length === 'all' || (length === '5+' ? Array.from(p.w).length >= 5 : Array.from(p.w).length === Number(length))) &&
+    (!shortOnly || Array.from(p.w).length <= 4) &&
     Array.from(p.w).length === p.p.length && p.p.every(py => splitSyllable(py).length)));
 }
 function makePhraseQuestion(usedSet, opts = {}) {
@@ -443,14 +449,28 @@ function makePhraseQuestion(usedSet, opts = {}) {
  * 一题 = 一段短文，按标点/长度切成可逐字推进的序列。
  * 每个汉字都带拼音，从而可以逐字校验双拼编码。
  */
-function makePassageQuestion(diff, usedSet) {
-  let pool = PASSAGES.filter(p => !diff || p.d <= diff);
+export function passagePool(opts = {}) {
+  const valid = (values,value) => values.some(v => v[0] === value) ? value : 'all';
+  const topic = valid(PASSAGE_TOPICS,opts.passageTopic);
+  const length = valid(PASSAGE_LENGTHS,opts.passageLength);
+  const focus = valid(PASSAGE_FOCI,opts.passageFocus);
+  return cachedPool(`passage:${topic}:${length}:${focus}`, () => PASSAGES.filter(p => {
+    const count = p.hanCount ?? Array.from(p.t).filter(c => /\p{Script=Han}/u.test(c)).length;
+    const bucket = count < 150 ? 'short' : count < 350 ? 'medium' : 'long';
+    return (topic === 'all' || (p.c || 'general') === topic) &&
+      (length === 'all' || bucket === length) && (focus === 'all' || p.focus === focus);
+  }));
+}
+function makePassageQuestion(diff, usedSet, opts = {}) {
+  const selected = passagePool(opts);
+  if (!selected.length) return null;
+  let pool = selected.filter(p => !diff || p.d <= diff);
   // 简单短文已练完时，引入尚未见过的较难段落，再考虑重复。
   if (pool.length && pool.every(p => usedSet.has(p.t))) {
-    const unseen = PASSAGES.filter(p => !usedSet.has(p.t));
+    const unseen = selected.filter(p => !usedSet.has(p.t));
     if (unseen.length) pool = unseen;
   }
-  if (!pool.length) pool = PASSAGES.slice();
+  if (!pool.length) pool = selected.slice();
   if (!pool.length) {
     // 兜底：用高频词组拼一段
     return buildWordQuestion('双拼练习', ['shuang', 'pin', 'lian', 'xi'], 5);
@@ -469,6 +489,9 @@ function makePassageQuestion(diff, usedSet) {
     text,
     chars: raw,
     meta: {
+      title: pick.title || '',
+      topic: pick.c || 'general',
+      focus: pick.focus || null,
       difficulty: pick.d,
       hanCount: raw.filter(c => !c.punct).length,
       unknownCount: raw.filter(c => !c.punct && !c.syl).length
@@ -620,7 +643,7 @@ function makeExamQuestion(i, target, ctx) {
   }
 
   if (kind === 'phrase') {
-    const q = makePhraseQuestion(ctx.usedPhrase);
+    const q = makePhraseQuestion(ctx.usedPhrase, {shortOnly:true});
     if (q) { q.meta = Object.assign({}, q.meta, { examPart: 'phrase' }); }
     return q;
   }
@@ -648,12 +671,12 @@ export function annotatePassage(text, vettedReadings = null) {
   }
   const useVetted = vetted && vettedReadings.length === arr.length;
   const readings = useVetted ? [] : tokenizeWithPinyin(text).flatMap(block => block.chars);
+  const contextPinyins = correctContextReadings(text, useVetted ? vettedReadings : readings.map(c=>c.pinyin));
   return arr.map((ch, i) => {
     if (isPunct(ch)) {
       return { ch, pinyin: '', syl: null, punct: true, unknown: false };
     }
-    const py = useVetted
-      ? vettedReadings[i] : (readings[i] ? readings[i].pinyin : '');
+    const py = contextPinyins[i] || '';
     if (!py || !splitSyllable(py).length) {
       // 未收录或无法拆分：标记为 unknown，引擎会跳过
       return { ch, pinyin: py, syl: null, punct: false, unknown: true };
@@ -745,7 +768,7 @@ export function generateQuestions(opts = {}) {
         case 'passage': {
           // 短文按难度循环出，题量语义为「段落数」
           const diff = Math.min(3, 1 + Math.floor(i / Math.max(1, target / 3)));
-          q = makePassageQuestion(diff, used);
+          q = makePassageQuestion(diff, used, opts);
           break;
         }
         case 'exam':
@@ -763,7 +786,7 @@ export function generateQuestions(opts = {}) {
   }
 
   // 极端兜底：保证至少有一题
-  if (!out.length && mode !== 'phrase') out.push(makeFallbackCharQuestion());
+  if (!out.length && mode !== 'phrase' && mode !== 'passage') out.push(makeFallbackCharQuestion());
   return out;
 }
 

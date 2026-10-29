@@ -10,6 +10,8 @@
  */
 
 import { correctedReading } from './reading-fixes.js';
+import { normalizeComparison } from './comparison.js';
+import { normalizePlaylist } from './playlist.js';
 
 const NS = 'shuangpin.v1';
 export const KEYS = {
@@ -26,10 +28,14 @@ export const KEYS = {
   shelf: `${NS}.shelf`,         // 个人文本书架（多份自定义跟打材料）
   course: `${NS}.course`,       // 新手引导课程的进度
   learning: `${NS}.learning`,   // 小关卡：提示练习 / 独立小测 / 隔天回访
+  playlist: 'shuangpin.studio.playlist',
   version: `${NS}.version`
 };
 
-export const DATA_VERSION = 4;
+export const DATA_VERSION = 5;
+
+export function loadPlaylist(){return normalizePlaylist(readJSON(KEYS.playlist,null));}
+export function savePlaylist(raw){return writeJSON(KEYS.playlist,normalizePlaylist({...raw,updatedAt:Date.now()}));}
 
 /* ============================================================
    底层读写（带降级）
@@ -284,6 +290,9 @@ export const DEFAULT_SETTINGS = {
   trainingPolicy: 'full',
   phraseCategory: 'all',
   phraseLength: 'all',
+  passageTopic: 'all',
+  passageLength: 'all',
+  passageFocus: 'all',
   weakBoost: false,    // 侧重易错内容
   showMiniKeymap: true,
   sound: false,
@@ -355,8 +364,11 @@ const SETTINGS_OBJECT_KEYS = ['shortcuts'];
  */
 const SETTINGS_ENUMS = {
   trainingPolicy: ['full', 'progressive', 'pinyin', 'independent'],
-  phraseCategory: ['all', 'daily', 'office', 'travel', 'idiom'],
-  phraseLength: ['all', '2', '3', '4'],
+  phraseCategory: ['all', 'daily', 'office', 'travel', 'idiom', 'chat', 'office-sentence'],
+  phraseLength: ['all', '2', '3', '4', '5+'],
+  passageTopic: ['all','general','daily','office','travel','learning','targeted'],
+  passageLength: ['all','short','medium','long'],
+  passageFocus: ['all','an-ang','en-eng-ing','in-ing','ian-iang','uan-uang','ong-iong','ui-iu-un','zh-ch-sh','zero','umlaut'],
   charTier: ['progressive', '1', '2', '3', '4', '5', '6', '7'],
   reduceMotion: ['auto', 'on', 'off'],
   theme: ['auto', 'light', 'dark']
@@ -474,7 +486,8 @@ export function makeRecord(data) {
       ? num(d.accuracy, 1) : num(d.independentAccuracy, 1),
     maxCombo: num(d.maxCombo),
     completed: !!d.completed,
-    questionCount: num(d.questionCount)
+    questionCount: num(d.questionCount),
+    comparison: normalizeComparison(d.comparison)
   };
 }
 
@@ -799,7 +812,7 @@ function incrementWeak(entry, field) {
 export function loadWeak() {
   const obj = readJSON(KEYS.weak, {});
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return {};
-  for (const key of ['豫','犹豫']) {
+  for (const key of Object.keys(obj).filter(k=>k==='豫'||k==='犹豫'||k.length>1&&k.includes('地'))) {
     const entry = obj[key];
     if (entry && typeof entry === 'object') obj[key] = { ...entry, pinyin: correctedReading(key, entry.pinyin) };
   }
@@ -1694,6 +1707,8 @@ export function saveResume(state) {
     review: state.review || undefined,
     coach: state.coach || undefined,
     coachLog: state.coachLog || undefined,
+    studio: state.studio || undefined,
+    comparison: normalizeComparison(state.comparison) || undefined,
     training: state.training,
     unitStartedAt: state.unitStartedAt,
     charIndex: state.charIndex,
@@ -2203,18 +2218,22 @@ function normalizeLearningProgress(raw) {
   for (const [id, entry] of Object.entries(raw?.lessons || {}).slice(0, 100)) {
     if (!/^[a-z0-9-]{1,48}$/.test(id) || !entry || typeof entry !== 'object') continue;
     const rec = {};
-    for (const field of ['practicedAt','passedAt','masteredAt','failedAt','repairedAt','lastCheckAt','lastAt']) {
+    for (const field of ['practicedAt','passedAt','masteredAt','failedAt','repairedAt','transferAt','lastReviewAt','lastCheckAt','lastAt']) {
       rec[field] = clampNum(entry[field], 0, 8640000000000000, 0);
     }
     rec.attempts = clampInt(entry.attempts, 0, 1000000);
     rec.bestIndependent = clampNum(entry.bestIndependent, 0, 100, 0);
     rec.legacy = entry.legacy === true;
+    rec.reviewStep=clampInt(entry.reviewStep,0,3);
+    rec.lastTransfer=typeof entry.lastTransfer==='string'?entry.lastTransfer.slice(0,100):'';
     rec.dueDay = /^\d{4}-\d{2}-\d{2}$/.test(entry.dueDay || '') ? entry.dueDay : '';
     rec.repairItems = [...new Set((Array.isArray(entry.repairItems) ? entry.repairItems : [])
       .filter(id => typeof id === 'string' && id.length <= 100))].slice(0,100);
     if (rec.failedAt) {
       if (rec.passedAt <= rec.failedAt) { rec.passedAt = 0; rec.dueDay = ''; }
       if (rec.masteredAt <= rec.failedAt) rec.masteredAt = 0;
+      if (rec.transferAt <= rec.failedAt) rec.transferAt=0;
+      if (rec.lastReviewAt <= rec.failedAt) rec.reviewStep=0;
     }
     lessons[id] = rec;
   }
@@ -2249,7 +2268,8 @@ export function exportAll() {
     // 与练习成绩同等重要，导出时丢掉任何一个都算数据丢失。
     shelf: loadShelf(),
     course: loadCourseProgress(),
-    learning: loadLearningProgress()
+    learning: loadLearningProgress(),
+    playlist: loadPlaylist()
   };
 }
 
@@ -2291,6 +2311,11 @@ export function importAll(payload) {
 
     let n = 0;
     let mergedHistory = null;   // 不为 null 表示本次动过 history
+    if(payload.playlist){
+      const incoming=normalizePlaylist(payload.playlist), current=loadPlaylist();
+      if(incoming && (!current || incoming.updatedAt>=current.updatedAt))writeJSON(KEYS.playlist,incoming);
+      n++;
+    }
 
     if (payload.settings && typeof payload.settings === 'object') {
       saveSettings(Object.assign(loadSettings(), payload.settings));
@@ -2645,10 +2670,13 @@ export function importAll(payload) {
         const old = cur.lessons[id];
         if (!old) { cur.lessons[id] = rec; continue; }
         const merged = { ...old, ...(rec.lastAt > old.lastAt ? rec : {}) };
-        for (const field of ['practicedAt','passedAt','masteredAt','failedAt','repairedAt','lastCheckAt','lastAt','attempts','bestIndependent']) {
+        for (const field of ['practicedAt','passedAt','masteredAt','failedAt','repairedAt','transferAt','lastReviewAt','lastCheckAt','lastAt','attempts','bestIndependent']) {
           merged[field] = Math.max(old[field] || 0, rec[field] || 0);
         }
         merged.legacy = old.legacy || rec.legacy;
+        const lastReview=rec.lastReviewAt>old.lastReviewAt?rec:old;
+        merged.reviewStep=lastReview.reviewStep;
+        merged.lastTransfer=(rec.lastAt>old.lastAt?rec:old).lastTransfer;
         if (merged.failedAt && merged.passedAt <= merged.failedAt)
           merged.repairItems = (rec.failedAt > old.failedAt ? rec : old).repairItems;
         cur.lessons[id] = merged;
@@ -2711,6 +2739,9 @@ const PACK_SETTING_KEYS = [
   'trainingPolicy',    // 训练策略
   'phraseCategory',    // 词组类别
   'phraseLength',      // 词组长度
+  'passageTopic',
+  'passageLength',
+  'passageFocus',
   'weakBoost',         // 是否侧重易错
   'strict',            // 严格模式
   'skipPunct',         // 跳过标点
@@ -2959,7 +2990,7 @@ export function storagePressure() {
  * 我们就会莫名其妙地重画一遍界面。
  */
 export function isAppKey(key) {
-  return typeof key === 'string' && key.startsWith(`${NS}.`);
+  return typeof key === 'string' && (key.startsWith(`${NS}.`) || key===KEYS.playlist);
 }
 
 /** 题量输入、导入与旧设置共用边界，0 表示不限。 */export function normalizeCount(value) {

@@ -135,7 +135,7 @@ try {
   assert.ok(Object.values(migrated.lessons).every(r => r.practicedAt && !r.passedAt && !r.masteredAt));
   assert.deepEqual(L.learningProgress(), migrated);
   L.recordLearning(perfect(session()), summary, today);
-  const backup = S.exportAll(); assert.equal(backup.version, 4);
+  const backup = S.exportAll(); assert.equal(backup.version, S.DATA_VERSION);
   S.clearAll(); assert.equal(S.importAll(backup).ok, true);
   const restored = S.loadLearningProgress(); S.importAll(backup);
   assert.deepEqual(S.loadLearningProgress(), restored);

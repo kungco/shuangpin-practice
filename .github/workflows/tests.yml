@@ -38,6 +38,9 @@ jobs:
         working-directory: _test
         run: npm ci
 
+      - name: Install corpus tools
+        run: npm ci --prefix scripts --ignore-scripts
+
       - name: Run all self-check suites
         working-directory: _test
         run: npm test

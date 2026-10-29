@@ -41,7 +41,7 @@ import {
 } from './scheme.js';
 import { isPunct } from './questions.js';
 import { createTraining, observeTraining } from './training.js';
-import { correctedReading } from './reading-fixes.js';
+import { correctedReading, correctContextReadings } from './reading-fixes.js';
 
 /**
  * 两次计时结算之间允许的最大间隔（秒）。
@@ -1539,12 +1539,14 @@ export class PracticeEngine {
     if (!saved || !Array.isArray(saved.questions) || !saved.questions.length) return null;
     try {
       // 旧存档携带缓存的音节编码；升级后也要应用 U/V 别名与已知注音修正。
-      const questions = saved.questions.map(q => !Array.isArray(q.chars) ? q : ({ ...q,
-        chars: q.chars.map(c => {
-          const pinyin = correctedReading(c.ch, c.pinyin);
+      const questions = saved.questions.map(q => {
+        if(!Array.isArray(q.chars))return q;
+        const readings=correctContextReadings(q.chars.map(c=>c.ch).join(''),q.chars.map(c=>c.pinyin));
+        return { ...q, chars: q.chars.map((c,i) => {
+          const pinyin = correctedReading(c.ch, readings[i]);
           return !c.punct && (pinyin !== c.pinyin || /^[jqxy][uv]$/.test(pinyin || ''))
             ? { ...c, pinyin, syl: buildSyllables([pinyin], [c.ch])[0] } : c;
-        }) }));
+        }) };});
       const eng = new PracticeEngine({
         questions,
         training: saved.training,

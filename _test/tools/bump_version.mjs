@@ -31,6 +31,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
  * （这几个文件里版本都出现在开头，第一次出现就是它）。
  */
 const TARGETS = [
+  { file: 'index.html', pattern: /(id="appVersion"[^>]*>v)([^<]+)(<)/, label: '界面版本' },
   {
     file: 'desktop/package-lock.json',
     pattern: /("version"\s*:\s*")([^"]+)(")/,

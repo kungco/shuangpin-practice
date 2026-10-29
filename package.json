@@ -1,12 +1,14 @@
 {
   "name": "shuangpin-practice",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "private": true,
   "description": "小鹤双拼打字练习器。应用本体零依赖、零构建，这个文件的作用见下方 type 字段的说明。",
   "type": "module",
   "//": "type:module 是必需的，不是配置偏好 —— 原因见 README「自检」一节：测试脚本用 import 加载 src/ 下的 ES 模块，而 src/ 在 _test/ 之外，找不到声明时 Node 18/20 会按 CommonJS 解析并报「命名导出不存在」。应用本体在浏览器里跑，不读这个文件。",
   "scripts": {
-    "test": "npm --prefix _test test"
+    "test": "npm --prefix _test test",
+    "corpus:generate": "node scripts/generate-corpus.mjs",
+    "corpus:check": "node scripts/generate-corpus.mjs --check"
   },
   "engines": {
     "node": ">=18"

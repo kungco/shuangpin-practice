@@ -113,6 +113,9 @@ console.log('【2】练习包的设置白名单');
   st.shortcuts = { start: 'Enter' };
   st.duration = 240;
   st.count = 33;
+  st.passageTopic = 'office';
+  st.passageLength = 'long';
+  st.passageFocus = 'all';
   S.saveSettings(st);
 
   const pack = S.exportPack();
@@ -125,6 +128,7 @@ console.log('【2】练习包的设置白名单');
   ok(ps.count === 33, '带上题量');
   ok(ps.scheme !== undefined, '带上双拼方案（材料的编码提示依赖它）');
   ok(ps.strict !== undefined, '带上严格模式设置');
+  ok(ps.passageTopic === 'office' && ps.passageLength === 'long' && ps.passageFocus === 'all', '带上文章主题、篇幅和专项筛选');
 
   /* ---- 个人偏好，绝不能带上 ---- */
   ok(ps.theme === undefined, '不带主题（个人偏好，与材料无关）');
@@ -139,8 +143,10 @@ console.log('【2】练习包的设置白名单');
   /* 白名单机制的价值：将来新增设置时，默认是不进包。
      这一条断言的是「没有用黑名单」—— 若实现改成「整个 settings 减几个键」，
      上面这些 theme/sound 之类很快就会漏出去。 */
-  const keyCount = Object.keys(ps).length;
-  ok(keyCount <= 15, `包里设置项数量受白名单限制（${keyCount} 项 ≤ 15）`);
+  const allowed = new Set(['scheme','mode','duration','count','charTier','trainingPolicy',
+    'phraseCategory','phraseLength','passageTopic','passageLength','passageFocus',
+    'weakBoost','strict','skipPunct','showDecode','reviewDueOnly','dailyPlanMinutes']);
+  ok(Object.keys(ps).every(key => allowed.has(key)), '包里只包含经过确认的练习设置');
 }
 
 /* ============================================================

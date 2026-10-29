@@ -1,6 +1,6 @@
 [package]
 name = "shuangpin-practice"
-version = "1.8.1"
+version = "1.9.0"
 description = "小鹤双拼打字练习器"
 authors = ["kungco"]
 license = "MIT"

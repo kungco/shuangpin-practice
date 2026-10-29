@@ -1,0 +1,6 @@
+{
+  "name": "shuangpin-corpus-tools",
+  "private": true,
+  "type": "module",
+  "dependencies": { "pinyin-pro": "3.29.4" }
+}

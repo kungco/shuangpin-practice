@@ -748,6 +748,14 @@ textarea:focus {
 .prompt.is-passage {
   font-size: 25px; letter-spacing: 2px; line-height: 1.95;
   font-weight: 500;
+  max-height: min(32vh, 260px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  scrollbar-gutter: stable;
 }
 
 /* 拆分输出区 */

@@ -694,7 +694,7 @@ console.log('\n【新增】按键耗时：反应时间测量口径');
   /* ---------- ③ 按错的目标不产样本 ---------- */
   const before = total(eng.stats.keyTimings);
   const cur = eng.currentTarget();
-  const wrongKey = cur.keys[0] === 'x' ? 'y' : 'x';
+  const wrongKey = String(cur.keys[0]).toLowerCase() === 'x' ? 'y' : 'x';
   wait(500);
   eng.pressKey(wrongKey);
   wait(120);

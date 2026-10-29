@@ -13,6 +13,7 @@ import { loadHistory, loadDaily, getWeakList, dateStr, getKeyErrorTotals,
          getKeyTimings, getKeyConfusions, loadKeyConfusions, keyConfusionGrandTotal,
          median } from './storage.js';
 import { LEVEL_MAP } from './questions.js';
+import { comparisonKey } from './comparison.js';
 
 /* ============================================================
    总览
@@ -475,9 +476,11 @@ export function recentBaseline(opts = {}) {
   const min = Math.max(1, Math.floor(Number(opts.min)) || BASELINE_MIN_SAMPLES);
   const mode = opts.mode && opts.mode !== 'all' ? String(opts.mode) : '';
   const exclude = opts.exclude ? String(opts.exclude) : '';
+  const contextKey=comparisonKey(opts.context);
 
   const list = loadHistory()
-    .filter(r => (!mode || r.mode === mode) && (!exclude || r.id !== exclude))
+    .filter(r => (!mode || r.mode === mode) && (!exclude || r.id !== exclude) &&
+      (!contextKey || comparisonKey(r.comparison)===contextKey))
     .sort((a, b) => num(a.ts) - num(b.ts));
 
   // 取最近 window 轮。测验模式题量固定、耗时较长，与日常练习不可比，
@@ -485,7 +488,7 @@ export function recentBaseline(opts = {}) {
   const recent = list.slice(Math.max(0, list.length - window));
 
   const empty = {
-    samples: 0, enough: false,
+    samples: 0, enough: false, min,
     speed: 0, accuracy: 0, speedDelta: 0, accuracyDelta: 0
   };
   if (!recent.length) return empty;
@@ -503,7 +506,7 @@ export function recentBaseline(opts = {}) {
   };
 
   const speed = med1(recent.map(r => r.speed));
-  const accuracy = med1(recent.map(r => r.accuracy));
+  const accuracy = med1(recent.map(r => contextKey ? r.independentAccuracy : r.accuracy));
 
   return {
     samples: recent.length,

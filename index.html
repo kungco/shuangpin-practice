@@ -30,6 +30,7 @@
   })();
 </script>
 <link rel="stylesheet" href="assets/style.css" />
+<link rel="stylesheet" href="assets/free-studio.css" />
 </head>
 <body>
 
@@ -59,6 +60,7 @@
     </nav>
 
     <div class="topbar-right">
+      <span class="app-version" id="appVersion">v1.9.0</span>
       <!-- 明暗快速切换：与设置页的「主题」是同一个设置，改哪边两边都变。
            这里只做浅色 ⇄ 深色二态；「跟随系统」仍在设置页里保留 ——
            顶栏需要的是「现在这一下换个色」，不需要每次都想清楚「跟随」
@@ -86,6 +88,7 @@
 
       <!-- 模式选择面板 -->
       <div class="panel setup-panel" id="setupPanel">
+        <div id="practiceToday" data-practice-page="today">
         <h2 class="panel-title learning-welcome">今天，从一小步开始。</h2>
         <p class="panel-sub">每次练一小组，先按准，再把它变成习惯。</p>
         <div class="resume-hint" id="resumeHint" hidden>
@@ -95,7 +98,7 @@
         </div>
 
         <!-- 小关卡数据在 src/data/learning.js；旧课程仍用于进度迁移与旧存档续练。 -->
-        <div class="course learning-hero" id="courseBox" hidden>
+        <div id="todayCourseSlot"><div class="course learning-hero" id="courseBox" hidden>
           <div class="course-head">
             <span class="course-badge">下一步</span>
             <strong class="course-title" id="courseTitle"></strong>
@@ -103,7 +106,7 @@
           </div>
           <p class="course-goal" id="courseGoal"></p>
           <div id="courseExamples" class="learning-examples" aria-label="本关示例"></div>
-          <p class="course-check" id="courseCheck"></p>
+          <details class="learning-criteria"><summary>查看验收标准</summary><p class="course-check" id="courseCheck"></p></details>
           <div class="course-actions">
             <button class="btn btn-primary btn-lg" id="btnCourseStart" type="button">开始提示练习</button>
             <button class="btn btn-ghost" id="btnLearningTest" type="button">已经会了，直接小测</button>
@@ -111,7 +114,7 @@
           </div>
           <p class="course-note" id="courseNote"></p>
         </div>
-        <div class="learning-overview"><span id="learningOverview"></span>
+        </div><div class="learning-overview"><span id="learningOverview"></span>
           <div class="learning-overview-track" id="learningOverviewTrack" role="progressbar" aria-label="学习路径小测进度" aria-valuemin="0" aria-valuenow="0" aria-valuemax="16"><i id="learningOverviewFill"></i></div>
         </div>
         <p class="footnote" id="learningMigrationNote" hidden>旧版课程进度已保留：已练过的内容可以直接做独立小测，无需重复提示练习。</p>
@@ -119,16 +122,26 @@
           <button type="button" id="btnDueReview"><strong>先复习一下</strong><span id="dueReviewNote">看看最近的易错字词</span></button>
           <button type="button" id="btnOpenShelf"><strong>练自己的内容</strong><span>从书架继续，或粘贴一段文字</span></button>
         </div>
+        <div id="todayPlanSlot"></div><button type="button" class="btn btn-ghost learning-free-link" id="btnFreePractice">自由练习 · 自己选模式与难度</button>
+        </div>
+        <div id="practicePath" data-practice-page="path" hidden>
+          <h2 class="panel-title">学习路径</h2><p class="panel-sub">先认键位，再换字应用；掌握后继续低频回访。</p><div id="pathCourseSlot"></div>
         <details id="learningPath" class="learning-path">
           <summary>学习路径 · 每关专注一小组</summary>
           <div class="learning-path-head"><p>认识 → 提示练习 → 独立小测 → 隔天回访</p><button type="button" class="btn btn-ghost btn-sm" id="btnCoachLibrary">易混规则小课堂</button><button type="button" class="btn btn-ghost btn-sm" id="btnLearningRecommended">回到推荐关卡</button></div>
           <div id="learningLessonList"></div>
         </details>
-        <button type="button" class="btn btn-ghost learning-free-link" id="btnFreePractice">自由练习 · 自己选模式与难度</button>
+
+        </div>
+        <div id="practiceFree" data-practice-page="free" hidden>
         <details id="freePracticePanel" class="free-practice-panel">
-          <summary>自由练习与练习设置</summary>
+          <summary>自由练习 · 留白 / 歌单 / 聊天剧场</summary>
           <div class="free-practice-content">
-            <p class="panel-sub">已有双拼基础？可以直接选择专项、材料或能力测验。</p>
+            <div id="freeStudio"></div>
+            <details id="studioAdvanced" class="studio-advanced">
+              <summary>自己配置 · 全部模式与详细设置</summary>
+              <div class="studio-advanced-content">
+            <p class="panel-sub">词组里可选聊天、办公句子；短文可按主题、篇幅和易错专项筛选。</p>
             <div class="mode-grid" id="modeGrid"></div>
 
         <!-- 选中「能力测验」时才显示 -->
@@ -190,6 +203,7 @@
             <select id="selPhraseCategory" aria-label="词组分类">
               <option value="all">全部分类</option><option value="daily">日常</option>
               <option value="office">办公</option><option value="travel">出行</option><option value="idiom">成语</option>
+              <option value="chat">聊天句子</option><option value="office-sentence">办公句子</option>
             </select>
           </label>
           <label class="field" id="phraseLengthField" hidden>
@@ -197,9 +211,14 @@
             <select id="selPhraseLength" aria-label="词组长度">
               <option value="all">全部长度</option><option value="2">二字 · 入门</option>
               <option value="3">三字 · 进阶</option><option value="4">四字 · 挑战</option>
+              <option value="5+">句子 · 五字以上</option>
             </select>
             <small id="phrasePoolInfo" aria-live="polite"></small>
           </label>
+
+          <label class="field" id="passageTopicField" hidden><span>文章主题</span><select id="selPassageTopic" aria-label="文章主题"></select></label>
+          <label class="field" id="passageLengthField" hidden><span>文章篇幅</span><select id="selPassageLength" aria-label="文章篇幅"></select><small id="passagePoolInfo" aria-live="polite"></small></label>
+          <label class="field" id="passageFocusField" hidden><span>易错专项</span><select id="selPassageFocus" aria-label="易错专项"></select></label>
 
           <label class="field" id="charTierField">
             <span>单字难度</span>
@@ -250,6 +269,8 @@
         </div>
 
             <div class="setup-foot"><button class="btn btn-primary btn-lg" id="btnStart">开始练习</button></div>
+              </div>
+            </details>
           </div>
         </details>
 
@@ -281,6 +302,7 @@
           <div class="mix-reasons" id="mixReasons" aria-live="polite" hidden></div>
         </div>
 
+        </div>
       </div>
 
       <!-- 练习面板 -->

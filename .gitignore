@@ -5,6 +5,7 @@
 # 注意：_test/package.json 与 _test/package-lock.json **要提交**，
 # 它们锁定了依赖版本，保证本地 / CI 装出同一棵树。只忽略装好的目录。
 _test/node_modules/
+scripts/node_modules/
 
 # 视觉验证（tools/shot.mjs）的产物：
 #   - 临时 Chrome profile 落在 _test/.chrome-profile/（脚本按自身位置解析，

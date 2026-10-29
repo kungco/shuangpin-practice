@@ -145,13 +145,13 @@ console.log('✓ all initials/finals covered before weak-key reinforcement');
   console.log('✓ mismatched vetted readings warn instead of failing silently');
 }
 
-assert(PHRASES.every(p => ['daily', 'office', 'travel', 'idiom'].includes(p.c)), 'every phrase has an authored category');
-for (const category of ['daily', 'office', 'travel', 'idiom']) {
-  for (const length of [2, 3, 4]) {
+assert(PHRASES.every(p => ['daily', 'office', 'travel', 'idiom', 'chat', 'office-sentence'].includes(p.c)), 'every phrase has an authored category');
+for (const category of ['daily', 'office', 'travel', 'idiom', 'chat', 'office-sentence']) {
+  for (const length of [2, 3, 4, '5+']) {
     const pool = phrasePool({ phraseCategory: category, phraseLength: length });
     const questions = generateQuestions({ mode: 'phrase', count: 30, phraseCategory: category, phraseLength: length });
     assert.equal(questions.length, pool.length ? 30 : 0);
-    assert(questions.every(q => q.meta.category === category && Array.from(q.text).length === length));
+    assert(questions.every(q => q.meta.category === category && (length === '5+' ? Array.from(q.text).length >= 5 : Array.from(q.text).length === length)));
   }
 }
 const phraseContext = {};

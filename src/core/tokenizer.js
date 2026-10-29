@@ -13,6 +13,7 @@
  */
 
 import { ALL_CHARS, PHRASES } from '../data/pinyin.js';
+import { CONTEXT_READINGS as REVIEWED_CONTEXTS } from '../data/context-readings.js';
 
 /* 词表索引：只保留「全部字都已收录」的词 */
 const wordIndex = {};
@@ -36,6 +37,7 @@ const CONTEXT_READINGS = {
   '觉得': ['jue', 'de'], '舍不得': ['she', 'bu', 'de']
 };
 Object.assign(wordIndex, CONTEXT_READINGS);
+Object.assign(wordIndex, REVIEWED_CONTEXTS);
 
 /** 单字拼音查询 */
 export function pinyinOf(ch) {

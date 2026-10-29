@@ -211,7 +211,10 @@ try {
 
     // 错误路径：按一个错的键，应当不推进（真浏览器里同样要拦住）
     const before = after.ki;
-    const wrong = 'qwertyuiop'.split('').find(c => c !== tgt.key) || 'q';
+    const wrong = (await evaluate(chrome.send, `(()=>{const e=__app.engine,t=e.currentTarget();const allowed=t.syl?.candidates
+      ? t.syl.candidates.filter(c=>c.code.toLowerCase().startsWith(e.typed.toLowerCase())).map(c=>c.keys[t.pos].toLowerCase())
+      :[String(t.keys[t.pos]).toLowerCase()];return [...'abcdefghijklmnopqrstuvwxyz'].find(k=>!allowed.includes(k));})()`)).value;
+    await sleep(12);
     await realKey(chrome, { key: wrong, code: 'Key' + wrong.toUpperCase(), vk: wrong.toUpperCase().charCodeAt(0), text: wrong });
     await sleep(150);   // 给「可能的错误反馈」留出触发机会，再验证确实没推进
     const afterWrong = (await evaluate(chrome.send, `window.__app.engine.keyIndex`)).value;
@@ -414,7 +417,7 @@ try {
     ok(collapsed, '自由模式默认收起，首页突出推荐关卡');
     await click(chrome, '#btnFreePractice');
     const free = (await evaluate(chrome.send, `({ open: document.querySelector('#freePracticePanel').open,
-      height: document.querySelector('#modeGrid').offsetHeight, width: document.documentElement.scrollWidth })`)).value;
+      height: document.querySelector('#freeStudio').offsetHeight, width: document.documentElement.scrollWidth })`)).value;
     ok(free?.open && free.height > 0 && free.width <= NARROW_W + 1, '展开自由练习后模式可见且无横向滚动');
     await click(chrome, '#btnLearningPath');
     const path = (await evaluate(chrome.send, `({ count: document.querySelectorAll('[data-lesson]').length,

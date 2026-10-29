@@ -46,6 +46,7 @@ PAYLOAD = [
     "index.html",
     "启动双拼练习.bat",
     "assets/style.css",
+    "assets/free-studio.css",
     "LICENSE",
     # 启动辅助脚本 —— 少一个 .bat 就无法工作
     "_test/probe-service.ps1",
